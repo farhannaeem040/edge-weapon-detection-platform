@@ -83,7 +83,7 @@ In a real-world deployment, these would typically be distinct individuals with d
 4. Based on this evidence, the operator either:
    - Acknowledges the alert as a genuine security incident, or
    - Marks the alert as a False Positive.
-5. If escalation is required, the operator can trigger a remote siren on the Jetson device.
+5. If escalation is required, the operator can trigger a remote siren on the Jetson device, and can stop the siren once escalation is no longer needed.
 6. The operator can download the snapshot for reporting or evidence purposes.
 7. The AI system assists by detecting potential threats; the final security decision is always made by the operator.
 
@@ -121,7 +121,7 @@ Independent of any active alert, the operator can select any registered branch a
 - Administrator-driven branch and device registration using a server-issued Activation Key.
 - Centralized alert management with a simple lifecycle: New → Acknowledged or False Positive.
 - Access to live camera streams both for alert verification and routine surveillance.
-- Remote siren activation for escalation.
+- Remote siren activation and deactivation for escalation.
 - Device and pipeline health monitoring, distinct from weapon-detection alerts.
 - Historical, filterable reporting on alerts and device health.
 
@@ -138,7 +138,7 @@ The prototype includes:
 - One NVIDIA Jetson Orin Nano, one primary RTSP camera.
 - A single Admin login representing both conceptual user roles.
 - Branch and device onboarding via Activation Key.
-- Alert generation, review, acknowledgment, false-positive marking, snapshot download, and remote siren trigger.
+- Alert generation, review, acknowledgment, false-positive marking, snapshot download, and remote siren trigger and stop.
 - Routine live-stream monitoring independent of alerts.
 - Device health monitoring (online/offline status, last heartbeat, pipeline and camera status).
 - Store-and-forward offline event synchronization.

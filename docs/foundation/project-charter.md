@@ -8,7 +8,7 @@
 | Project | Edge-Based Weapon Detection and Centralized Monitoring System Using NVIDIA Jetson and DeepStream |
 | Owner | Farhan Naeem |
 | Reviewers | Farhan Naeem, ChatGPT, Claude Code |
-| Last Updated | 10 July 2026 |
+| Last Updated | 11 July 2026 (technology-reference correction only — see §4, §6, §12) |
 
 ---
 
@@ -64,7 +64,7 @@ The proposed solution is an integrated Edge AI surveillance platform consisting 
 
 Each branch will contain an NVIDIA Jetson Orin Nano running:
 
-- A Flask-based Jetson Agent
+- A Flask-based Jetson Agent *(original technology proposal at project initiation; superseded by FastAPI — see Architecture Decision 1 / ADR-00X in ARCH-001)*
 - NVIDIA DeepStream
 - A fine-tuned YOLO26 TensorRT engine
 - Local recording and logging services
@@ -131,7 +131,7 @@ The prototype includes:
 - NVIDIA Jetson Orin Nano
 - DeepStream inference
 - TensorRT engine
-- Flask Agent
+- FastAPI Agent *(corrected from "Flask Agent" — controlled baseline alignment per Architecture Decision 1 / ADR-00X)*
 
 ## Backend
 
@@ -224,7 +224,7 @@ These items may be considered as future work.
 - Fine-tuned YOLO26 model
 - TensorRT inference engine
 - NVIDIA DeepStream pipeline
-- Flask Jetson Agent
+- FastAPI Jetson Agent *(corrected from "Flask Jetson Agent" — controlled baseline alignment per Architecture Decision 1 / ADR-00X)*
 - ASP.NET Core backend
 - Angular dashboard
 - SQL Server database

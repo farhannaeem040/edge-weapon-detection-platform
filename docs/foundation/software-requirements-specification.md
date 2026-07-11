@@ -22,7 +22,7 @@ This SRS translates the Vision (VIS-001) into specific, testable requirements. I
 
 ### 1.2 Scope
 
-This SRS covers the dissertation prototype only, consisting of: one NVIDIA Jetson Orin Nano running a Flask-based Jetson Agent, DeepStream, and a fine-tuned YOLO26/TensorRT detection pipeline; one RTSP camera; an ASP.NET Core backend with SQL Server; and an Angular operator dashboard, deployed on a local network with a single Admin login.
+This SRS covers the dissertation prototype only, consisting of: one NVIDIA Jetson Orin Nano running a FastAPI-based Jetson Agent, DeepStream, and a fine-tuned YOLO26/TensorRT detection pipeline; one RTSP camera; an ASP.NET Core backend with SQL Server; and an Angular operator dashboard, deployed on a local network with a single Admin login.
 
 ### 1.3 Definitions, Acronyms, and Abbreviations
 
@@ -115,8 +115,11 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | FR-DET-009 | The Operator shall be able to set an alert's status to "False Positive." |
 | FR-DET-010 | The Operator shall be able to trigger a remote siren command on the alert's associated Jetson device. |
 | FR-DET-011 | The Operator shall be able to download an alert's snapshot image. |
+| FR-DET-012 | The Operator shall be able to stop an active remote siren command on the alert's associated Jetson device. |
 
-**Acceptance Criteria**: A detection at or above the configured threshold produces exactly one alert visible on the dashboard with all required fields populated; a detection below threshold produces no alert; an operator can transition an alert from New to Acknowledged or False Positive and the change persists; a siren command issued by the operator is delivered to the correct device; snapshot download returns the correct image for the alert.
+**Acceptance Criteria**: A detection at or above the configured threshold produces exactly one alert visible on the dashboard with all required fields populated; a detection below threshold produces no alert; an operator can transition an alert from New to Acknowledged or False Positive and the change persists; a siren command issued by the operator is delivered to the correct device; a siren-stop command issued by the operator is delivered to the correct device and halts an active siren activation; snapshot download returns the correct image for the alert.
+
+**Note on Operational Capabilities**: The Jetson Agent additionally exposes operational capabilities — including restarting the DeepStream pipeline, restarting the Jetson Agent itself, and reloading configuration on demand — that are used for system administration and future extensibility. These are architectural capabilities of the Jetson Agent's REST API, not operator-facing business features, and are intentionally not expressed as Functional Requirements in this document. They are addressed in the Architecture document only and are out of scope for the dashboard/Operator role in this prototype.
 
 ### 3.4 Routine Live Monitoring (MON)
 
@@ -142,7 +145,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 
 | ID | Requirement |
 |----|-------------|
-| FR-SYN-001 | The Jetson Agent shall continue local detection, logging, recording, and siren activation during a loss of connectivity to the server. |
+| FR-SYN-001 | The Jetson Agent shall continue local detection, logging, recording, and offline event buffering during a loss of connectivity to the server. An already-active siren shall continue according to the Jetson Agent's local behavior until stopped locally or by its own safety policy. New remote siren trigger/stop commands require connectivity to the backend and are therefore unavailable while the device is disconnected. |
 | FR-SYN-002 | The Jetson Agent shall store detection events generated while disconnected, including timestamp, weapon type, confidence score, camera information, snapshot image, recording reference, and event identifier. |
 | FR-SYN-003 | Upon restored connectivity, the Jetson Agent shall synchronize all locally stored, unsent events to the server. |
 | FR-SYN-004 | The server shall preserve the original detection timestamp of synchronized events, regardless of upload delay. |
@@ -180,10 +183,12 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 |----|----------|-------------|
 | NFR-PRF-001 | Performance | End-to-end latency from detection to the alert appearing on the dashboard shall be under 5 seconds under normal local-network conditions with one active camera and one concurrent alert. |
 | NFR-PRF-002 | Performance | The Jetson Agent shall perform inference at a frame rate sufficient to support real-time detection on the target hardware (specific FPS target to be validated during model/pipeline evaluation, not fixed here). |
-| NFR-REL-001 | Reliability | Local detection, logging, recording, and siren activation shall continue uninterrupted during loss of server connectivity. |
+| NFR-REL-001 | Reliability | Local detection, logging, recording, and offline event buffering shall continue uninterrupted during loss of server connectivity. An already-active siren shall continue according to the Jetson Agent's local behavior until stopped locally or by its own safety policy; new remote siren trigger/stop commands are unavailable while the device is disconnected. |
 | NFR-REL-002 | Reliability | No detection event generated during an outage shall be lost; all shall be recoverable via synchronization once connectivity is restored. |
 | NFR-SEC-001 | Security | All dashboard and API access (excluding login and Jetson activation) shall require an authenticated session. |
-| NFR-SEC-002 | Security | Jetson Agent-to-server communication shall use an Activation Key for device authentication. |
+| NFR-SEC-002 | Security | The Jetson Agent shall use a one-time Activation Key for initial device activation. Upon successful activation, the Backend shall issue a persistent Device ID and shared secret, which shall authenticate subsequent Agent-to-Backend operational requests. *(Corrected — approved requirements-baseline alignment resulting from Architecture Decision 2 (amended); see Section 9 Traceability Matrix.)* |
+| NFR-SEC-003 | Security | The Jetson Agent shall authenticate and authorize each command request received from the ASP.NET Core backend before executing it. |
+| NFR-SEC-004 | Security | The Jetson Agent shall only provide live video streams to authenticated and authorized dashboard users. Direct browser-to-Jetson live stream access shall require authorization issued by the central backend. |
 | NFR-MNT-001 | Maintainability | The system shall maintain a clear separation of concerns between the AI/detection component, edge agent, backend, and frontend, consistent with the Engineering Principles. |
 | NFR-USB-001 | Usability | All information required for an operator to decide between Acknowledge and False Positive shall be presented within the alert detail view, without requiring navigation to another screen. |
 | NFR-TST-001 | Testability | Each functional requirement in this document shall be independently verifiable via a defined acceptance criterion (see Section 3 and Section 9). |
@@ -202,6 +207,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | BR-005 | A missed-heartbeat health event is categorically distinct from a weapon-detection alert and must never be presented to the operator as if it were one. |
 | BR-006 | Full video recordings remain local to the Jetson device at all times; only snapshot images and metadata are ever transmitted to the server. |
 | BR-007 | The final decision on whether a detection constitutes a genuine security threat rests solely with the human operator; the AI system's role is limited to detection and alert generation. |
+| BR-008 | The Jetson Agent shall only accept and execute commands originating from its registered central server; requests from any other source shall be rejected. |
 
 ---
 
@@ -214,7 +220,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | CON-003 | One Jetson Orin Nano device available for testing. |
 | CON-004 | One primary RTSP camera for proof-of-concept. |
 | CON-005 | Local network deployment only; no cloud-hosted inference or internet-facing deployment. |
-| CON-006 | Fixed technology stack: YOLO26, NVIDIA DeepStream, TensorRT, Jetson Orin Nano, ASP.NET Core, Angular, SQL Server, Flask-based Jetson Agent. |
+| CON-006 | Fixed technology stack: YOLO26, NVIDIA DeepStream, TensorRT, Jetson Orin Nano, ASP.NET Core, Angular, SQL Server, FastAPI-based Jetson Agent. *(Corrected from "Flask-based" — approved requirements-baseline correction resulting from Architecture Decision 1 / ADR-00X; see Section 9 Traceability Matrix.)* |
 | CON-007 | Multi-tenant deployment, multiple Jetson devices per branch, and multiple user roles are explicitly out of scope for this phase. |
 
 ---
@@ -230,6 +236,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | ASM-005 | A single Admin credential is an acceptable stand-in for two real-world roles for the purpose of this dissertation demonstration. |
 | ASM-006 | Physical installation (installer manually configuring the Activation Key on the device) is performed out-of-band and is not automated by the system. |
 | ASM-007 | Sufficient local storage exists on the Jetson device to support continuous recording under the defined retention period. |
+| ASM-008 | The central server is able to resolve a working network address for each registered Jetson device and communicate with it directly over the local network when issuing commands. |
 
 ---
 
@@ -247,7 +254,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 
 ### 8.3 Software Interfaces
 
-- REST API between Jetson Agent and ASP.NET Core server (activation, heartbeat/health, alert submission, configuration retrieval, command retrieval).
+- Bidirectional REST communication between the Jetson Agent and the ASP.NET Core server, comprising two independent APIs: the server's REST API (Agent-initiated: activation, heartbeat/health, alert submission, snapshot upload, offline event synchronization, configuration retrieval, command result reporting) and the Jetson Agent's own secured REST API (server-initiated: immediate command delivery, e.g., siren control). Command execution results reported by the Jetson Agent are used by the backend for operational logging, auditing, and troubleshooting purposes in this prototype; they are not a distinct operator-facing dashboard feature.
 - SQL Server database accessed by the ASP.NET Core backend.
 - DeepStream/TensorRT runtime invoked by the Jetson Agent.
 
@@ -263,7 +270,7 @@ The following items are intentionally **not** specified as requirements in this 
 - **Siren actuation mechanism** (FR-DET-010): whether the Jetson drives a physical GPIO-connected siren, a networked relay, or a simulated/logged action for demonstration purposes, is an architectural decision.
 - **Configuration synchronization transport** (FR-SYN-005, FR-SYN-006): whether configuration checks are piggybacked on the heartbeat cycle or use a separate channel, and the local persistence format used to survive a restart, are architectural decisions.
 - **Snapshot and recording storage mechanism**: filesystem vs. database BLOB vs. object storage for the server-side snapshot store is an architectural decision, constrained by BR-006 and FR-REC-003.
-- **Device identity mechanism** (FR-BRN-007): the specific form of persistent device identity (e.g., generated device ID, certificate, token) is an architectural decision, not a requirement.
+- **Device identity mechanism** (FR-BRN-007): the specific form of persistent device identity (e.g., generated device ID, certificate, token) is an architectural decision, not a requirement. *Resolved in Architecture: persistent Device ID assigned at activation, with the server resolving current IP/hostname dynamically for command delivery.*
 - **AI model architecture and inference runtime** (FR-DET-001): the specific model, framework, and runtime used for on-device detection is an architectural/implementation decision, constrained only by the functional behavior specified in this SRS.
 - **API design**: the shape, versioning, and protocol style of the REST APIs between the Jetson Agent, server, and dashboard (endpoint structure, request/response schemas, authentication headers, error formats) is an architectural decision, not specified by this SRS.
 - **Database schema**: the specific SQL Server table structure, normalization approach, indexing, and entity relationships used to satisfy the functional requirements in Section 3 are architectural decisions, not specified by this SRS.
@@ -276,7 +283,7 @@ The following items are intentionally **not** specified as requirements in this 
 |--------------------|-------------------------------------|----------------------|
 | FR-AUT-001–003 | Charter §4 (Proposed Solution); Vision §4, §7 | Single Admin login (approved) |
 | FR-BRN-001–006 | Charter §4; Vision §5.1, §7 | Activation Key regeneration/reset (approved refinement) |
-| FR-DET-001–011 | Charter §4, §5; Vision §5.2, §7 | Configurable confidence threshold with default (approved refinement) |
+| FR-DET-001–012 | Charter §4, §5; Vision §5.2 (revised), §6 (revised), §7 | Configurable confidence threshold with default; siren trigger/stop (approved refinement) |
 | FR-MON-001 | Vision §5.3, §7 | Live stream protocol deferred to Architecture (approved refinement) |
 | FR-HLT-001–005 | Charter §4; Vision §5.4, §7 | Configurable heartbeat (30–60s default), 3 missed = offline (approved refinement) |
 | FR-SYN-001–005 | Vision §5.5, §7; Vision §6 | Automatic configuration sync (new approved requirement) |
@@ -284,13 +291,15 @@ The following items are intentionally **not** specified as requirements in this 
 | FR-RPT-001–004 | Charter §6; Vision §5.6, §7 | Tabular/filterable, no analytics (approved) |
 | NFR-PRF-001 | Vision §9 (Success Criteria) | <5s latency target (approved refinement) |
 | NFR-REL-001–002 | Vision §5.5, §9 | Store-and-forward resilience (approved) |
-| NFR-SEC-001–002 | Charter §4 ("secure REST APIs") | Activation Key + session auth (approved) |
+| NFR-SEC-001–004 | Charter §4 ("secure REST APIs") | Session auth (JWT) + one-time Activation Key with persistent Device ID/shared-secret for ongoing bidirectional authentication + authorized direct-stream access (approved refinement; NFR-SEC-002 corrected per Architecture Decision 2 amendment) |
 | NFR-MNT-001 | Engineering Principles; Vision §9 | Separation of concerns (approved) |
 | NFR-USB-001 | Vision §5.2 | Single-view decision support (approved) |
 | NFR-CFG-001 | Refinement session | Heartbeat/confidence configurability (approved refinement) |
 | BR-001–007 | Vision §4, §5, §6 | Derived directly from approved Vision workflows |
+| BR-008 | Requirements Refinement Session (bidirectional communication clarification) | Command-source restriction (approved refinement) |
 | CON-001–007 | Charter §10; Charter §7 | Direct from Charter |
 | ASM-001–007 | Charter §9 | Direct from Charter |
+| ASM-008 | Requirements Refinement Session (Device ID + IP/hostname resolution clarification) | Server-to-Agent addressability (approved refinement) |
 
 ---
 
