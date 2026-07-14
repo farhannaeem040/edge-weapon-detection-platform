@@ -156,7 +156,8 @@ Jwt__AccessTokenLifetimeMinutes
 Notes:
 
 - All four values (issuer, audience, signing key, lifetime) are validated at application startup — a missing, blank, or insufficiently strong value fails startup immediately with a clear error, rather than remaining dormant until the first token is issued.
-- T-07 only issues tokens. Verifying a presented token, enforcing authentication middleware, and creating/revoking the corresponding `AdminSession` record are implemented in later tasks.
+- The same validated values are used both to sign tokens (`JwtIssuer`) and to verify them (the authentication middleware, task T-10), so the two can never drift apart.
+- Revoking a session (logout) is implemented in a later task.
 - No refresh-token flow exists in this prototype — a new login is required once a token expires.
 
 ### Login Endpoint
@@ -174,7 +175,29 @@ Invoke-RestMethod `
   }'
 ```
 
-Invalid credentials (unknown identifier or wrong password) return `401 Unauthorized` with the same generic error for both cases — the response never reveals which one was wrong. This endpoint is not yet protected by bearer authentication middleware (a later task); it is the only route that issues a session.
+Invalid credentials (unknown identifier or wrong password) return `401 Unauthorized` with the same generic error for both cases — the response never reveals which one was wrong.
+
+### Protected Endpoints
+
+Every endpoint is protected by Admin JWT authentication **by default** (`specs/implementation-plans/IP-01-backend-angular-foundation.md` task T-10). A protected request must present the access token from login as a Bearer token:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://localhost:5230/api/v1/<protected-route>" `
+  -Headers @{ Authorization = "Bearer <access-token>" }
+```
+
+A request passes only if **both** checks succeed: the JWT's signature, issuer, audience, and expiry are valid, **and** the `AdminSession` record named by its `jti` claim exists, belongs to the same Admin, is unexpired, and has not been revoked. Discarding a token in the browser therefore does not invalidate it — only the server-side session record does (FS-01 §10).
+
+Every failure — no `Authorization` header, a malformed or wrongly-signed token, an expired token, a token with no `jti`, an unknown or mismatched session, or a revoked session — returns `401 Unauthorized` with the same generic error envelope. The response never reveals which check failed.
+
+Two routes are exempt, and each opts out explicitly with `[AllowAnonymous]`:
+
+- `POST /api/v1/auth/login` — it is what issues a session, so it cannot require one (FS-01 §9.1).
+- `GET /api/v1/health` — the temporary T-01 scaffolding probe, which exposes no data beyond a fixed `"Healthy"` literal.
+
+`POST /api/v1/activate` will be added as a third exemption in a later task; it is authenticated by the Activation Key itself rather than by an Admin JWT (FS-02 §10.4). Any endpoint added without an authorization attribute is protected by the fallback policy, so a forgotten `[Authorize]` cannot silently expose a route.
 
 ### Run
 

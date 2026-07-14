@@ -45,8 +45,9 @@ public static class DependencyInjection
             .ValidateOnStart();
         services.AddSingleton<IJwtIssuer, JwtIssuer>();
 
-        // Depends on the (scoped) DbContext, so it must be scoped itself.
+        // Depend on the (scoped) DbContext, so they must be scoped themselves.
         services.AddScoped<IAuthService, AuthService>();
+        services.AddScoped<IAdminSessionValidator, AdminSessionValidator>();
 
         return services;
     }

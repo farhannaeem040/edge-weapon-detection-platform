@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using WeaponDetection.Api.Contracts;
 using WeaponDetection.Api.Filters;
+using WeaponDetection.Api.Security;
 using WeaponDetection.Application.Interfaces;
 using WeaponDetection.Infrastructure;
 
@@ -15,6 +16,13 @@ builder.Services
     // {success, message, data} on success, {success, message, errorCode} on failure.
     .AddJsonOptions(options =>
         options.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
+
+// The same omit-nulls rule for envelopes written outside MVC's formatters — specifically the 401
+// produced by ApiEnvelopeAuthorizationResultHandler, which is emitted by the authorization
+// middleware before MVC is ever reached. Without this, that one response would carry a stray
+// "data": null and diverge from every other error envelope.
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
 
 builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
@@ -48,6 +56,10 @@ if (string.IsNullOrWhiteSpace(connectionString))
 
 builder.Services.AddInfrastructure(connectionString, builder.Configuration);
 
+// JWT Bearer validation + the AdminSession revocation check, applied to every endpoint that does
+// not explicitly opt out with [AllowAnonymous] (IP-01 §12, T-10).
+builder.Services.AddAdminAuthentication();
+
 var app = builder.Build();
 
 // Provisions the single AdminUser account (IP-01 §6) if none exists yet. Runs to completion
@@ -63,11 +75,15 @@ using (var startupScope = app.Services.CreateScope())
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+    // The OpenAPI document describes the API surface rather than exposing its data, and is only
+    // mapped in Development — it is exempted from the fallback authorization policy so the
+    // document stays reachable from a browser/Swagger UI during local development.
+    app.MapOpenApi().AllowAnonymous();
 }
 
 // HTTPS redirection intentionally omitted: ARCH-001 §9.1/§15.6 (ADR-002, amended) specifies
 // HTTP-only for this trusted-LAN prototype; HTTPS is deferred to future hardening (ARCH-001 §28.2).
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

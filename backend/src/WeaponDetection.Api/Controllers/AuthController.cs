@@ -1,13 +1,12 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using WeaponDetection.Api.Contracts;
 using WeaponDetection.Application.Interfaces;
 
 namespace WeaponDetection.Api.Controllers;
 
-// FS-01 §9.1, IP-01 §10/T-09. This route is exempt from JWT authentication (no middleware
-// exists yet, so every route is currently anonymously accessible — bearer enforcement is a
-// later task). All orchestration (credential verification, token issuance, session creation)
-// stays in IAuthService; this controller only translates its result to HTTP.
+// FS-01 §9.1, IP-01 §10/T-09. All orchestration (credential verification, token issuance,
+// session creation) stays in IAuthService; this controller only translates its result to HTTP.
 [ApiController]
 [Route("api/v1/auth")]
 public class AuthController : ControllerBase
@@ -19,6 +18,11 @@ public class AuthController : ControllerBase
         _authService = authService;
     }
 
+    // The one endpoint permanently exempt from Admin JWT authentication (FS-01 §9.1, AC-4): it
+    // is what issues a session, so it cannot require one. The exemption is explicit because the
+    // application's fallback policy (T-10) otherwise protects every endpoint by default. It still
+    // passes through the standard validation and response-envelope pipeline.
+    [AllowAnonymous]
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequestDto request, CancellationToken cancellationToken)
     {

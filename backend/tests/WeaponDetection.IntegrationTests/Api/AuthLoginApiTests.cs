@@ -19,6 +19,7 @@ namespace WeaponDetection.IntegrationTests.Api;
 // No test in this file prints a plaintext password or complete access token to console/log
 // output; assertions compare values in-memory only, and one test explicitly asserts the
 // password never appears in a response body.
+[Collection(ApiHostCollection.Name)]
 public class AuthLoginApiTests : IClassFixture<AuthLoginApiFactory>, IDisposable
 {
     private readonly AuthLoginApiFactory _factory;
@@ -270,9 +271,9 @@ public class AuthLoginApiTests : IClassFixture<AuthLoginApiFactory>, IDisposable
     [Fact]
     public async Task Login_EndpointIsAnonymouslyAccessible_NoBearerTokenRequired()
     {
-        // No Authorization header attached at all — the request must still be evaluated by
-        // the endpoint itself (not rejected upstream by any bearer-authentication middleware,
-        // which does not exist yet).
+        // FS-01 AC-4. No Authorization header attached at all — the request must still be
+        // evaluated by the endpoint itself, not rejected upstream by the bearer-authentication
+        // middleware that T-10 applies to every other endpoint by default.
         var (response, _) = await PostLoginAsync(_client, new
         {
             credentialIdentifier = AuthLoginApiFactory.AdminIdentifier,
