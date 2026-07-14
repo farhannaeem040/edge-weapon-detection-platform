@@ -3,7 +3,6 @@ using WeaponDetection.Domain;
 
 namespace WeaponDetection.Infrastructure.Persistence;
 
-// Device/ActivationKey (T-13) are added, together with migration M3, in a later task.
 public class WeaponDetectionDbContext : DbContext
 {
     public WeaponDetectionDbContext(DbContextOptions<WeaponDetectionDbContext> options)
@@ -15,6 +14,8 @@ public class WeaponDetectionDbContext : DbContext
     public DbSet<AdminSession> AdminSessions => Set<AdminSession>();
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Camera> Cameras => Set<Camera>();
+    public DbSet<Device> Devices => Set<Device>();
+    public DbSet<ActivationKey> ActivationKeys => Set<ActivationKey>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

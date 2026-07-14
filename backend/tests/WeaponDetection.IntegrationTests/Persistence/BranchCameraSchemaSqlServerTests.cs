@@ -64,17 +64,12 @@ public class BranchCameraSchemaSqlServerTests : IClassFixture<BranchCameraSchema
         Assert.Contains("AdminSessions", tableNames);
     }
 
-    [Fact]
-    public void Migration_CreatesNoDeviceOrActivationKeyTable()
-    {
-        // Those tables belong to M3/T-13. Their absence here is what proves T-12 stayed in scope.
-        using var context = BranchCameraSchemaSqlServerFixture.CreateContext();
-
-        var tableNames = GetTableNames(context);
-
-        Assert.DoesNotContain("Devices", tableNames);
-        Assert.DoesNotContain("ActivationKeys", tableNames);
-    }
+    // A test asserting that no Devices/ActivationKeys table exists lived here while T-12 was the
+    // newest migration, to prove T-13's schema had not leaked into M2. M3 now exists, and this
+    // fixture migrates to the latest schema, so that claim is no longer true *of this database*.
+    // The guarantee it protected — that M2 alone creates neither table — is now made where it
+    // remains meaningful: DeviceActivationKeySchemaSqlServerTests.Migration_RollsBackToM2_
+    // AndReappliesCleanly rolls the schema back to M2 and asserts both tables disappear.
 
     [Fact]
     public void Migration_SeedsNoBranchOrCameraData()

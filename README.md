@@ -270,22 +270,32 @@ To apply migrations against your **real** local development database (rather tha
 |---|-----------|------|------|
 | M1 | `InitialAdminSchema` | `AdminUsers`, `AdminSessions` | T-03 |
 | M2 | `BranchCameraSchema` | `Branches`, `Cameras` | T-12 |
+| M3 | `DeviceAndActivationKeySchema` | `Devices`, `ActivationKeys` | T-13 |
 
-Apply everything, roll back M2 (leaving the Admin schema in place), then reapply it:
+Apply everything, roll back M3 (leaving the Branch/Camera and Admin schemas in place), then reapply it:
 
 ```
 dotnet ef database update --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
-dotnet ef database update InitialAdminSchema --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
+dotnet ef database update BranchCameraSchema --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
 dotnet ef database update --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
 ```
 
-Rolling back to `InitialAdminSchema` drops only `Branches` and `Cameras`; `0` would instead roll back to an empty database. Verify what is applied with `dotnet ef migrations list`, and confirm the model and the migrations have not drifted apart with:
+Each migration's `Down` drops only its own tables: rolling back to `BranchCameraSchema` drops `Devices` and `ActivationKeys` but leaves `Branches`/`Cameras` intact, and rolling back further to `InitialAdminSchema` drops those two as well. `0` would instead roll back to an empty database. Verify what is applied with `dotnet ef migrations list`, and confirm the model and the migrations have not drifted apart with:
 
 ```
 dotnet ef migrations has-pending-model-changes --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
 ```
 
-No migration seeds any data — not the Admin account (provisioned at startup, see above) and not branches or cameras.
+No migration seeds any data — not the Admin account (provisioned at startup, see above), and not branches, cameras, devices, or Activation Keys.
+
+#### Device Schema Notes (M3)
+
+Two constraints in M3 are easy to misread, so they are worth stating explicitly (FS-02 §1.3, IP-01 §4):
+
+- **`Devices.BranchId` carries a plain unique index.** A branch has exactly one device (BR-002/CON-007), so the database — not a service-layer check — rejects a second one. This is the deliberate opposite of `Cameras.BranchId`, whose index is *not* unique, because a branch owns one or more cameras.
+- **`Devices.DeviceId` carries a unique index _filtered_ to `WHERE [DeviceId] IS NOT NULL`.** `DeviceId` is the external identity an Agent presents; it is `NULL` from branch creation until the device first activates. SQL Server treats `NULL`s as equal for uniqueness, so an *unfiltered* unique index would accept the first unactivated device and reject every one after it. The filter confines uniqueness to devices that have actually activated — which is where it is needed, since a `DeviceId` is assigned exactly once and then retained across every reactivation (FS-02 AC-7).
+
+The internal `Devices.DeviceRecordId` primary key is never returned by any API, and the `ActivationKeys.DeviceRecordId` foreign key points at it rather than at `DeviceId` — which does not exist yet at the moment a key is issued.
 
 ## Frontend
 

@@ -139,15 +139,9 @@ public class BranchCameraSchemaModelTests
         Assert.False(entityType.FindProperty(nameof(Camera.Enabled))!.IsNullable);
     }
 
-    [Fact]
-    public void Model_ContainsNoDeviceOrActivationKeyEntity()
-    {
-        // T-13 work must not have leaked into T-12.
-        using var context = CreateContext();
-
-        var entityNames = context.Model.GetEntityTypes().Select(e => e.ClrType.Name).ToList();
-
-        Assert.DoesNotContain("Device", entityNames);
-        Assert.DoesNotContain("ActivationKey", entityNames);
-    }
+    // A test asserting the model contained no Device/ActivationKey entity lived here while T-12 was
+    // the newest task, to prove T-13's work had not leaked into it. T-13 has since added both
+    // entities deliberately, so the assertion is now false by design. Their mapping is verified in
+    // DeviceActivationKeySchemaModelTests; the Branch/Camera expectations above are unchanged and
+    // still guard this schema.
 }
