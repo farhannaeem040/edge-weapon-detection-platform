@@ -264,6 +264,29 @@ CLI discovery does not require a real database connection or the runtime `Connec
 
 To apply migrations against your **real** local development database (rather than the design-time placeholder), set `EFCORE_DESIGNTIME_CONNECTION` to the same value as your `ConnectionStrings:DefaultConnection` user-secret before running `dotnet ef database update` — otherwise the design-time factory's placeholder connection is used, which is intentional for `migrations add`/`dbcontext info` but must be overridden for `database update` to target your real database.
 
+#### Current Migrations
+
+| # | Migration | Adds | Task |
+|---|-----------|------|------|
+| M1 | `InitialAdminSchema` | `AdminUsers`, `AdminSessions` | T-03 |
+| M2 | `BranchCameraSchema` | `Branches`, `Cameras` | T-12 |
+
+Apply everything, roll back M2 (leaving the Admin schema in place), then reapply it:
+
+```
+dotnet ef database update --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
+dotnet ef database update InitialAdminSchema --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
+dotnet ef database update --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
+```
+
+Rolling back to `InitialAdminSchema` drops only `Branches` and `Cameras`; `0` would instead roll back to an empty database. Verify what is applied with `dotnet ef migrations list`, and confirm the model and the migrations have not drifted apart with:
+
+```
+dotnet ef migrations has-pending-model-changes --project src/WeaponDetection.Infrastructure --startup-project src/WeaponDetection.Api
+```
+
+No migration seeds any data — not the Admin account (provisioned at startup, see above) and not branches or cameras.
+
 ## Frontend
 
 Not yet scaffolded — added in a later Implementation Plan task.
