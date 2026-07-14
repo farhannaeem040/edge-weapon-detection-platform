@@ -157,8 +157,8 @@ Notes:
 
 - All four values (issuer, audience, signing key, lifetime) are validated at application startup — a missing, blank, or insufficiently strong value fails startup immediately with a clear error, rather than remaining dormant until the first token is issued.
 - The same validated values are used both to sign tokens (`JwtIssuer`) and to verify them (the authentication middleware, task T-10), so the two can never drift apart.
-- Revoking a session (logout) is implemented in a later task.
-- No refresh-token flow exists in this prototype — a new login is required once a token expires.
+- A session is revoked server-side by `POST /api/v1/auth/logout` (see below), which is what makes an issued token stop working.
+- No refresh-token flow exists in this prototype — a new login is required once a token expires or is revoked.
 
 ### Login Endpoint
 
@@ -176,6 +176,24 @@ Invoke-RestMethod `
 ```
 
 Invalid credentials (unknown identifier or wrong password) return `401 Unauthorized` with the same generic error for both cases — the response never reveals which one was wrong.
+
+### Logout Endpoint
+
+`POST /api/v1/auth/logout` (`specs/implementation-plans/IP-01-backend-angular-foundation.md` task T-11) revokes the session named by the presented token. It takes no request body — the session to revoke is identified by the token's own `jti` claim, so a client can never ask the Backend to revoke someone else's session:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:5230/api/v1/auth/logout" `
+  -Headers @{ Authorization = "Bearer <access-token>" }
+```
+
+Logout is itself a protected endpoint, which has two consequences worth knowing:
+
+- After a successful logout, the same token — including any copy of it made *before* logout — is rejected with `401 Unauthorized` on every endpoint. Revocation is enforced by the server-side `AdminSession` record, not by the client discarding its token (FS-01 AC-5, AC-6).
+- A second logout attempt with that same, now-revoked token is therefore also rejected with `401 Unauthorized`. No new session is created, and the revoked record is not reactivated (FS-01 §5.4).
+
+Only the session presented is revoked; any other active session for the Admin (e.g. a second browser) continues to work.
 
 ### Protected Endpoints
 

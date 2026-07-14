@@ -55,7 +55,7 @@ public class AuthServiceTests : IDisposable
             }),
             TimeProvider.System);
 
-        _authService = new AuthService(_dbContext, _passwordHasher, jwtIssuer);
+        _authService = new AuthService(_dbContext, _passwordHasher, jwtIssuer, TimeProvider.System);
     }
 
     public void Dispose()
@@ -264,5 +264,203 @@ public class AuthServiceTests : IDisposable
 
         Assert.DoesNotContain(AdminPassword, result.AccessToken!);
         Assert.DoesNotContain(admin.PasswordHash, result.AccessToken!);
+    }
+
+    // --- Logout / session revocation (IP-01 T-11; FS-01 §5.4, AC-5, AC-6) ---
+
+    // Logs in for real and returns the id of the session the issued token actually names, so the
+    // logout tests below revoke exactly the session a client would be presenting — not a
+    // hand-seeded stand-in.
+    private async Task<Guid> LoginAndGetSessionIdAsync()
+    {
+        var result = await _authService.LoginAsync(_adminIdentifier, AdminPassword);
+
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(result.AccessToken!);
+        var jti = token.Claims.Single(c => c.Type == JwtRegisteredClaimNames.Jti).Value;
+
+        return Guid.Parse(jti);
+    }
+
+    private async Task<AdminSession> SeedSessionAsync(
+        Guid userId, DateTimeOffset issuedAt, DateTimeOffset expiresAt, bool revoked = false)
+    {
+        var session = new AdminSession(Guid.NewGuid(), userId, issuedAt, expiresAt);
+
+        if (revoked)
+        {
+            session.Revoke();
+        }
+
+        _dbContext.AdminSessions.Add(session);
+        await _dbContext.SaveChangesAsync();
+
+        return session;
+    }
+
+    [Fact]
+    public async Task LogoutAsync_ActiveSession_ReturnsRevoked()
+    {
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        var result = await _authService.LogoutAsync(sessionId, _adminUserId);
+
+        Assert.Equal(LogoutResult.Revoked, result);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_ActiveSession_MarksTheSessionRevokedInTheDatabase()
+    {
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+
+        var session = await _dbContext.AdminSessions
+            .AsNoTracking()
+            .SingleAsync(s => s.SessionId == sessionId);
+
+        Assert.True(session.Revoked);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_ActiveSession_CreatesNoNewSession()
+    {
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+
+        Assert.Single(await _dbContext.AdminSessions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task LogoutAsync_SecondCallWithTheSameSession_ReturnsSessionNotActive()
+    {
+        // FS-01 §5.4 step 6 / §14 T-12: an already-revoked session is not a valid session to log
+        // out of. (Over HTTP the middleware rejects it before the service is even reached — this
+        // asserts the service itself does not treat it as a fresh, successful logout.)
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        var first = await _authService.LogoutAsync(sessionId, _adminUserId);
+        var second = await _authService.LogoutAsync(sessionId, _adminUserId);
+
+        Assert.Equal(LogoutResult.Revoked, first);
+        Assert.Equal(LogoutResult.SessionNotActive, second);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_SecondCall_NeitherReactivatesTheRecordNorCreatesANewOne()
+    {
+        // FS-01 §5.4 step 6: the revoked record is not reactivated, and no new session appears.
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+
+        var sessions = await _dbContext.AdminSessions.AsNoTracking().ToListAsync();
+
+        Assert.Single(sessions);
+        Assert.True(sessions[0].Revoked);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_AlreadyRevokedSession_LeavesTheRecordByteForByteUnchanged()
+    {
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+        var afterFirst = await _dbContext.AdminSessions.AsNoTracking().SingleAsync();
+
+        await _authService.LogoutAsync(sessionId, _adminUserId);
+        var afterSecond = await _dbContext.AdminSessions.AsNoTracking().SingleAsync();
+
+        Assert.Equal(afterFirst.SessionId, afterSecond.SessionId);
+        Assert.Equal(afterFirst.UserId, afterSecond.UserId);
+        Assert.Equal(afterFirst.IssuedAt, afterSecond.IssuedAt);
+        Assert.Equal(afterFirst.ExpiresAt, afterSecond.ExpiresAt);
+        Assert.True(afterSecond.Revoked);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_UnknownSessionId_ReturnsSessionNotActive()
+    {
+        await SeedAdminAsync();
+        await LoginAndGetSessionIdAsync();
+
+        var result = await _authService.LogoutAsync(Guid.NewGuid(), _adminUserId);
+
+        Assert.Equal(LogoutResult.SessionNotActive, result);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_SessionBelongingToAnotherUser_ReturnsSessionNotActiveAndLeavesItActive()
+    {
+        // A session that exists and is active, but was issued to a different user than the one
+        // named — the mismatched user/session association of FS-01 §11. It must not be revoked:
+        // one Admin's token can never revoke another's session.
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        var result = await _authService.LogoutAsync(sessionId, Guid.NewGuid());
+
+        var session = await _dbContext.AdminSessions
+            .AsNoTracking()
+            .SingleAsync(s => s.SessionId == sessionId);
+
+        Assert.Equal(LogoutResult.SessionNotActive, result);
+        Assert.False(session.Revoked);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_ExpiredSession_ReturnsSessionNotActive()
+    {
+        // FS-01 §11 requires the session record itself to be non-expired, not merely the token.
+        await SeedAdminAsync();
+        var now = DateTimeOffset.UtcNow;
+        var expired = await SeedSessionAsync(_adminUserId, now.AddMinutes(-120), now.AddMinutes(-60));
+
+        var result = await _authService.LogoutAsync(expired.SessionId, _adminUserId);
+
+        Assert.Equal(LogoutResult.SessionNotActive, result);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_RevokesOnlyTheNamedSession()
+    {
+        // Two concurrent sessions for the one Admin (e.g. two browsers). Logging out of one must
+        // not log out the other — revocation is per-session, keyed by the token's own `jti`.
+        await SeedAdminAsync();
+        var firstSessionId = await LoginAndGetSessionIdAsync();
+        var secondSessionId = await LoginAndGetSessionIdAsync();
+
+        await _authService.LogoutAsync(firstSessionId, _adminUserId);
+
+        var sessions = await _dbContext.AdminSessions.AsNoTracking().ToListAsync();
+
+        Assert.True(sessions.Single(s => s.SessionId == firstSessionId).Revoked);
+        Assert.False(sessions.Single(s => s.SessionId == secondSessionId).Revoked);
+    }
+
+    [Fact]
+    public async Task LogoutAsync_EmptySessionId_Throws()
+    {
+        await SeedAdminAsync();
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            _authService.LogoutAsync(Guid.Empty, _adminUserId));
+    }
+
+    [Fact]
+    public async Task LogoutAsync_EmptyUserId_Throws()
+    {
+        await SeedAdminAsync();
+        var sessionId = await LoginAndGetSessionIdAsync();
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            _authService.LogoutAsync(sessionId, Guid.Empty));
     }
 }

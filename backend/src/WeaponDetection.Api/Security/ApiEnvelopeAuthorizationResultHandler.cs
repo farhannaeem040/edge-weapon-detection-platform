@@ -30,9 +30,7 @@ public sealed class ApiEnvelopeAuthorizationResultHandler : IAuthorizationMiddle
         if (authorizeResult.Challenged || authorizeResult.Forbidden)
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(ApiResponse.Fail(
-                "UNAUTHORIZED",
-                "Authentication is required."));
+            await context.Response.WriteAsJsonAsync(AuthenticationFailure.Response());
 
             return;
         }

@@ -15,12 +15,18 @@ public class AuthService : IAuthService
     private readonly WeaponDetectionDbContext _dbContext;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtIssuer _jwtIssuer;
+    private readonly TimeProvider _timeProvider;
 
-    public AuthService(WeaponDetectionDbContext dbContext, IPasswordHasher passwordHasher, IJwtIssuer jwtIssuer)
+    public AuthService(
+        WeaponDetectionDbContext dbContext,
+        IPasswordHasher passwordHasher,
+        IJwtIssuer jwtIssuer,
+        TimeProvider timeProvider)
     {
         _dbContext = dbContext;
         _passwordHasher = passwordHasher;
         _jwtIssuer = jwtIssuer;
+        _timeProvider = timeProvider;
     }
 
     public async Task<LoginResult> LoginAsync(
@@ -82,5 +88,58 @@ public class AuthService : IAuthService
         }
 
         return LoginResult.Success(issuance.AccessToken, issuance.IssuedAt, issuance.ExpiresAt);
+    }
+
+    public async Task<LogoutResult> LogoutAsync(
+        Guid sessionId,
+        Guid userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id is required.", nameof(sessionId));
+        }
+
+        if (userId == Guid.Empty)
+        {
+            throw new ArgumentException("User id is required.", nameof(userId));
+        }
+
+        var now = _timeProvider.GetUtcNow();
+
+        // Tracked (no AsNoTracking) — unlike AdminSessionValidator's read-only authorization check,
+        // this query loads the session precisely in order to mutate it.
+        //
+        // The four conditions below are the same ones AdminSessionValidator applies, re-applied
+        // here rather than assumed: by FS-01 §9.2 logout is itself a protected endpoint, so the
+        // authentication middleware has already refused any request whose session is absent,
+        // mismatched, expired, or revoked — but re-checking closes the window in which a session
+        // is revoked between that authorization pass and this call, and it keeps the service
+        // correct for any future caller that is not behind the same middleware. A session failing
+        // any condition is never revoked "again": the revoked record is left exactly as it is
+        // (FS-01 §5.4 step 6 — not reactivated, not re-timestamped).
+        var session = await _dbContext.AdminSessions
+            .SingleOrDefaultAsync(
+                s => s.SessionId == sessionId
+                    && s.UserId == userId
+                    && !s.Revoked
+                    && s.ExpiresAt > now,
+                cancellationToken);
+
+        if (session is null)
+        {
+            return LogoutResult.SessionNotActive;
+        }
+
+        session.Revoke();
+
+        // A single-row UPDATE — SaveChangesAsync already runs it in an implicit transaction, so no
+        // explicit BeginTransaction is warranted here (unlike LoginAsync, which had a persistence
+        // failure path of its own to unwind). Revocation is idempotent at the Domain level
+        // (AdminSession.Revoke), so even two concurrent logouts for one session converge on the
+        // same revoked state — neither can resurrect it.
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return LogoutResult.Revoked;
     }
 }
