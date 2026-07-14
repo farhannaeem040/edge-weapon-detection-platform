@@ -1,0 +1,12 @@
+# .NET build artifacts
+[Bb]in/
+[Oo]bj/
+*.user
+
+# Angular / Node (added when frontend is scaffolded)
+node_modules/
+dist/
+
+# Environment / secrets
+*.env
+.env.*

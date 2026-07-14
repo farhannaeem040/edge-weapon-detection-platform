@@ -1,0 +1,6 @@
+@WeaponDetection.Api_HostAddress = http://localhost:5230
+
+GET {{WeaponDetection.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

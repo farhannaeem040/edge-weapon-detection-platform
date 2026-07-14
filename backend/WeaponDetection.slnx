@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WeaponDetection.Api/WeaponDetection.Api.csproj" />
+    <Project Path="src/WeaponDetection.Application/WeaponDetection.Application.csproj" />
+    <Project Path="src/WeaponDetection.Domain/WeaponDetection.Domain.csproj" />
+    <Project Path="src/WeaponDetection.Infrastructure/WeaponDetection.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WeaponDetection.IntegrationTests/WeaponDetection.IntegrationTests.csproj" />
+    <Project Path="tests/WeaponDetection.UnitTests/WeaponDetection.UnitTests.csproj" />
+  </Folder>
+</Solution>
