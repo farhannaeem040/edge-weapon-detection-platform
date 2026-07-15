@@ -121,4 +121,34 @@ public class PasswordHasherDependencyInjectionTests
         Assert.NotNull(authService);
         Assert.IsType<AuthService>(authService);
     }
+
+    [Fact]
+    public void AddInfrastructure_ResolvesIDeviceService_ToDeviceServiceImplementation()
+    {
+        var services = new ServiceCollection();
+
+        services.AddInfrastructure(TestConnectionString, EmptyConfiguration());
+
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var deviceService = scope.ServiceProvider.GetService<IDeviceService>();
+
+        Assert.NotNull(deviceService);
+        Assert.IsType<DeviceService>(deviceService);
+    }
+
+    [Fact]
+    public void AddInfrastructure_ResolvesIBranchService_ToBranchServiceImplementation()
+    {
+        var services = new ServiceCollection();
+
+        services.AddInfrastructure(TestConnectionString, EmptyConfiguration());
+
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var branchService = scope.ServiceProvider.GetService<IBranchService>();
+
+        Assert.NotNull(branchService);
+        Assert.IsType<BranchService>(branchService);
+    }
 }

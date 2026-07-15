@@ -53,6 +53,13 @@ public static class DependencyInjection
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IAdminSessionValidator, AdminSessionValidator>();
 
+        // BranchService depends on the (scoped) DbContext for the branch-creation transaction, so it
+        // is scoped. DeviceService's provisioning is currently pure (only IActivationKeyGenerator),
+        // but it is a per-request application service like the others and later gains
+        // database-backed operations (T-17/T-19) — registering it scoped keeps that lifetime stable.
+        services.AddScoped<IDeviceService, DeviceService>();
+        services.AddScoped<IBranchService, BranchService>();
+
         return services;
     }
 }
