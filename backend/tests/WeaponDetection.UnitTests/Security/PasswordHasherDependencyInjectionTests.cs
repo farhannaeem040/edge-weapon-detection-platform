@@ -31,6 +31,20 @@ public class PasswordHasherDependencyInjectionTests
     }
 
     [Fact]
+    public void AddInfrastructure_ResolvesIActivationKeyGenerator_ToActivationKeyGeneratorImplementation()
+    {
+        var services = new ServiceCollection();
+
+        services.AddInfrastructure(TestConnectionString, EmptyConfiguration());
+
+        using var provider = services.BuildServiceProvider();
+        var generator = provider.GetService<IActivationKeyGenerator>();
+
+        Assert.NotNull(generator);
+        Assert.IsType<ActivationKeyGenerator>(generator);
+    }
+
+    [Fact]
     public void AddInfrastructure_ResolvesIDeviceSecretProtector_ToDataProtectionImplementation()
     {
         var services = new ServiceCollection();

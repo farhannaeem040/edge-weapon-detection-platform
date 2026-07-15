@@ -24,6 +24,10 @@ public static class DependencyInjection
         // Stateless (constants only) — safe and efficient as a singleton.
         services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 
+        // Stateless apart from the (singleton) IPasswordHasher it delegates secret hashing to —
+        // safe and efficient as a singleton.
+        services.AddSingleton<IActivationKeyGenerator, ActivationKeyGenerator>();
+
         // ASP.NET Core Data Protection's IDataProtector is thread-safe and designed for
         // long-lived reuse — safe and efficient as a singleton.
         services.AddDataProtection();
