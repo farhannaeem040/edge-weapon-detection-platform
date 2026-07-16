@@ -13,12 +13,35 @@ namespace WeaponDetection.Application.Interfaces;
 // adds the returned entities inside the single branch-creation transaction (FS-02 §5.1). Keeping
 // provisioning free of the DbContext is what makes it a pure, database-independent unit
 // (mirroring how IActivationKeyGenerator and IJwtIssuer stay off the persistence path).
+//
+// RegenerateActivationKeyAsync (T-17), by contrast, is inherently database-backed: it invalidates
+// the current key record and inserts the replacement as one atomic unit, so its behaviour is
+// verified by an integration test against real SQL Server (IP-01 §9), not a pure unit.
 public interface IDeviceService
 {
     // Builds an unactivated Device for the given branch and a matching Unconsumed Activation Key,
     // and returns them alongside the complete plaintext key to disclose exactly once. Throws for an
     // empty branch id; every other value is internally generated and always valid.
     DeviceProvisioning ProvisionForBranch(Guid branchId);
+
+    // Regenerates the Activation Key for the Device belonging to the given branch (FS-02 §5.3,
+    // IP-01 T-17): in a single SQL Server transaction it invalidates the branch's current Activation
+    // Key record — regardless of whether that key was Unconsumed or already Consumed (FS-02 §5.3
+    // step 3, AC-5) — and inserts a new Unconsumed key (new keyId, new salted secret hash) for the
+    // same Device. Returns the complete new plaintext key to disclose exactly once (FS-02 §5.3
+    // step 5); the plaintext key and its secret half are never persisted or logged (FS-02 §11).
+    //
+    // The lookup key is the branch id, not an external DeviceId: regeneration must work before a
+    // Device has ever activated (FS-02 §15 T-03), when its DeviceId is still NULL and so cannot
+    // address it, and the internal DeviceRecordId is never exposed to any client (FS-02 §1.3). The
+    // branch id is the only always-present, client-visible handle to the branch's single Device
+    // (BR-002/CON-007). Returns null when no branch/device has that id (mapped to 404 by the API
+    // layer, FS-02 §10.2). This operation never changes the Device's activation status — it touches
+    // only Activation Key records — so it leaves an unactivated Device unactivated and, in the
+    // reactivation flow (§5.8), an activated Device activated.
+    Task<ActivationKeyRegenerationResult?> RegenerateActivationKeyAsync(
+        Guid branchId,
+        CancellationToken cancellationToken = default);
 
     // Looks up a Device by its external, persistent DeviceId for GET /api/v1/devices/{id}
     // (FS-02 §10.3). The lookup key is deliberately DeviceId, never the internal DeviceRecordId,
@@ -58,3 +81,11 @@ public sealed record DeviceProvisioning(
     Device Device,
     ActivationKey ActivationKey,
     string PlaintextActivationKey);
+
+// The successful outcome of Activation Key regeneration (FS-02 §5.3, §10.2): the complete new
+// plaintext key (`keyId.secret`), disclosed exactly once. Like BranchCreationResult, it carries the
+// plaintext key on its own so a read path can never accidentally surface it; the plaintext key and
+// its secret half are never re-derivable after this single disclosure and are never persisted or
+// logged (FS-02 §11). A not-found branch/device is signalled by a null result rather than a variant
+// on this type — there is no failure data to model.
+public sealed record ActivationKeyRegenerationResult(string PlaintextActivationKey);

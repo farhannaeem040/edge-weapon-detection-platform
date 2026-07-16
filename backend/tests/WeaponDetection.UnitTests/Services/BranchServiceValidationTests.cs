@@ -37,6 +37,11 @@ public class BranchServiceValidationTests
         public Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
             Guid deviceId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+
+        // Not exercised by branch-creation validation; present only to satisfy the interface.
+        public Task<ActivationKeyRegenerationResult?> RegenerateActivationKeyAsync(
+            Guid branchId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private static WeaponDetectionDbContext CreateContext()
