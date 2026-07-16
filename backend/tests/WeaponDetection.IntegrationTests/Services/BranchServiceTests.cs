@@ -40,7 +40,7 @@ public class BranchServiceTests : IDisposable
         _dbContext.Database.Migrate();
 
         _activationKeyGenerator = new ActivationKeyGenerator(new Pbkdf2PasswordHasher());
-        var deviceService = new DeviceService(_activationKeyGenerator);
+        var deviceService = new DeviceService(_activationKeyGenerator, _dbContext);
         _branchService = new BranchService(_dbContext, deviceService);
     }
 

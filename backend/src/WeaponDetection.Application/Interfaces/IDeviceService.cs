@@ -19,7 +19,28 @@ public interface IDeviceService
     // and returns them alongside the complete plaintext key to disclose exactly once. Throws for an
     // empty branch id; every other value is internally generated and always valid.
     DeviceProvisioning ProvisionForBranch(Guid branchId);
+
+    // Looks up a Device by its external, persistent DeviceId for GET /api/v1/devices/{id}
+    // (FS-02 §10.3). The lookup key is deliberately DeviceId, never the internal DeviceRecordId,
+    // which is never exposed by any API (FS-02 §1.3): a Device is addressable by /devices/{id} only
+    // once it has an external identity, i.e. only after activation. An unactivated Device (DeviceId
+    // NULL) is therefore not independently addressable and is viewed through its branch instead;
+    // an unknown DeviceId returns null (mapped to 404 by the API layer).
+    Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
+        Guid deviceId,
+        CancellationToken cancellationToken = default);
 }
+
+// A single activated Device's detail, for GET /api/v1/devices/{id}. Because the lookup key is the
+// external DeviceId, any Device this projects is necessarily activated, so DeviceId is non-null
+// here (unlike DeviceSummaryView's nullable DeviceId within a branch). BranchId correlates the
+// device back to its branch and is already a client-visible identifier. The internal DeviceRecordId
+// and the ProtectedSharedSecret are never included (FS-02 §1.3, §11).
+public sealed record DeviceDetailView(
+    Guid DeviceId,
+    Guid BranchId,
+    DeviceActivationStatus ActivationStatus,
+    string? LastKnownAddress);
 
 // The result of provisioning a branch's Device and its first Activation Key. All three parts are
 // produced together and belong together:

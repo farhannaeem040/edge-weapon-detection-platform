@@ -95,21 +95,80 @@ public class BranchService : IBranchService
                 "Branch creation failed while persisting the branch and its device.", ex);
         }
 
-        var createdCameras = cameras
-            .Select(c => new CreatedCamera(c.CameraId, c.Name, c.RtspUrl, c.Enabled))
-            .ToList();
-
         var device = provisioning.Device;
-        var createdBranch = new CreatedBranch(
+        var createdBranch = MapBranch(branch, cameras, device);
+
+        return new BranchCreationResult(createdBranch, provisioning.PlaintextActivationKey);
+    }
+
+    // Reads every branch with its cameras and single Device summary (FS-02 §5.4, §10.3). Three
+    // AsNoTracking reads rather than per-branch queries: the entities carry no navigation
+    // properties (they hold plain FK Guids), and at this prototype's scale a set-based load then an
+    // in-memory join is both simpler and cheaper than N round-trips. No secret or DeviceRecordId
+    // leaves this method — BranchView deliberately cannot carry either (FS-02 §1.3, §7).
+    public async Task<IReadOnlyList<BranchView>> ListBranchesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var branches = await _dbContext.Branches.AsNoTracking().ToListAsync(cancellationToken);
+        if (branches.Count == 0)
+        {
+            return [];
+        }
+
+        var cameras = await _dbContext.Cameras.AsNoTracking().ToListAsync(cancellationToken);
+        var devices = await _dbContext.Devices.AsNoTracking().ToListAsync(cancellationToken);
+
+        var camerasByBranch = cameras
+            .GroupBy(c => c.BranchId)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<Camera>)g.ToList());
+        var deviceByBranch = devices.ToDictionary(d => d.BranchId);
+
+        return branches
+            .Select(branch => MapBranch(
+                branch,
+                camerasByBranch.GetValueOrDefault(branch.BranchId, []),
+                deviceByBranch[branch.BranchId]))
+            .ToList();
+    }
+
+    // Reads one branch by id, or null when none matches (mapped to 404 by the API layer). Each
+    // branch has exactly one Device (BR-002/CON-007), created with the branch itself, so the Device
+    // lookup is a Single once the branch is known.
+    public async Task<BranchView?> GetBranchAsync(
+        Guid branchId,
+        CancellationToken cancellationToken = default)
+    {
+        var branch = await _dbContext.Branches
+            .AsNoTracking()
+            .SingleOrDefaultAsync(b => b.BranchId == branchId, cancellationToken);
+        if (branch is null)
+        {
+            return null;
+        }
+
+        var cameras = await _dbContext.Cameras
+            .AsNoTracking()
+            .Where(c => c.BranchId == branchId)
+            .ToListAsync(cancellationToken);
+
+        var device = await _dbContext.Devices
+            .AsNoTracking()
+            .SingleAsync(d => d.BranchId == branchId, cancellationToken);
+
+        return MapBranch(branch, cameras, device);
+    }
+
+    // The one place Branch/Camera/Device entities become a BranchView, shared by the create response
+    // and both read paths so the projection — and its exclusion of DeviceRecordId and any secret —
+    // is defined once.
+    private static BranchView MapBranch(Branch branch, IReadOnlyList<Camera> cameras, Device device) =>
+        new(
             branch.BranchId,
             branch.Name,
             branch.Address,
             branch.ContactDetails,
-            createdCameras,
-            new CreatedDeviceSummary(device.DeviceId, device.ActivationStatus, device.LastKnownAddress));
-
-        return new BranchCreationResult(createdBranch, provisioning.PlaintextActivationKey);
-    }
+            cameras.Select(c => new CameraView(c.CameraId, c.Name, c.RtspUrl, c.Enabled)).ToList(),
+            new DeviceSummaryView(device.DeviceId, device.ActivationStatus, device.LastKnownAddress));
 
     // A valid RTSP URL is an absolute URI using the rtsp scheme (FS-02 §12). The value is never
     // echoed into the exception message: an RTSP URL may embed credentials

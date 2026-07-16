@@ -2,15 +2,35 @@ using WeaponDetection.Domain;
 
 namespace WeaponDetection.Application.Interfaces;
 
-// FS-02 §5.1, IP-01 §8/T-15: creates a Branch with its Cameras, the single reserved (unactivated)
-// Device, and that Device's first Activation Key — all in one database transaction — and returns
-// the created branch/camera/device summary together with the complete plaintext Activation Key,
-// disclosed exactly once. Does not expose HTTP concerns (status codes, request/response DTOs);
-// that translation belongs to the API layer (T-16).
+// Branch/Camera/Device orchestration behind an Application interface (ARCH-001 §10.1): the API
+// layer (T-16) depends on this, never on EF or the DbContext directly. Two responsibilities today:
+//
+//  - CreateBranchAsync (T-15): creates a Branch with its Cameras, the single reserved (unactivated)
+//    Device, and that Device's first Activation Key — all in one database transaction — and returns
+//    the created branch/camera/device summary together with the complete plaintext Activation Key,
+//    disclosed exactly once (FS-02 §5.1).
+//  - ListBranchesAsync / GetBranchAsync (T-16): read-only branch/camera/device projections for the
+//    Dashboard's list and detail views (FS-02 §5.4, §10.3). These never carry the plaintext
+//    Activation Key or the internal DeviceRecordId (FS-02 §1.3, §7).
+//
+// Neither exposes HTTP concerns (status codes, request/response DTOs); that translation belongs to
+// the API layer (T-16).
 public interface IBranchService
 {
     Task<BranchCreationResult> CreateBranchAsync(
         NewBranchRequest request,
+        CancellationToken cancellationToken = default);
+
+    // Every branch with its cameras and its single Device summary, for the Dashboard branch list
+    // (FS-02 §5.4). Ordering is by creation is not guaranteed by the store; callers that need a
+    // stable order impose it. Returns an empty list when no branches exist.
+    Task<IReadOnlyList<BranchView>> ListBranchesAsync(
+        CancellationToken cancellationToken = default);
+
+    // A single branch with its cameras and Device summary, or null when no branch has that id
+    // (mapped to 404 by the API layer, FS-02 §10.3).
+    Task<BranchView?> GetBranchAsync(
+        Guid branchId,
         CancellationToken cancellationToken = default);
 }
 
@@ -37,29 +57,36 @@ public sealed record NewCameraRequest(string Name, string RtspUrl);
 // PlaintextActivationKey is the only place the complete key appears after generation; the API layer
 // forwards it in the single create response and it is never re-derivable afterward (FS-02 §11).
 public sealed record BranchCreationResult(
-    CreatedBranch Branch,
+    BranchView Branch,
     string PlaintextActivationKey);
 
-// The persisted branch/camera/device view returned to the caller. It never carries the internal
-// DeviceRecordId (never exposed by any API, FS-02 §1.3) and, for a freshly created branch, the
-// Device's external DeviceId is always null because activation has not happened yet (FS-02 §5.1).
-public sealed record CreatedBranch(
+// The persisted branch/camera/device view — the shared read model for both the create response and
+// the list/detail read endpoints. It never carries the internal DeviceRecordId (never exposed by
+// any API, FS-02 §1.3) and never carries the plaintext Activation Key (which BranchCreationResult
+// holds separately, so a read result cannot accidentally disclose it). For a freshly created branch
+// the Device's external DeviceId is null because activation has not happened yet (FS-02 §5.1).
+public sealed record BranchView(
     Guid BranchId,
     string Name,
     string Address,
     string ContactDetails,
-    IReadOnlyList<CreatedCamera> Cameras,
-    CreatedDeviceSummary Device);
+    IReadOnlyList<CameraView> Cameras,
+    DeviceSummaryView Device);
 
-public sealed record CreatedCamera(
+// RtspUrl is the value as configured — it may embed credentials (rtsp://user:pass@host/...). The
+// Application layer returns the domain-accurate value; deciding what is safe to serialize to a
+// client is an API-presentation concern, so the API layer redacts any embedded credentials before
+// putting a camera on the wire (T-16 security constraint, ARCH-001 §15.6).
+public sealed record CameraView(
     Guid CameraId,
     string Name,
     string RtspUrl,
     bool Enabled);
 
-// DeviceId is null until first activation; ActivationStatus is Unactivated at branch creation.
-// LastKnownAddress is null until first operational contact. DeviceRecordId is intentionally absent.
-public sealed record CreatedDeviceSummary(
+// The Device as summarised within a branch. DeviceId is null until first activation; ActivationStatus
+// is Unactivated at branch creation. LastKnownAddress is null until first operational contact.
+// DeviceRecordId is intentionally absent (FS-02 §1.3).
+public sealed record DeviceSummaryView(
     Guid? DeviceId,
     DeviceActivationStatus ActivationStatus,
     string? LastKnownAddress);

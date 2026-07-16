@@ -32,6 +32,11 @@ public class BranchServiceValidationTests
             throw new InvalidOperationException(
                 "Provisioning must not be reached for an invalid branch-creation request.");
         }
+
+        // Not exercised by branch-creation validation; present only to satisfy the interface.
+        public Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
+            Guid deviceId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private static WeaponDetectionDbContext CreateContext()

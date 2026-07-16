@@ -1,4 +1,6 @@
+using Microsoft.EntityFrameworkCore;
 using WeaponDetection.Domain;
+using WeaponDetection.Infrastructure.Persistence;
 using WeaponDetection.Infrastructure.Security;
 using WeaponDetection.Infrastructure.Services;
 using Xunit;
@@ -10,12 +12,32 @@ namespace WeaponDetection.UnitTests.Services;
 // its real ActivationKeyGenerator/Pbkdf2PasswordHasher collaborators rather than a mock, because
 // the "generated secret verifies against the stored hash" behavior is part of what is under test.
 //
+// DeviceService also carries a DbContext for its read path (GetDeviceByDeviceIdAsync, T-16), but
+// provisioning never touches it. These tests therefore back the service with a placeholder-connection
+// DbContext that is never opened — exactly as BranchServiceValidationTests does — so provisioning
+// stays a database-free unit under test. The read path's own coverage is an integration test against
+// a real SQL Server (DeviceApiTests, IP-01 §9).
+//
 // No test prints an Activation Key, its secret half, or a secret hash to console/log output;
 // assertions compare values in memory only.
 public class DeviceServiceTests
 {
+    private const string PlaceholderConnectionString =
+        "Server=localhost;Database=WeaponDetectionDeviceServiceTests;" +
+        "Trusted_Connection=True;TrustServerCertificate=True;";
+
+    // Never opened: provisioning does no I/O, so no connection is established through this context.
+    private static WeaponDetectionDbContext CreatePlaceholderContext()
+    {
+        var options = new DbContextOptionsBuilder<WeaponDetectionDbContext>()
+            .UseSqlServer(PlaceholderConnectionString)
+            .Options;
+
+        return new WeaponDetectionDbContext(options);
+    }
+
     private static DeviceService CreateService() =>
-        new(new ActivationKeyGenerator(new Pbkdf2PasswordHasher()));
+        new(new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), CreatePlaceholderContext());
 
     private static (string KeyId, string Secret) SplitPlaintext(string plaintextKey)
     {
@@ -113,7 +135,7 @@ public class DeviceServiceTests
     public void ProvisionForBranch_PlaintextSecretVerifiesAgainstTheStoredHash()
     {
         var generator = new ActivationKeyGenerator(new Pbkdf2PasswordHasher());
-        var service = new DeviceService(generator);
+        var service = new DeviceService(generator, CreatePlaceholderContext());
 
         var provisioning = service.ProvisionForBranch(Guid.NewGuid());
         var (_, secret) = SplitPlaintext(provisioning.PlaintextActivationKey);
@@ -152,6 +174,13 @@ public class DeviceServiceTests
     [Fact]
     public void Constructor_NullGenerator_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => new DeviceService(null!));
+        Assert.Throws<ArgumentNullException>(() => new DeviceService(null!, CreatePlaceholderContext()));
+    }
+
+    [Fact]
+    public void Constructor_NullDbContext_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() =>
+            new DeviceService(new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), null!));
     }
 }
