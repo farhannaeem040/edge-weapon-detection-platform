@@ -1,7 +1,10 @@
+using System.Buffers.Text;
+using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 using WeaponDetection.Application.Interfaces;
 using WeaponDetection.Domain;
 using WeaponDetection.Infrastructure.Persistence;
+using WeaponDetection.Infrastructure.Security;
 
 namespace WeaponDetection.Infrastructure.Services;
 
@@ -13,21 +16,32 @@ namespace WeaponDetection.Infrastructure.Services;
 //    DeviceId, for GET /api/v1/devices/{id} (FS-02 §10.3).
 //  - RegenerateActivationKeyAsync (T-17): a transactional invalidate-old/insert-new replacement of a
 //    branch's Activation Key (FS-02 §5.3).
+//  - ActivateAsync (T-19): transactional validation and consumption of a presented Activation Key —
+//    assigning/retaining the DeviceId, activating the Device, and issuing a protected shared secret
+//    (FS-02 §5.5–§5.7, IP-01 §8 steps 3–6).
 //
-// The remaining write operation (T-19 activation consumption) is a later task. The plaintext
-// Activation Key produced by provisioning/regeneration is never logged (FS-02 §11); it flows
-// straight back to the caller for the single disclosure and is otherwise discarded.
+// No plaintext credential material — Activation Key, its secret half, or the device shared secret —
+// is ever logged (FS-02 §11); each flows straight back to the caller for its single disclosure and
+// is otherwise discarded. Only protected/hashed forms are persisted.
 public class DeviceService : IDeviceService
 {
+    // 256 bits of entropy for the device shared secret, Base64Url-encoded so it is safe to carry
+    // later in the X-Device-Secret header (FS-02 §5.5 step 10) without escaping.
+    private const int SharedSecretSizeBytes = 32;
+
     private readonly IActivationKeyGenerator _activationKeyGenerator;
+    private readonly IDeviceSecretProtector _deviceSecretProtector;
     private readonly WeaponDetectionDbContext _dbContext;
 
     public DeviceService(
         IActivationKeyGenerator activationKeyGenerator,
+        IDeviceSecretProtector deviceSecretProtector,
         WeaponDetectionDbContext dbContext)
     {
         _activationKeyGenerator = activationKeyGenerator
             ?? throw new ArgumentNullException(nameof(activationKeyGenerator));
+        _deviceSecretProtector = deviceSecretProtector
+            ?? throw new ArgumentNullException(nameof(deviceSecretProtector));
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
     }
 
@@ -152,5 +166,129 @@ public class DeviceService : IDeviceService
         }
 
         return new ActivationKeyRegenerationResult(generated.PlaintextKey);
+    }
+
+    public async Task<DeviceActivationResult> ActivateAsync(
+        string activationKey,
+        CancellationToken cancellationToken = default)
+    {
+        // Parse before any lookup: a value that does not split into a non-empty keyId and a non-empty
+        // secret is malformed and rejected outright (FS-02 §5.5 step 3, §12) — no transaction is
+        // opened and no record is read.
+        if (!TryParseActivationKey(activationKey, out var keyId, out var secret))
+        {
+            return DeviceActivationResult.Rejected(DeviceActivationFailureReason.Malformed);
+        }
+
+        // Lookup, verification, status check and consumption share one transaction so the consumption
+        // is atomic (FS-02 §5.5 step 7, §12; IP-01 §8 step 6). The Activation Key row is read under an
+        // update lock (UPDLOCK): two concurrent activations of the same key serialise on that lock, so
+        // once the winner commits the other reads the key as Consumed and exactly one succeeds
+        // (AC-16). SQL Server enforces this, so the behaviour is covered by integration tests against
+        // a real database (IP-01 §9); the dedicated concurrent-request test is a later task (T-21).
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        // Indexed primary-key lookup by keyId, never a scan/hash-compare across every stored row
+        // (AC-14). SELECT * returns exactly the mapped columns; the UPDLOCK/ROWLOCK hint holds the row
+        // lock for the transaction. keyId is passed as a parameter, never interpolated into SQL text.
+        var activationKeyRecord = await _dbContext.ActivationKeys
+            .FromSqlInterpolated(
+                $"SELECT * FROM ActivationKeys WITH (UPDLOCK, ROWLOCK) WHERE ActivationKeyId = {keyId}")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (activationKeyRecord is null)
+        {
+            // Unknown keyId — same observable outcome as a malformed key or wrong secret (FS-02 §5.6).
+            return DeviceActivationResult.Rejected(DeviceActivationFailureReason.UnknownKeyId);
+        }
+
+        // Verify the presented secret against the stored salted hash (FS-02 §5.5 step 5). A non-match
+        // is rejected identically to an unknown keyId (§5.6, AC-15).
+        if (!_activationKeyGenerator.VerifySecret(secret, activationKeyRecord.SecretHash))
+        {
+            return DeviceActivationResult.Rejected(DeviceActivationFailureReason.IncorrectSecret);
+        }
+
+        // The record must be Unconsumed to proceed; a Consumed or Invalidated key is rejected with no
+        // side effects (FS-02 §5.7, §12). This is what makes an Activation Key one-time (BR-003) and
+        // rejects replay of a consumed key (AC-4/AC-9). Unconsumed falls through to consumption below.
+        switch (activationKeyRecord.Status)
+        {
+            case ActivationKeyStatus.Consumed:
+                return DeviceActivationResult.Rejected(DeviceActivationFailureReason.Consumed);
+            case ActivationKeyStatus.Invalidated:
+                return DeviceActivationResult.Rejected(DeviceActivationFailureReason.Invalidated);
+        }
+
+        // The Device the key reserves, by internal DeviceRecordId (never the external DeviceId — which
+        // is still NULL on a first activation, FS-02 §1.3). Tracked, so the activation transition is
+        // persisted.
+        var device = await _dbContext.Devices
+            .SingleAsync(d => d.DeviceRecordId == activationKeyRecord.DeviceRecordId, cancellationToken);
+
+        // A fresh, cryptographically secure shared secret is issued on every activation (first and
+        // reactivation), rotating any previous one (NFR-SEC-002, ADR-015). Only its protected form is
+        // stored; the plaintext exists transiently to be returned once and is never persisted or
+        // logged (FS-02 §11, §12).
+        var sharedSecret = GenerateSharedSecret();
+        var protectedSharedSecret = _deviceSecretProtector.Protect(sharedSecret);
+
+        // The atomic state transition (FS-02 §5.5 step 7). Consume() enforces one-time use as an
+        // entity invariant; Activate() assigns DeviceId only on a first activation and retains it
+        // thereafter (AC-7), and always rotates the protected secret.
+        activationKeyRecord.Consume();
+        device.Activate(protectedSharedSecret);
+
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            // The shared secret is never interpolated into the message (FS-02 §11).
+            throw new InvalidOperationException(
+                "Device activation failed while persisting the activation state.", ex);
+        }
+
+        // DeviceId is guaranteed non-null here — Activate assigned it if it was not already set.
+        return DeviceActivationResult.Activated(
+            new DeviceActivationSuccess(device.DeviceId!.Value, sharedSecret, device.BranchId));
+    }
+
+    // Splits a presented Activation Key into its keyId and secret halves (FS-02 §1.4). The generator
+    // builds `keyId.secret` from a Base64Url alphabet that never contains the delimiter, so a
+    // well-formed key splits into exactly two non-empty parts (FS-02 §5.5 step 3); anything else —
+    // blank input, no delimiter, more than one delimiter, or an empty half — is malformed. Neither
+    // half is ever logged.
+    private static bool TryParseActivationKey(string? activationKey, out string keyId, out string secret)
+    {
+        keyId = string.Empty;
+        secret = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(activationKey))
+        {
+            return false;
+        }
+
+        var parts = activationKey.Trim().Split(ActivationKeyGenerator.Delimiter);
+        if (parts.Length != 2
+            || string.IsNullOrWhiteSpace(parts[0])
+            || string.IsNullOrWhiteSpace(parts[1]))
+        {
+            return false;
+        }
+
+        keyId = parts[0];
+        secret = parts[1];
+        return true;
+    }
+
+    private static string GenerateSharedSecret()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(SharedSecretSizeBytes);
+        return Base64Url.EncodeToString(bytes);
     }
 }

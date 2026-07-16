@@ -43,6 +43,27 @@ public interface IDeviceService
         Guid branchId,
         CancellationToken cancellationToken = default);
 
+    // Validates and consumes a presented plaintext Activation Key, activating the associated Device
+    // (FS-02 §5.5–§5.7, IP-01 §8 steps 3–6, T-19). In a single SQL Server transaction it: parses the
+    // value into keyId.secret, rejecting a malformed value before any lookup (§5.5 step 3, §12);
+    // resolves the Activation Key record by an indexed keyId lookup, never a scan/hash-compare across
+    // every stored row (AC-14); verifies the presented secret against the stored salted hash;
+    // confirms the record is Unconsumed (not Consumed or Invalidated); then marks the key Consumed,
+    // assigns the Device its persistent DeviceId on first activation and retains the existing one on
+    // reactivation (AC-7), marks it Activated, and issues a freshly generated shared secret stored
+    // only in protected form (IDeviceSecretProtector, NFR-SEC-002/ADR-015).
+    //
+    // Returns a success carrying the DeviceId, the plaintext shared secret — disclosed exactly once,
+    // never persisted in plaintext or logged (FS-02 §11) — and the BranchId; or a typed rejection.
+    // The typed reason exists only so the service is testable: the API layer (T-20) collapses every
+    // rejection to a single uniform 401 with no distinguishing detail (FS-02 §5.6, §13, AC-15). A
+    // rejection never modifies any Device or Activation Key record (§5.6/§5.7). Replay of a Consumed
+    // key is rejected (AC-4/AC-9); concurrent activations of one key are serialised so exactly one
+    // succeeds (AC-16).
+    Task<DeviceActivationResult> ActivateAsync(
+        string activationKey,
+        CancellationToken cancellationToken = default);
+
     // Looks up a Device by its external, persistent DeviceId for GET /api/v1/devices/{id}
     // (FS-02 §10.3). The lookup key is deliberately DeviceId, never the internal DeviceRecordId,
     // which is never exposed by any API (FS-02 §1.3): a Device is addressable by /devices/{id} only
@@ -89,3 +110,55 @@ public sealed record DeviceProvisioning(
 // logged (FS-02 §11). A not-found branch/device is signalled by a null result rather than a variant
 // on this type — there is no failure data to model.
 public sealed record ActivationKeyRegenerationResult(string PlaintextActivationKey);
+
+// The outcome of a device activation attempt (FS-02 §5.5–§5.7, IP-01 T-19). Either the Device was
+// activated — Success carries the assigned/retained DeviceId, the freshly issued plaintext shared
+// secret (disclosed once), and the BranchId — or the attempt was Rejected with a typed reason. The
+// typed reason is an internal, testable distinction only: the API layer (T-20) maps every rejection
+// to one uniform 401 that never reveals which check failed (FS-02 §5.6, §13, AC-15). A rejection
+// carries no side effect on any Device or Activation Key record (§5.6/§5.7).
+public sealed class DeviceActivationResult
+{
+    public bool Succeeded => Success is not null;
+    public DeviceActivationSuccess? Success { get; }
+    public DeviceActivationFailureReason? FailureReason { get; }
+
+    private DeviceActivationResult(
+        DeviceActivationSuccess? success, DeviceActivationFailureReason? failureReason)
+    {
+        Success = success;
+        FailureReason = failureReason;
+    }
+
+    public static DeviceActivationResult Activated(DeviceActivationSuccess success) =>
+        new(success ?? throw new ArgumentNullException(nameof(success)), null);
+
+    public static DeviceActivationResult Rejected(DeviceActivationFailureReason reason) =>
+        new(null, reason);
+}
+
+// The five distinguishable ways an activation attempt can fail (FS-02 §5.6/§5.7, §13). Malformed,
+// UnknownKeyId, and IncorrectSecret are the §5.6 trio; Consumed and Invalidated are the §5.7 pair.
+// All five collapse to the same externally observable outcome at the API layer (AC-15); the
+// distinction exists only for internal control flow and test assertions.
+public enum DeviceActivationFailureReason
+{
+    Malformed,
+    UnknownKeyId,
+    IncorrectSecret,
+    Consumed,
+    Invalidated,
+}
+
+// A successful activation's result. SharedSecret is the plaintext device shared secret, disclosed to
+// the caller exactly once (FS-02 §5.5 step 8) and never persisted in plaintext or logged (§11) — the
+// Backend stores only its protected form. ToString is overridden to redact the secret: a record's
+// synthesized ToString prints every member, and an accidental interpolation of this result into a
+// log line must never leak the secret (§11). DeviceId is the external, persistent identity assigned
+// on first activation and retained on reactivation (AC-7); BranchId lets the endpoint (T-20) assemble
+// the branch/camera configuration it returns. The internal DeviceRecordId is deliberately absent.
+public sealed record DeviceActivationSuccess(Guid DeviceId, string SharedSecret, Guid BranchId)
+{
+    public override string ToString() =>
+        $"{nameof(DeviceActivationSuccess)} {{ DeviceId = {DeviceId}, BranchId = {BranchId} }}";
+}

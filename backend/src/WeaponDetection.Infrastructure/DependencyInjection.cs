@@ -55,9 +55,10 @@ public static class DependencyInjection
 
         // Both depend on the (scoped) DbContext, so they are scoped. BranchService uses it for the
         // branch-creation transaction and the list/detail reads (T-15/T-16); DeviceService uses it
-        // for the device read path (GetDeviceByDeviceIdAsync, T-16) — its provisioning step remains
-        // pure and simply does not touch the context. Later tasks (T-17/T-19) add more
-        // database-backed operations on the same lifetime.
+        // for the device read path (T-16), key regeneration (T-17), and activation consumption
+        // (T-19) — its provisioning step alone stays pure and does not touch the context.
+        // DeviceService also depends on the (singleton) IActivationKeyGenerator and
+        // IDeviceSecretProtector registered above, resolved automatically by the container.
         services.AddScoped<IDeviceService, DeviceService>();
         services.AddScoped<IBranchService, BranchService>();
 

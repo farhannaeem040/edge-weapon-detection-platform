@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using WeaponDetection.Application.Interfaces;
 using WeaponDetection.Domain;
 using WeaponDetection.Infrastructure.Persistence;
 using WeaponDetection.Infrastructure.Security;
@@ -36,8 +37,22 @@ public class DeviceServiceTests
         return new WeaponDetectionDbContext(options);
     }
 
+    // Provisioning never protects a shared secret (that is activation's job, exercised by
+    // integration tests against real SQL Server), so a trivial stand-in suffices to satisfy the
+    // constructor here.
+    private sealed class FakeDeviceSecretProtector : IDeviceSecretProtector
+    {
+        public string Protect(string plaintextSecret) => $"protected:{plaintextSecret}";
+
+        public string Unprotect(string protectedSecret) =>
+            protectedSecret.Replace("protected:", string.Empty);
+    }
+
     private static DeviceService CreateService() =>
-        new(new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), CreatePlaceholderContext());
+        new(
+            new ActivationKeyGenerator(new Pbkdf2PasswordHasher()),
+            new FakeDeviceSecretProtector(),
+            CreatePlaceholderContext());
 
     private static (string KeyId, string Secret) SplitPlaintext(string plaintextKey)
     {
@@ -135,7 +150,7 @@ public class DeviceServiceTests
     public void ProvisionForBranch_PlaintextSecretVerifiesAgainstTheStoredHash()
     {
         var generator = new ActivationKeyGenerator(new Pbkdf2PasswordHasher());
-        var service = new DeviceService(generator, CreatePlaceholderContext());
+        var service = new DeviceService(generator, new FakeDeviceSecretProtector(), CreatePlaceholderContext());
 
         var provisioning = service.ProvisionForBranch(Guid.NewGuid());
         var (_, secret) = SplitPlaintext(provisioning.PlaintextActivationKey);
@@ -174,13 +189,23 @@ public class DeviceServiceTests
     [Fact]
     public void Constructor_NullGenerator_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => new DeviceService(null!, CreatePlaceholderContext()));
+        Assert.Throws<ArgumentNullException>(() =>
+            new DeviceService(null!, new FakeDeviceSecretProtector(), CreatePlaceholderContext()));
+    }
+
+    [Fact]
+    public void Constructor_NullDeviceSecretProtector_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() =>
+            new DeviceService(
+                new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), null!, CreatePlaceholderContext()));
     }
 
     [Fact]
     public void Constructor_NullDbContext_Throws()
     {
         Assert.Throws<ArgumentNullException>(() =>
-            new DeviceService(new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), null!));
+            new DeviceService(
+                new ActivationKeyGenerator(new Pbkdf2PasswordHasher()), new FakeDeviceSecretProtector(), null!));
     }
 }

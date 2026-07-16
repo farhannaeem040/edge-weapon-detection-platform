@@ -41,7 +41,7 @@ public class DeviceServiceRegenerationTests : IDisposable
         _dbContext = new WeaponDetectionDbContext(options);
         _dbContext.Database.Migrate();
 
-        _service = new DeviceService(_generator, _dbContext);
+        _service = new DeviceService(_generator, TestDeviceSecretProtector.Create(), _dbContext);
     }
 
     public void Dispose()
