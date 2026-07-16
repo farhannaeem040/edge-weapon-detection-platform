@@ -299,4 +299,58 @@ The internal `Devices.DeviceRecordId` primary key is never returned by any API, 
 
 ## Frontend
 
-Not yet scaffolded — added in a later Implementation Plan task.
+The Angular dashboard workspace lives in `frontend/` (`specs/implementation-plans/IP-01-backend-angular-foundation.md` task T-22). At this stage it is a **scaffold only**: a placeholder application shell, a routing foundation, environment configuration for the Backend base URL, and the four feature-boundary folders (`core`, `auth`, `branches`, `shared`) — no login, interceptor, guard, branch UI, or API integration yet (those arrive in later tasks).
+
+### Prerequisites
+
+- Node.js (this workspace was scaffolded and verified on Node.js 24.x with npm 11.x).
+- Angular CLI 20.x. It is a local dev dependency, so a global install is not required — the commands below invoke it via `npx ng` (equivalently `npm run ...` for the scripts in `package.json`).
+
+> The workspace targets Angular 20 deliberately: Angular 21+/CLI 22 require Node.js ≥ 24.15, so on a Node 24.11 toolchain Angular 20 (which supports Node ^24.0) is the compatible line. Upgrade Angular alongside a Node upgrade, not independently.
+
+### Install
+
+```
+cd frontend
+npm install
+```
+
+### Build
+
+```
+cd frontend
+npm run build      # or: npx ng build
+```
+
+Production bundles are emitted to `frontend/dist/` (git-ignored).
+
+### Test
+
+```
+cd frontend
+npm test           # or: npx ng test --watch=false --browsers=ChromeHeadless
+```
+
+The unit tests run under Karma + Jasmine and require a Chrome/Chromium browser. In a headless/CI environment, point Karma at the browser and disable watch mode:
+
+```
+CHROME_BIN="/path/to/chrome" npx ng test --watch=false --browsers=ChromeHeadless
+```
+
+### Development Server
+
+```
+cd frontend
+npm start          # or: npx ng serve
+```
+
+`ng serve` serves the placeholder shell at `http://localhost:4200/` by default (override with `--port`).
+
+### Backend Base-URL Configuration
+
+The Backend API base URL is configured per build environment in `frontend/src/environments/`:
+
+- `environment.development.ts` — used by `ng serve` / development builds; defaults to `http://localhost:5230/api/v1` (the local ASP.NET Core Kestrel HTTP endpoint, see `backend/src/WeaponDetection.Api/Properties/launchSettings.json`).
+- `environment.ts` — the production default; uses the host-relative `/api/v1`, since the Dashboard's static assets are served from the same host as the Backend in the co-located prototype deployment (ARCH-001 ARCH-ASM-001).
+
+These files hold **only** the non-secret base URL — no credentials, tokens, or keys. Angular selects the development file automatically via the `fileReplacements` configured in `angular.json`.
