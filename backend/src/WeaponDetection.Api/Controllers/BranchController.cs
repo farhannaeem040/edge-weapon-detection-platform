@@ -88,4 +88,47 @@ public class BranchController : ControllerBase
 
         return Ok(BranchResponseDto.ForRead(branch));
     }
+
+    // FS-03 §10.1 (IP-03 T-43): edits a branch and reconciles its cameras in one transaction. Like
+    // every action here it is protected by the fallback Admin JWT + active-session policy (this
+    // controller carries no [AllowAnonymous]). All orchestration and the transactional guarantee live
+    // in IBranchService.UpdateBranchAsync; this action only translates the typed result to HTTP.
+    //
+    // The response is the same safe read shape as GET — BranchResponseDto.ForRead — so RTSP
+    // redaction and the no-key/no-secret/no-DeviceRecordId guarantees come for free (FS-03 §7.1,
+    // §12). The Device and Activation Key records are never touched by the update path.
+    [HttpPut("{branchId:guid}")]
+    public async Task<IActionResult> Update(
+        Guid branchId,
+        [FromBody] UpdateBranchRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        // Presence/length and the "at least one camera" rule are already enforced by DataAnnotations
+        // (a blank/oversized field or empty collection is a 400 before this runs). RTSP-URL format
+        // and the camera-identity rules (unknown/foreign/duplicate CameraId) are Application-layer
+        // checks that surface as an Invalid result below.
+        var appRequest = new UpdateBranchRequest(
+            branchId,
+            request.Name,
+            request.Address,
+            request.ContactDetails,
+            request.Cameras
+                // A null element passes model validation; preserve it so the service's own guard
+                // rejects it rather than this mapping throwing an NRE.
+                .Select(c => c is null ? null! : new CameraMutation(c.CameraId, c.Name, c.RtspUrl))
+                .ToList());
+
+        var result = await _branchService.UpdateBranchAsync(appRequest, cancellationToken);
+
+        return result.Status switch
+        {
+            BranchUpdateStatus.Updated => Ok(BranchResponseDto.ForRead(result.Branch!)),
+            BranchUpdateStatus.NotFound =>
+                NotFound(ApiResponse.Fail("NOT_FOUND", "Branch not found.")),
+            // Every business-validation failure — invalid RTSP, unknown/foreign/duplicate CameraId —
+            // collapses to one generic 400 that never echoes a submitted value (FS-03 §6, §12). The
+            // message is fixed and identical to the create path's.
+            _ => BadRequest(ApiResponse.Fail("VALIDATION_ERROR", "The request is invalid.")),
+        };
+    }
 }
