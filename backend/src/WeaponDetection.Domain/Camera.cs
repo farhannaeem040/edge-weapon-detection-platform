@@ -41,6 +41,27 @@ public class Camera
             throw new ArgumentException("Branch id is required.", nameof(branchId));
         }
 
+        CameraId = Guid.NewGuid();
+        BranchId = branchId;
+        Name = RequireName(name);
+        RtspUrl = RequireRtspUrl(rtspUrl);
+        Enabled = enabled;
+    }
+
+    // Edits an existing camera's configurable fields (FS-03 §5.2, AC-2). It reuses the same
+    // presence/length validation the constructor applies, so an edit cannot move the camera into a
+    // state the constructor would have rejected. CameraId, BranchId, and Enabled are deliberately
+    // never touched: an edited camera keeps its identity (FS-03 §5.3 — existing CameraId preserved),
+    // stays on its branch, and its enablement is not an edit input (as it is not a creation input).
+    public void UpdateConfiguration(string name, string rtspUrl)
+    {
+        Name = RequireName(name);
+        RtspUrl = RequireRtspUrl(rtspUrl);
+    }
+
+    // Presence and length only — the constructor and the editor share this so the two cannot drift.
+    private static string RequireName(string name)
+    {
         if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException("Camera name is required.", nameof(name));
@@ -54,6 +75,14 @@ public class Camera
                 $"Camera name must not exceed {NameMaxLength} characters.", nameof(name));
         }
 
+        return trimmedName;
+    }
+
+    // Presence and length only — format (the rtsp:// scheme) remains an Application-layer rule
+    // (IP-01 §11, FS-03 §6), not a Domain one. The value is never interpolated into the message: an
+    // RTSP URL may embed credentials, and an exception must not become the vector that leaks them.
+    private static string RequireRtspUrl(string rtspUrl)
+    {
         if (string.IsNullOrWhiteSpace(rtspUrl))
         {
             throw new ArgumentException("Camera RTSP URL is required.", nameof(rtspUrl));
@@ -69,10 +98,6 @@ public class Camera
                 $"Camera RTSP URL must not exceed {RtspUrlMaxLength} characters.", nameof(rtspUrl));
         }
 
-        CameraId = Guid.NewGuid();
-        BranchId = branchId;
-        Name = trimmedName;
-        RtspUrl = trimmedRtspUrl;
-        Enabled = enabled;
+        return trimmedRtspUrl;
     }
 }

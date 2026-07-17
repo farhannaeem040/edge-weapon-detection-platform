@@ -39,6 +39,53 @@ public class BranchTests
         Assert.NotEqual(first.BranchId, second.BranchId);
     }
 
+    // FS-03 §5.1/§5.3, AC-1: editing the scalar fields updates them and preserves the identity.
+    [Fact]
+    public void UpdateDetails_ValidValues_ReplacesTheScalarFieldsAndKeepsBranchId()
+    {
+        var branch = new Branch(Name, Address, ContactDetails);
+        var originalId = branch.BranchId;
+
+        branch.UpdateDetails("New Name", "New Address", "new-contact@example.invalid");
+
+        Assert.Equal("New Name", branch.Name);
+        Assert.Equal("New Address", branch.Address);
+        Assert.Equal("new-contact@example.invalid", branch.ContactDetails);
+        Assert.Equal(originalId, branch.BranchId);
+    }
+
+    [Fact]
+    public void UpdateDetails_TrimsEachValue()
+    {
+        var branch = new Branch(Name, Address, ContactDetails);
+
+        branch.UpdateDetails("  Trimmed  ", "  Addr  ", "  contact  ");
+
+        Assert.Equal("Trimmed", branch.Name);
+        Assert.Equal("Addr", branch.Address);
+        Assert.Equal("contact", branch.ContactDetails);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void UpdateDetails_BlankName_Throws(string? blank)
+    {
+        var branch = new Branch(Name, Address, ContactDetails);
+
+        Assert.Throws<ArgumentException>(() => branch.UpdateDetails(blank!, Address, ContactDetails));
+    }
+
+    [Fact]
+    public void UpdateDetails_OverlongName_Throws()
+    {
+        var branch = new Branch(Name, Address, ContactDetails);
+
+        Assert.Throws<ArgumentException>(() =>
+            branch.UpdateDetails(new string('a', Branch.NameMaxLength + 1), Address, ContactDetails));
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

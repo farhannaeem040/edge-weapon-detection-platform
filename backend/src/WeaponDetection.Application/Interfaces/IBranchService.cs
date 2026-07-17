@@ -32,6 +32,25 @@ public interface IBranchService
     Task<BranchView?> GetBranchAsync(
         Guid branchId,
         CancellationToken cancellationToken = default);
+
+    // Edits a branch and reconciles its cameras in a single SQL Server transaction (FS-03 §5.1,
+    // §5.2, §11). The request is the desired end-state: the branch's scalar fields plus the complete
+    // intended camera collection, each camera either carrying an existing CameraId (update in place)
+    // or none (add). Any stored camera whose CameraId is absent from the request is removed, subject
+    // to the "at least one camera remains" rule.
+    //
+    // The Device record and every Activation Key record are never written by this operation — an
+    // edit preserves the Device identity, activation status, protected shared secret, and all key
+    // records unchanged (FS-03 §5.3, AC-7, AC-8; ADR-015). A failure at any point rolls the whole
+    // update back (AC-6).
+    //
+    // Expected non-success outcomes are first-class results, not exceptions: an unknown branch is
+    // NotFound (→ 404), and a business-invalid request (zero cameras, an unknown/foreign/duplicate
+    // CameraId, or an invalid camera field) is Invalid (→ 400). This mirrors how the activation and
+    // regeneration paths model their expected non-success outcomes rather than throwing.
+    Task<BranchUpdateResult> UpdateBranchAsync(
+        UpdateBranchRequest request,
+        CancellationToken cancellationToken = default);
 }
 
 // The Application-layer branch-creation request. Deliberately independent of any API DTO or EF
@@ -48,6 +67,56 @@ public sealed record NewBranchRequest(
 // the same two fields ARCH-001/FS-02 attach to a Camera at creation time. Enablement is not a
 // creation-time input (Camera defaults to enabled).
 public sealed record NewCameraRequest(string Name, string RtspUrl);
+
+// The Application-layer branch-update request (FS-03 §5.1, §10.1). Like NewBranchRequest it is
+// independent of any API DTO or EF type. BranchId identifies the target; the Cameras collection is
+// the full desired end-state, reconciled against the stored cameras by CameraId (§5.2).
+public sealed record UpdateBranchRequest(
+    Guid BranchId,
+    string Name,
+    string Address,
+    string ContactDetails,
+    IReadOnlyList<CameraMutation> Cameras);
+
+// One camera in an update request. CameraId is the existing public Camera.CameraId when the camera
+// already exists and is being edited (update in place), or null when it is being added (a new
+// identity is generated on add). This is the already-public identifier the read DTOs return
+// (FS-03 §1.3) — no new identifier is introduced. Name/RtspUrl are validated exactly as at creation.
+public sealed record CameraMutation(Guid? CameraId, string Name, string RtspUrl);
+
+// The outcome of an update attempt. Exactly one of the three states holds:
+//
+//  - Updated  — the branch was edited; Branch carries the re-projected read view.
+//  - NotFound — no branch has the requested id (→ 404).
+//  - Invalid  — the request is business-invalid (zero cameras; a camera field failing validation;
+//               an unknown, foreign, or duplicated CameraId) (→ 400). The reason is intentionally
+//               not carried on the wire: the API layer returns one generic validation envelope that
+//               never echoes a submitted value (FS-03 §6, §12).
+public sealed class BranchUpdateResult
+{
+    public BranchUpdateStatus Status { get; }
+    public BranchView? Branch { get; }
+
+    private BranchUpdateResult(BranchUpdateStatus status, BranchView? branch)
+    {
+        Status = status;
+        Branch = branch;
+    }
+
+    public static BranchUpdateResult Updated(BranchView branch) =>
+        new(BranchUpdateStatus.Updated, branch ?? throw new ArgumentNullException(nameof(branch)));
+
+    public static BranchUpdateResult NotFound() => new(BranchUpdateStatus.NotFound, null);
+
+    public static BranchUpdateResult Invalid() => new(BranchUpdateStatus.Invalid, null);
+}
+
+public enum BranchUpdateStatus
+{
+    Updated,
+    NotFound,
+    Invalid,
+}
 
 // The successful outcome of branch creation: the created branch/camera/device summary plus the
 // plaintext Activation Key, shown exactly once (FS-02 §5.1 step 6, §10.1). Invalid input never
