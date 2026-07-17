@@ -1,59 +1,59 @@
-# Frontend
+# Frontend — Angular Dashboard
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.3.32.
+The Admin Dashboard for the Edge-Based Weapon Detection platform (IP-01 tasks T-22 onward; FS-01,
+FS-02 Increment A). Generated with Angular CLI 20.3.32.
 
-## Development server
+The root [`README.md`](../README.md) is the source of truth for project status, prerequisites,
+architecture, the API contract, security notes, and known limitations. This file covers only how to
+work in this workspace.
 
-To start a local development server, run:
+## Module boundaries
 
-```bash
-ng serve
-```
+| Folder | Responsibility |
+|--------|----------------|
+| [`src/app/core`](src/app/core/README.md) | Cross-cutting singletons: auth interceptor, session-expiry interceptor, route guard |
+| [`src/app/auth`](src/app/auth/README.md) | `AuthService`, login view |
+| [`src/app/branches`](src/app/branches/README.md) | Branch list/detail/create, cameras, Activation Key display, device status badge |
+| [`src/app/shared`](src/app/shared/README.md) | The protected dashboard shell |
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## Commands
 
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
-
-```bash
-ng generate component component-name
-```
-
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
-
-## Building
-
-To build the project run:
+All commands run from `frontend/`. Angular CLI is a local dev dependency, so no global install is
+needed — the `npm` scripts invoke it, and `npx ng ...` works for anything without a script.
 
 ```bash
-ng build
+npm ci                    # install exactly the locked dependency versions
+npm start                 # ng serve — dev server at http://localhost:4200/
+npm test -- --watch=false # single Karma + Jasmine run
+npm run build             # production build into dist/ (git-ignored)
+npm audit                 # dependency vulnerability check
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
+`npm test` needs a Chrome/Chromium browser. In a headless environment, point Karma at one:
 
 ```bash
-ng test
+CHROME_BIN="/path/to/chrome" npx ng test --watch=false --browsers=ChromeHeadless
 ```
 
-## Running end-to-end tests
+There is no `ng e2e` target: no end-to-end framework is configured, and the milestone's automated
+coverage is this Karma unit/component suite plus the Backend integration suite.
 
-For end-to-end (e2e) testing, run:
+## Running against the Backend
 
-```bash
-ng e2e
-```
+Start the Backend first (see the root README), then `npm start`. The dev server proxies `/api` to the
+Backend, so the browser issues only same-origin requests — see `proxy.conf.json`. This mirrors the
+co-located production deployment and avoids requiring a CORS policy the Backend does not otherwise
+need.
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
+## Backend base URL
 
-## Additional Resources
+Configured per build environment in `src/environments/`:
 
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+- `environment.development.ts` — used by `ng serve` and development builds; host-relative `/api/v1`,
+  which `proxy.conf.json` forwards to the local Kestrel HTTP endpoint.
+- `environment.ts` — the production default; host-relative `/api/v1`, since the Dashboard's static
+  assets are served from the same host as the Backend in the prototype deployment.
+
+These files hold **only** the non-secret base URL. No credential, token, or key belongs in an
+environment file — they are compiled into the browser bundle and readable by anyone who loads the
+page. Angular selects the development file automatically via `fileReplacements` in `angular.json`.
