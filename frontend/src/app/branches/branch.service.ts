@@ -4,10 +4,15 @@ import { Observable, catchError, map, of, throwError } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 import { ApiEnvelope } from '../auth/auth.service';
-import { Branch, CreateBranchRequest, CreatedBranch } from './branch.models';
+import {
+  Branch,
+  CreateBranchRequest,
+  CreatedBranch,
+  RegeneratedActivationKey,
+} from './branch.models';
 
 /**
- * The Dashboard's client for the Branch endpoints (IP-01 T-26/T-27, consuming T-16).
+ * The Dashboard's client for the Branch endpoints (IP-01 T-26/T-27/T-28, consuming T-16/T-18).
  *
  * Its entire job is to call the two approved endpoints and unwrap the standard envelope
  * (ARCH-001 §14.3 / ADR-009). It performs no redaction, no derivation of activation state, and no
@@ -21,6 +26,12 @@ import { Branch, CreateBranchRequest, CreatedBranch } from './branch.models';
 export class BranchService {
   private readonly http = inject(HttpClient);
   private readonly branchesUrl = `${environment.apiBaseUrl}/branches`;
+
+  /**
+   * The device endpoints' base (IP-01 §10). Regeneration lives under `/devices` even though it is
+   * addressed by a *branch* id — see `regenerateActivationKey`.
+   */
+  private readonly devicesUrl = `${environment.apiBaseUrl}/devices`;
 
   /** Every branch, with its cameras and device summary (`GET /api/v1/branches`). */
   list(): Observable<Branch[]> {
@@ -77,6 +88,57 @@ export class BranchService {
         return created;
       }),
     );
+  }
+
+  /**
+   * Regenerates a branch's Activation Key (`POST /api/v1/devices/{branchId}/activation-key/
+   * regenerate`), returning the new complete plaintext key from that single response, or `null` when
+   * the Backend answers 404 (IP-01 T-28; FS-02 §5.3, §10.2, AC-5).
+   *
+   * **The identifier is the branch id, not a Device ID.** That is the Backend's contract, not a
+   * convenience here: regeneration must work for a Device that has never activated (FS-02 §15 T-03),
+   * whose `DeviceId` is still null and cannot address it, while the internal `DeviceRecordId` is
+   * never exposed to any client (FS-02 §1.3). The branch id is the only always-present, client-visible
+   * handle to a branch's single Device, so the route's `{id}` is populated with it — as
+   * `DeviceController.RegenerateActivationKey`'s own `branchId` parameter spells out.
+   *
+   * There is no request body: the branch id in the route is the endpoint's only input.
+   *
+   * The `null` follows `get`'s reasoning — a regeneration target that does not exist is a documented
+   * outcome (FS-02 §13), so the view can distinguish it from a genuine failure without reading status
+   * codes. Every other error, a 401 included, propagates.
+   *
+   * As with `create`, the key is handed straight to the caller and kept nowhere: no field on this
+   * service, no cache, no browser storage, and nothing here logs the response. The old key is neither
+   * sent nor requested — it cannot be: the Backend has only its hash, and regeneration has already
+   * invalidated it (FS-02 §5.3 step 3).
+   */
+  regenerateActivationKey(branchId: string): Observable<string | null> {
+    return this.http
+      .post<ApiEnvelope<RegeneratedActivationKey>>(
+        `${this.devicesUrl}/${encodeURIComponent(branchId)}/activation-key/regenerate`,
+        null,
+      )
+      .pipe(
+        map((envelope) => {
+          const { activationKey } = unwrap(envelope);
+
+          // As at creation: a success whose envelope omits the key is a contract violation, not a
+          // regeneration that produced no key. The previous key is already invalid and the new one
+          // can never be re-fetched (FS-02 §6), so this must fail loudly rather than report a success
+          // that silently lost it.
+          if (!activationKey) {
+            throw new Error('The Backend returned an unexpected response.');
+          }
+
+          return activationKey;
+        }),
+        catchError((error: unknown) =>
+          error instanceof HttpErrorResponse && error.status === 404
+            ? of(null)
+            : throwError(() => error),
+        ),
+      );
   }
 }
 

@@ -103,6 +103,21 @@ export interface CreatedBranch extends Branch {
 }
 
 /**
+ * `data` of a successful `POST /api/v1/devices/{branchId}/activation-key/regenerate` (backend
+ * `RegenerateActivationKeyResponseDto`) — IP-01 T-28; FS-02 §5.3 step 5, §10.2.
+ *
+ * Transcribed field-for-field from that DTO, which is a record of exactly one member. Alongside
+ * `CreatedBranch.activationKey` this is the *only* other shape that ever carries the plaintext key,
+ * and it carries nothing else: no old key, no key hash, no key status, no `DeviceRecordId`, no
+ * protected or device shared secret. The Backend's DTO has no member for any of them, so there is
+ * nothing here to mirror — and nothing to add.
+ */
+export interface RegeneratedActivationKey {
+  /** The new complete plaintext key (`keyId.secret`), disclosed in this response alone. */
+  activationKey: string;
+}
+
+/**
  * The Backend's own length limits, mirrored so client-side feedback agrees with the DataAnnotations
  * that will judge the submission (`Branch.*MaxLength`, `Camera.*MaxLength`). The Backend remains
  * authoritative; these only spare the Admin a round trip.

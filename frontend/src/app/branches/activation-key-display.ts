@@ -21,12 +21,29 @@ type CopyState = 'idle' | 'copied' | 'failed';
  *
  * The Admin is told plainly that this is the only time the key is shown, because the recovery for
  * missing it is regeneration (T-28), not a second look.
+ *
+ * T-28 discloses a *regenerated* key through this same component rather than a second key-display
+ * mechanism: one disclosure treatment, one set of storage rules, one copy path. The three optional
+ * inputs below adapt only the wording — the heading, the "the previous key is now invalid" line, and
+ * the label on the leave button. They default to T-27's creation wording, so the create flow renders
+ * exactly as it did before. Nothing about how the key is held, copied, or discarded varies.
  */
 @Component({
   selector: 'app-activation-key-display',
   template: `
     <section class="activation-key">
-      <h3>Activation Key</h3>
+      <h3>{{ heading() }}</h3>
+
+      @if (regenerated()) {
+        <!-- FS-02 §5.3 step 6: the previous key is invalid from this moment, whether or not it was
+             ever used. Whether it *had* been consumed is deliberately not stated — that is the
+             Backend's business and none of the Admin's decision here. -->
+        <p class="activation-key__regenerated" role="alert">
+          This is a new Activation Key. The previous Activation Key is no longer valid and can no
+          longer be used to activate this branch's Device. Use the key below for the next activation
+          or reactivation.
+        </p>
+      }
 
       <p class="activation-key__warning" role="alert">
         This Activation Key is shown once and cannot be retrieved again. Copy it now and store it
@@ -60,7 +77,7 @@ type CopyState = 'idle' | 'copied' | 'failed';
       <!-- A button, not a link: navigation must not carry the key anywhere, and this leaves the
            disclosure only when the Admin says they have it. -->
       <button class="activation-key__continue" type="button" (click)="continued.emit()">
-        Continue to branch
+        {{ continueLabel() }}
       </button>
     </section>
   `,
@@ -77,10 +94,25 @@ type CopyState = 'idle' | 'copied' | 'failed';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class ActivationKeyDisplayComponent {
-  /** The complete plaintext key (`keyId.secret`), straight from the create response. */
+  /**
+   * The complete plaintext key (`keyId.secret`), straight from the create (T-27) or regenerate
+   * (T-28) response — the only two responses that ever carry one.
+   */
   readonly activationKey = input.required<string>();
 
-  /** The Admin has recorded the key and wants to move on to the created branch. */
+  /** The section heading. Defaults to the creation-time wording. */
+  readonly heading = input('Activation Key');
+
+  /**
+   * Whether this key replaced a previous one, which adds the notice that the previous key is now
+   * invalid (FS-02 §5.3 step 6). False at creation, where there was no previous key to invalidate.
+   */
+  readonly regenerated = input(false);
+
+  /** The label on the button that ends the disclosure. Defaults to the creation-time wording. */
+  readonly continueLabel = input('Continue to branch');
+
+  /** The Admin has recorded the key and is done with the disclosure. */
   readonly continued = output<void>();
 
   protected readonly copyState = signal<CopyState>('idle');

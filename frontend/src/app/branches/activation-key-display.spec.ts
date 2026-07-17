@@ -98,4 +98,67 @@ describe('ActivationKeyDisplayComponent', () => {
     expect(JSON.stringify(localStorage)).not.toContain(PLACEHOLDER_ACTIVATION_KEY);
     expect(document.cookie).not.toContain(PLACEHOLDER_ACTIVATION_KEY);
   });
+
+  // The wording T-27's creation flow relies on, which the T-28 inputs must not have disturbed.
+  describe('by default, at creation', () => {
+    it('uses the creation heading and continue label', () => {
+      expect(query('h3')?.textContent).toContain('Activation Key');
+      expect(query('.activation-key__continue')?.textContent).toContain('Continue to branch');
+    });
+
+    it('claims no previous key was invalidated, because creation invalidates none', () => {
+      expect(query('.activation-key__regenerated')).toBeNull();
+      expect(text()).not.toContain('no longer valid');
+    });
+  });
+
+  describe('when disclosing a regenerated key (T-28)', () => {
+    beforeEach(() => {
+      fixture.componentRef.setInput('heading', 'New Activation Key');
+      fixture.componentRef.setInput('regenerated', true);
+      fixture.componentRef.setInput('continueLabel', 'Done');
+      fixture.detectChanges();
+    });
+
+    it('labels the key as newly regenerated', () => {
+      expect(query('h3')?.textContent).toContain('New Activation Key');
+      expect(text()).toContain('This is a new Activation Key.');
+    });
+
+    it('states that the previous key is no longer valid', () => {
+      expect(query('.activation-key__regenerated')?.textContent).toContain('no longer valid');
+    });
+
+    it('does not reveal whether the previous key had been used', () => {
+      // Consumption state is the Backend's business and irrelevant to the Admin here; regeneration
+      // invalidates the previous key either way (FS-02 §5.3 step 3).
+      const rendered = text();
+      expect(rendered).not.toContain('consumed');
+      expect(rendered).not.toContain('unconsumed');
+      expect(rendered).not.toContain('never used');
+    });
+
+    it('still shows the single-disclosure warning', () => {
+      expect(text()).toContain('shown once');
+      expect(text()).toContain('cannot be retrieved again');
+    });
+
+    it('offers the same explicit copy action, which still requires a click', async () => {
+      const writeText = spyOn(navigator.clipboard, 'writeText').and.resolveTo();
+
+      fixture.detectChanges();
+      expect(writeText).not.toHaveBeenCalled();
+
+      query('.activation-key__copy')?.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(writeText).toHaveBeenCalledOnceWith(PLACEHOLDER_ACTIVATION_KEY);
+      expect(text()).toContain('Activation Key copied to the clipboard.');
+    });
+
+    it('uses the completion label for the leave button', () => {
+      expect(query('.activation-key__continue')?.textContent).toContain('Done');
+    });
+  });
 });
