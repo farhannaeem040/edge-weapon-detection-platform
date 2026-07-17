@@ -4,15 +4,14 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31 (scaffolding only)
+## Status — IP-02 T-31–T-32
 
-This directory currently contains **only the project scaffold**: package metadata, development
-tooling, and a minimal importable FastAPI application with no endpoints. None of the Agent's
-behaviour exists yet.
+Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
+FastAPI application with no endpoints) and the **validated bootstrap-configuration foundation**
+(T-32 — see [Configuration](#configuration)). None of the Agent's operational behaviour exists yet.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- settings/configuration loading (T-32);
 - logging with secret redaction (T-33);
 - the `/opt/weapon-detection/` filesystem layout (T-34);
 - the local SQLite store and device-identity/config-cache persistence (T-35, T-36);
@@ -42,22 +41,77 @@ agent/
 ├── src/
 │   └── weapon_detection_agent/
 │       ├── __init__.py                  # package marker + __version__
-│       └── main.py                      # minimal FastAPI `app` (no endpoints yet)
+│       ├── main.py                      # minimal FastAPI `app` (no endpoints yet)
+│       └── config/
+│           ├── __init__.py
+│           └── settings.py              # AgentSettings + load_settings() (T-32)
 └── tests/
-    └── test_app_startup.py              # scaffold smoke tests
+    ├── test_app_startup.py              # scaffold smoke tests
+    └── test_settings.py                 # settings/configuration tests (T-32)
 ```
 
-The broader module structure IP-02 §4 lays out (`config/`, `persistence/`, `activation/`,
+The rest of the module structure IP-02 §4 lays out (`config/paths.py`, `persistence/`, `activation/`,
 `runtime/`, `logging/`) is introduced by the tasks that implement each part — not scaffolded ahead
 of use (Engineering Principle 9).
 
 ## Dependencies
 
-- **Runtime:** `fastapi`, `uvicorn[standard]` — only what the minimal control-plane scaffold needs.
+- **Runtime:** `fastapi`, `uvicorn[standard]` (control-plane scaffold), `pydantic-settings` (the
+  validated bootstrap-configuration model, T-32).
 - **Development:** `pytest`, `httpx` (FastAPI `TestClient` HTTP/API testing), `ruff` (lint +
   format), `mypy` (static type checking).
 
 The Agent's own runtime HTTP client for calling the Backend is added by T-37, not here.
+
+## Configuration
+
+The Agent's bootstrap configuration (IP-02 §6) is read from `WDA_`-prefixed environment variables
+into one **immutable, validated** settings object
+(`weapon_detection_agent.config.settings.AgentSettings`). Loading is explicit — call
+`load_settings()`; **merely importing the package or the FastAPI app reads no configuration and has
+no side effects**, so a missing variable never breaks an import.
+
+| Variable | Required | Default | Notes |
+|----------|----------|---------|-------|
+| `WDA_BACKEND_BASE_URL` | **Yes** | — | The Backend's base URL. Must be a syntactically valid `http`/`https` URL **with a host**. Not contacted, and not path-normalized — only surrounding whitespace is trimmed. |
+| `WDA_ACTIVATION_KEY` | No (env source) | — | The complete plaintext Activation Key, held as a redacted secret. Never logged or shown in a `repr`/error. IP-02 §6.1 also allows a key **file** with the environment taking precedence; that file source is deferred to a later task (it needs the resolved filesystem root and reads a file, whereas settings loading here does no filesystem I/O). |
+| `WDA_ROOT_PATH` | No | `/opt/weapon-detection` | Agent filesystem root. Overridable only so tests/workstation runs avoid `/opt` (IP-02 §8.2). No directory is created here (T-34). |
+| `WDA_HTTP_TIMEOUT_SECONDS` | No | `10` | Activation-request timeout; must be positive. |
+| `WDA_LOG_LEVEL` | No | `INFO` | One of `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (case-insensitive). Consumed by the logging foundation (T-33). |
+
+**Accepted URL schemes:** `http` and `https` only. Trusted-LAN HTTP is the prototype posture
+(ADR-002/CON-005); HTTPS is accepted so a hardened deployment needs no change here.
+
+**Configuration precedence** (pydantic-settings source order): explicit constructor arguments (used
+by application code and tests) → `WDA_` environment variables → declared defaults for optional
+settings. No `.env` file is read — provisioning is out-of-band (IP-02 §6, ASM-006).
+
+**Missing or invalid configuration fails fast.** `load_settings()` raises a `ConfigurationError`
+whose message names the offending `WDA_` variable and the rule it broke — and never the provided
+value, so no Activation Key, URL, or other configured value can leak through an error.
+
+Set the required variable:
+
+- **Linux / macOS (bash):**
+
+  ```bash
+  export WDA_BACKEND_BASE_URL="http://localhost:5230"
+  ```
+
+- **Windows (PowerShell):**
+
+  ```powershell
+  $env:WDA_BACKEND_BASE_URL = "http://localhost:5230"
+  ```
+
+Run the settings tests:
+
+```bash
+python -m pytest tests/test_settings.py
+```
+
+> **Never commit** a `.env` file, an Activation Key, a device shared secret, or any real
+> configuration value. See [`.gitignore`](.gitignore).
 
 ## Developer commands
 

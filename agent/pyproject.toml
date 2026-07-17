@@ -21,12 +21,15 @@ requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Farhan Naeem" }]
 
-# Runtime dependencies are deliberately only what T-31's minimal control-plane scaffold needs:
-# FastAPI and its Uvicorn server. The Backend HTTP client (httpx), SQLite persistence, and every
-# other runtime dependency arrive with the task that first uses them (T-37 onward), not now.
+# Runtime dependencies are only what the delivered tasks genuinely need:
+#   - FastAPI + Uvicorn: the minimal control-plane scaffold (T-31).
+#   - pydantic-settings: the validated, immutable bootstrap-configuration model (T-32, IP-02 §6).
+# The Backend HTTP client (httpx), SQLite persistence, and every other runtime dependency arrive
+# with the task that first uses them (T-37 onward), not now (Engineering Principle 9).
 dependencies = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
+    "pydantic-settings>=2.4,<3.0",
 ]
 
 [project.optional-dependencies]
