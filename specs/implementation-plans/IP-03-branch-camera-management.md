@@ -245,6 +245,22 @@ Each task is independently committable (Engineering Principle 3) and lists its F
 Against a throwaway database:
 1. Log in. 2. Create a branch with two cameras. 3. Confirm Edit and Delete icons appear beside it. 4. Edit branch fields. 5. Edit one camera. 6. Add one camera. 7. Remove another camera. 8. Confirm Device identity and activation status are unchanged. 9. Confirm no Activation Key was regenerated. 10. Open Delete, cancel, confirm nothing changed. 11. Delete the branch after confirmation. 12. Confirm Branch, Cameras, Device, and Activation Keys are gone. 13. Confirm another branch is unaffected. 14. Confirm protected routes require authentication. 15. Confirm no secrets appear in UI, logs, URLs, or screenshots. Delete throwaway data afterward.
 
+## 8. Delivery Status
+
+**Delivered — T-42 through T-47 complete**, each independently committed on `main`:
+
+| Task | Delivery | Commit |
+|------|----------|--------|
+| T-42 | Transactional Branch/Camera update service (`BranchService.UpdateBranchAsync`, `UpdateBranchRequest`/`CameraMutation`) | `feat(branches): add transactional branch update service` |
+| T-43 | `PUT /api/v1/branches/{branchId}` | `feat(branches): add branch update endpoint` |
+| T-44 | Transactional deletion service (`DeleteBranchAsync`) + `DELETE /api/v1/branches/{branchId}` | `feat(branches): add branch deletion endpoint` |
+| T-45 | Angular branch edit form (`/branches/:branchId/edit`) + Edit icons on list/detail | `feat(frontend): add branch and camera editing` |
+| T-46 | Angular delete-confirmation dialog + Delete icons on list/detail | `feat(frontend): add branch deletion actions` |
+| T-47 | Documentation + full verification | `docs(branches): document branch edit and deletion` |
+
+No EF migration was required (verified — no pending model changes). No IP-02/Agent code was touched.
+No SRS/ARCH-001/FS-01/FS-02 content was modified.
+
 ---
 
-*IP-03 — Branch & Camera Management. Status: Approved. Task IDs T-42–T-47 (T-31–T-41 reserved by IP-02).*
+*IP-03 — Branch & Camera Management. Status: Approved (delivered). Task IDs T-42–T-47 (T-31–T-41 reserved by IP-02).*

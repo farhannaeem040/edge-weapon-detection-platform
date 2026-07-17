@@ -1,7 +1,8 @@
 # Frontend — Angular Dashboard
 
 The Admin Dashboard for the Edge-Based Weapon Detection platform (IP-01 tasks T-22 onward; FS-01,
-FS-02 Increment A). Generated with Angular CLI 20.3.32.
+FS-02 Increment A; branch/camera edit and delete from FS-03 / IP-03 T-45–T-46). Generated with
+Angular CLI 20.3.32.
 
 The root [`README.md`](../README.md) is the source of truth for project status, prerequisites,
 architecture, the API contract, security notes, and known limitations. This file covers only how to
@@ -13,7 +14,7 @@ work in this workspace.
 |--------|----------------|
 | [`src/app/core`](src/app/core/README.md) | Cross-cutting singletons: auth interceptor, session-expiry interceptor, route guard |
 | [`src/app/auth`](src/app/auth/README.md) | `AuthService`, login view |
-| [`src/app/branches`](src/app/branches/README.md) | Branch list/detail/create, cameras, Activation Key display, device status badge |
+| [`src/app/branches`](src/app/branches/README.md) | Branch list/detail/create/edit, cameras, Edit/Delete actions and the delete-confirmation dialog, Activation Key display, device status badge |
 | [`src/app/shared`](src/app/shared/README.md) | The protected dashboard shell |
 
 ## Commands

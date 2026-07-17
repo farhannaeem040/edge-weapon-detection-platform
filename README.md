@@ -17,6 +17,10 @@ implementation follows approved specifications. Claude Code is used as an AI eng
 [FS-01](specs/features/FS-01-authentication-session-management.md) in full and
 [FS-02](specs/features/FS-02-branch-device-onboarding.md) Increment A.
 
+**Branch & Camera Management (edit / delete) — IP-03, tasks T-42–T-47 — is complete**, realizing
+[FS-03](specs/features/FS-03-branch-camera-management.md) in full. (Task IDs T-31–T-41 are reserved
+by IP-02 for the Jetson Agent and are not used here.)
+
 This is a **prototype**, not a production deployment. Nothing below claims otherwise.
 
 ### Delivered and covered by automated tests
@@ -24,11 +28,24 @@ This is a **prototype**, not a production deployment. Nothing below claims other
 - Admin login, JWT issuance, and server-side session validation.
 - Logout with server-side session revocation; expired/revoked-session rejection.
 - Branch creation with one or more Cameras, in a single transaction.
+- **Transactional Branch editing** (`PUT /api/v1/branches/{id}`): edit branch name/address/contact
+  details, edit existing Cameras in place, add Cameras, and remove Cameras (at least one must remain),
+  all in one transaction. Editing preserves the public Branch ID, the Device record and its public
+  Device ID, activation status, the protected shared secret, and Activation Key history — it never
+  regenerates a key, deactivates a Device, rotates the secret, or exposes any internal identifier.
+- **Transactional Branch deletion** (`DELETE /api/v1/branches/{id}`): a hard delete that removes the
+  branch's Activation Keys, Device, Cameras, and the Branch itself atomically, behind an explicit
+  Admin confirmation. It invalidates Backend recognition of the deleted Device and contacts no remote
+  Agent. (Future Alerts/Events/Reports and audit-retention needs may later require soft deletion or
+  deletion restrictions; those entities do not exist in the current milestone.)
 - One-time Activation Key issuance and regeneration.
 - Device activation through the Agent-facing `POST /api/v1/activate`, including consumed-key replay
   rejection, Device ID retention across reactivation, and concurrent single-use key enforcement.
 - The Angular Dashboard: login, protected routes, branch list/detail/create, Activation Key display,
-  regeneration, and device status badge.
+  regeneration, and device status badge; plus the **branch edit form** (`/branches/:branchId/edit`),
+  per-branch **Edit/Delete icon actions** on the list and detail views, and the accessible
+  **delete-confirmation dialog** — Edit preserves device identity and shows no key/secret, and Delete
+  requires explicit confirmation warning the action cannot be undone.
 
 ### Verified by live manual demonstration (API level)
 
@@ -252,6 +269,8 @@ npm audit
 | `/api/v1/branches` | POST | JWT + server-side session |
 | `/api/v1/branches` | GET | JWT + server-side session |
 | `/api/v1/branches/{id}` | GET | JWT + server-side session |
+| `/api/v1/branches/{id}` | PUT | JWT + server-side session |
+| `/api/v1/branches/{id}` | DELETE | JWT + server-side session |
 | `/api/v1/devices/{id}` | GET | JWT + server-side session |
 | `/api/v1/devices/{id}/activation-key/regenerate` | POST | JWT + server-side session |
 | `/api/v1/activate` | POST | None for Admin-JWT purposes — authenticated by the Activation Key itself |
@@ -264,6 +283,19 @@ silently expose a route. All responses — the anonymous ones included — use t
 Every authentication failure (no header, malformed or wrongly-signed token, expired token, no `jti`,
 unknown or mismatched session, revoked session) returns `401` with the same generic envelope. The
 response never reveals which check failed.
+
+> **`PUT /api/v1/branches/{id}`** edits the branch and reconciles its cameras in one transaction and
+> returns the same safe read shape as `GET` (`200`); it never returns an Activation Key, key hash,
+> `DeviceRecordId`, or secret, and never touches the Device or Activation Key records. A camera in
+> the request carries its existing `cameraId` to be updated in place, or no id to be added; an omitted
+> existing camera is removed, and at least one camera must remain. Invalid input — a blank/oversized
+> field, an empty camera list, a malformed RTSP URL, or a `cameraId` that is unknown, duplicated, or
+> belongs to another branch — is a generic `400`; an unknown branch is `404`.
+>
+> **`DELETE /api/v1/branches/{id}`** hard-deletes the branch and its Activation Keys, Device, and
+> Cameras in one transaction and returns an empty success envelope (`200`, `null` data) — no deleted
+> entity and no credential. An unknown branch is `404`. A failure at any step rolls the whole
+> operation back. No remote Agent is contacted.
 
 > **`/api/v1/devices/{id}/activation-key/regenerate` takes a _Branch_ ID, despite its `/devices/`
 > path.** This is the current approved contract (IP-01 §10, resolving FS-02 §19's open item), not a
@@ -345,6 +377,23 @@ hollow.
 | Indexed lookup; no recoverable plaintext (AC-14) | `ActivationKeyGeneratorTests`, `Pbkdf2PasswordHasherTests`, `DataProtectionDeviceSecretProtectorTests` |
 | No self-registration path for an Agent (AC-6, AC-8) | `BranchApiTests`, `SessionAuthorizationApiTests` (creation requires an Admin session) |
 | Schema-level one-Device-per-Branch (§1.3) | `DeviceActivationKeySchemaSqlServerTests` (unique `BranchId`; filtered unique `DeviceId`) |
+
+**FS-03 — Branch & Camera Management (Edit / Delete)**
+
+| Criterion | Where it is verified |
+|-----------|----------------------|
+| Edit branch scalar fields (AC-1) | `BranchUpdateServiceTests`, `BranchUpdateApiTests`; Angular `branch-edit.spec.ts` |
+| Edit Cameras in place, preserving Camera ID (AC-2, AC-9) | `BranchUpdateServiceTests`, `BranchUpdateApiTests`; Angular `branch-edit.spec.ts` (hidden `cameraId` retained; exact PUT payload) |
+| Add / remove Cameras; at least one remains (AC-3, AC-4, AC-5) | `BranchUpdateServiceTests`, `BranchUpdateApiTests`; Angular `branch-edit.spec.ts` |
+| Transactional rollback on failed edit (AC-6) | `BranchUpdateServiceTests` (real SQL Server) |
+| Device identity + activation + key preserved during edit (AC-7, AC-8) | `BranchUpdateServiceTests`, `BranchUpdateApiTests` (`DeviceRecordId`, public `DeviceId`, activation status, protected secret, Activation Keys all unchanged) |
+| Complete dependent-data removal on delete (AC-10) | `BranchDeleteApiTests`, `BranchDeletionServiceTests`; Cameras, Device, Activation Keys, Branch all removed |
+| Transactional rollback on failed delete (AC-11) | `BranchDeletionServiceTests` (forced mid-delete FK failure, real SQL Server) |
+| Deleted Device no longer recognised; other branches unaffected (AC-11, AC-12) | `BranchDeleteApiTests` |
+| Authorization on edit/delete (AC-13) | `BranchUpdateApiTests`, `BranchDeleteApiTests` (`401` without a session) |
+| Safe responses — no secret/internal id (AC-14) | `BranchUpdateApiTests`, `BranchDeleteApiTests`; Angular specs assert no key/secret/`DeviceRecordId` rendered |
+| Confirmation before deletion (AC-13) | Angular `branch-delete-confirm.spec.ts`, `branch-list.spec.ts`, `branch-detail.spec.ts` (cancel sends no request; confirm calls the endpoint once) |
+| Edit/Delete icons beside each branch; accessibility (AC-15, AC-16) | Angular `branch-list.spec.ts`, `branch-detail.spec.ts` (aria-label/title naming the branch, keyboard-focusable controls) |
 
 ---
 

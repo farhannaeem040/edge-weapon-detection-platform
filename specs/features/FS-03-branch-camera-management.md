@@ -373,3 +373,5 @@ All responses use the uniform envelope (`{success, message, data}` / `{success, 
 ---
 
 *FS-03 — Branch & Camera Management is APPROVED (per explicit user approval of scope). It adds no SRS or ARCH-001 requirement; it manages the existing FS-02 model.*
+
+*Delivery: implemented and delivered by IP-03 tasks T-42–T-47. Backend `PUT`/`DELETE /api/v1/branches/{id}`, the Angular edit form and Edit/Delete actions, and the delete-confirmation dialog are complete and covered by automated tests. Deletion is a hard delete in this prototype; soft deletion / audit retention remain future work for when Alerts, Events, Reports, and audit records exist.*
