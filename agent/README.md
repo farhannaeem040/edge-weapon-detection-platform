@@ -4,15 +4,15 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-32
+## Status — IP-02 T-31–T-33
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
-FastAPI application with no endpoints) and the **validated bootstrap-configuration foundation**
-(T-32 — see [Configuration](#configuration)). None of the Agent's operational behaviour exists yet.
+FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
+(T-32 — see [Configuration](#configuration)), and the **structured logging foundation with secret
+redaction** (T-33 — see [Logging](#logging)). None of the Agent's operational behaviour exists yet.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- logging with secret redaction (T-33);
 - the `/opt/weapon-detection/` filesystem layout (T-34);
 - the local SQLite store and device-identity/config-cache persistence (T-35, T-36);
 - the `POST /api/v1/activate` Backend client and activation/reactivation workflow (T-37, T-38);
@@ -42,22 +42,35 @@ agent/
 │   └── weapon_detection_agent/
 │       ├── __init__.py                  # package marker + __version__
 │       ├── main.py                      # minimal FastAPI `app` (no endpoints yet)
-│       └── config/
+│       ├── config/
+│       │   ├── __init__.py
+│       │   └── settings.py              # AgentSettings + load_settings() (T-32)
+│       └── logging/                     # structured logging + redaction (T-33)
 │           ├── __init__.py
-│           └── settings.py              # AgentSettings + load_settings() (T-32)
+│           ├── configuration.py         # configure_logging()
+│           ├── formatter.py             # JSON log formatter
+│           └── redaction.py             # central Redactor
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
-    └── test_settings.py                 # settings/configuration tests (T-32)
+    ├── test_settings.py                 # settings/configuration tests (T-32)
+    └── test_logging.py                  # logging + redaction tests (T-33)
 ```
 
+The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
+(`configuration.py` + `formatter.py` + `redaction.py`) for a clear separation between wiring, format,
+and the central redaction utility. It is named `logging` but never shadows the standard library —
+all imports are absolute, so `import logging` anywhere resolves to the stdlib module while this
+package is always addressed as `weapon_detection_agent.logging`.
+
 The rest of the module structure IP-02 §4 lays out (`config/paths.py`, `persistence/`, `activation/`,
-`runtime/`, `logging/`) is introduced by the tasks that implement each part — not scaffolded ahead
-of use (Engineering Principle 9).
+`runtime/`) is introduced by the tasks that implement each part — not scaffolded ahead of use
+(Engineering Principle 9).
 
 ## Dependencies
 
 - **Runtime:** `fastapi`, `uvicorn[standard]` (control-plane scaffold), `pydantic-settings` (the
-  validated bootstrap-configuration model, T-32).
+  validated bootstrap-configuration model, T-32). Logging (T-33) uses only the standard library
+  (`logging`, `json`, `datetime`, `traceback`) — no new dependency.
 - **Development:** `pytest`, `httpx` (FastAPI `TestClient` HTTP/API testing), `ruff` (lint +
   format), `mypy` (static type checking).
 
@@ -112,6 +125,52 @@ python -m pytest tests/test_settings.py
 
 > **Never commit** a `.env` file, an Activation Key, a device shared secret, or any real
 > configuration value. See [`.gitignore`](.gitignore).
+
+## Logging
+
+The Agent logs as **newline-delimited JSON** (IP-02 §15) — one object per line, suitable for the
+systemd journal and for log ingestion. Configuration is explicit: call
+`weapon_detection_agent.logging.configuration.configure_logging(...)`. **Importing the package or
+the FastAPI app configures no logging and creates no file** — a missing environment variable never
+breaks an import (this is wired into runtime startup later, by T-39).
+
+Each record carries at least `timestamp`, `level`, `logger`, and `message`, plus any structured
+`extra` fields you attach (`event`, `component`, `operation`, `device_id`, `branch_id`,
+`camera_id`, `context`, …) and, on error, a safe `exception` object (type, redacted message, redacted
+traceback). **Timestamps are UTC, ISO-8601** with a `+00:00` offset.
+
+- **Destinations:** stdout always; an **explicit** log-file path optionally. Both carry the same
+  structured records.
+- **Level:** taken from `WDA_LOG_LEVEL` (see [Configuration](#configuration)) — the same validated
+  set of level names, with no second, conflicting definition.
+- **Log-directory ownership:** this task writes to a log file whose parent directory **already
+  exists**; it never creates the directory or the `/opt/weapon-detection/` layout. Provisioning that
+  layout is **T-34's** responsibility. A file path whose parent is missing raises a clear
+  `LoggingConfigurationError` rather than creating the directory or falling back elsewhere.
+- **No rotation/retention** policy is committed in this task (IP-02 §24 defers it); a plain file
+  handler is used.
+
+### Redaction (never log a secret)
+
+A **central redactor** scrubs every record — message, structured fields, and exception text alike —
+so the Activation Key, device shared secret, and other credentials cannot reach a log at any level,
+including `DEBUG` (IP-02 §15, ARCH-001 §15.6):
+
+- **Sensitive field names** (case- and separator-insensitive) have their whole value replaced with
+  `[REDACTED]` — e.g. `activation_key`, `shared_secret`, `authorization`, `password`, `secret`,
+  `token`, `access_token`, `refresh_token`, `jwt`, `api_key`, `credential`, `cookie`. Harmless
+  metadata that merely *contains* such a word (e.g. `secret_status`, `token_count`,
+  `credential_identifier`) is **not** redacted.
+- **Sensitive values** are removed wherever they appear: any secret literal registered via
+  `sensitive_values=[...]`, any `Bearer <token>` span in a string, and any pydantic `SecretStr`.
+- Redaction is recursive (dicts, lists, tuples, sets), **never mutates** the caller's objects, and
+  non-serializable values are coerced to a safe redacted string rather than crashing logging.
+
+Run the logging tests:
+
+```bash
+python -m pytest tests/test_logging.py
+```
 
 ## Developer commands
 

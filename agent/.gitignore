@@ -14,6 +14,11 @@ config/activation-key
 *.db-wal
 *.db-shm
 
+# Generated Agent log files (IP-02 §15). Written at runtime to the Agent's log directory; never
+# committed — even redacted logs are runtime output, not source.
+*.log
+logs/
+
 # Virtual environments
 .venv/
 venv/

@@ -33,9 +33,22 @@ ENV_PREFIX = "WDA_"
 # (ADR-002/CON-005); HTTPS is permitted so a future hardened deployment needs no code change here.
 ALLOWED_URL_SCHEMES = ("http", "https")
 
-# The logging levels the Agent accepts for WDA_LOG_LEVEL. The logging *foundation* that consumes
-# this is T-33; validating the name here keeps a bad value from surfacing only later.
-_VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
+# The logging levels the Agent accepts for WDA_LOG_LEVEL. The logging foundation (T-33) reuses this
+# same set and normalizer via `normalize_log_level` so there is exactly one definition of a valid
+# level across the settings model and the logging configuration (IP-02 §10).
+VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
+
+
+def normalize_log_level(value: str) -> str:
+    """Normalize a logging level name to canonical upper case, rejecting unknown names.
+
+    Shared by :class:`AgentSettings` and the logging configuration so both accept exactly the same
+    levels. Raises ``ValueError`` for anything outside :data:`VALID_LOG_LEVELS`.
+    """
+    normalized = value.strip().upper()
+    if normalized not in VALID_LOG_LEVELS:
+        raise ValueError(f"must be one of {', '.join(sorted(VALID_LOG_LEVELS))}")
+    return normalized
 
 
 class ConfigurationError(RuntimeError):
@@ -112,10 +125,7 @@ class AgentSettings(BaseSettings):
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
         """Accept a standard logging level name, case-insensitively, stored upper-cased."""
-        normalized = value.strip().upper()
-        if normalized not in _VALID_LOG_LEVELS:
-            raise ValueError(f"must be one of {', '.join(sorted(_VALID_LOG_LEVELS))}")
-        return normalized
+        return normalize_log_level(value)
 
 
 def load_settings(**overrides: object) -> AgentSettings:

@@ -66,11 +66,14 @@ environment. The steps left for a human pass are listed under
 ### Scaffolded — Jetson Agent foundation in progress
 
 The [`agent/`](agent/README.md) FastAPI project has been **scaffolded** (IP-02 T-31: `pyproject.toml`,
-development tooling, a minimal importable FastAPI application with **no endpoints**) and now has its
+development tooling, a minimal importable FastAPI application with **no endpoints**), has its
 **validated bootstrap-configuration foundation** (IP-02 T-32: `WDA_`-prefixed environment settings,
-loaded into one immutable, validated object with fail-fast on a missing/invalid Backend URL). It
-still contains none of the Agent's operational behaviour — no activation, device identity, SQLite,
-DeepStream supervision, or Backend communication. Those arrive with IP-02 tasks T-33–T-41 (see
+loaded into one immutable, validated object with fail-fast on a missing/invalid Backend URL), and its
+**structured logging foundation with secret redaction** (IP-02 T-33: newline-delimited JSON to
+stdout/optional file, with central redaction that keeps the Activation Key and device secret out of
+logs at every level). It still contains none of the Agent's operational behaviour — no activation,
+device identity, SQLite, DeepStream supervision, or Backend communication. Those arrive with IP-02
+tasks T-34–T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work
