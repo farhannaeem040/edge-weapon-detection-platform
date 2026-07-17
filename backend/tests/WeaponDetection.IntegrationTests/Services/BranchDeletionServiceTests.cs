@@ -71,8 +71,9 @@ public class BranchDeletionServiceTests : IDisposable
         await _dbContext.Database.ExecuteSqlRawAsync(
             "CREATE TABLE DeleteBlocker (Id uniqueidentifier PRIMARY KEY, CameraId uniqueidentifier " +
             "NOT NULL CONSTRAINT FK_DeleteBlocker_Cameras FOREIGN KEY REFERENCES Cameras(CameraId))");
-        await _dbContext.Database.ExecuteSqlRawAsync(
-            $"INSERT INTO DeleteBlocker (Id, CameraId) VALUES ('{Guid.NewGuid()}', '{cameraId}')");
+        // ExecuteSqlInterpolated parameterises the interpolated values (no raw string injection).
+        await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO DeleteBlocker (Id, CameraId) VALUES ({Guid.NewGuid()}, {cameraId})");
 
         try
         {
