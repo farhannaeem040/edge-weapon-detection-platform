@@ -51,6 +51,20 @@ public interface IBranchService
     Task<BranchUpdateResult> UpdateBranchAsync(
         UpdateBranchRequest request,
         CancellationToken cancellationToken = default);
+
+    // Hard-deletes a branch and its currently modelled dependent data in a single SQL Server
+    // transaction (FS-03 §5.5, §5.6, §11): the branch's Activation Key records, its Device, its
+    // Cameras, and the Branch itself, removed in explicit dependency order (children before parents)
+    // and committed atomically. A failure at any point rolls the whole thing back (AC-6-equivalent
+    // for delete). Works for both activated and unactivated branches (AC-10).
+    //
+    // Returns Deleted on success, or NotFound when no branch has that id (→ 404). No deleted entity
+    // data or credential is returned — the outcome is a bare status, and the API layer answers with
+    // an empty success envelope (FS-03 §7.2, §7.3, AC-14). This method performs no remote Agent
+    // contact of any kind (FS-03 §7.4): it removes Backend records only.
+    Task<BranchDeletionOutcome> DeleteBranchAsync(
+        Guid branchId,
+        CancellationToken cancellationToken = default);
 }
 
 // The Application-layer branch-creation request. Deliberately independent of any API DTO or EF
@@ -116,6 +130,15 @@ public enum BranchUpdateStatus
     Updated,
     NotFound,
     Invalid,
+}
+
+// The outcome of a branch-deletion attempt (FS-03 §5.5). Deleted on success; NotFound when no branch
+// has the requested id (→ 404). There is deliberately no data payload: a successful delete returns
+// nothing about what was removed, and no credential is ever surfaced (FS-03 §7.3, AC-14).
+public enum BranchDeletionOutcome
+{
+    Deleted,
+    NotFound,
 }
 
 // The successful outcome of branch creation: the created branch/camera/device summary plus the

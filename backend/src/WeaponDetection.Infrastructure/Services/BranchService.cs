@@ -291,6 +291,71 @@ public class BranchService : IBranchService
         return BranchUpdateResult.Updated(MapBranch(updatedBranch, updatedCameras, device));
     }
 
+    // Hard-deletes a branch and its dependent data as one atomic transaction (FS-03 §5.5, §5.6,
+    // §11). The delete is explicit and ordered — Activation Keys, then Device, then Cameras, then the
+    // Branch — rather than relying on the schema's cascade rules: those cascades are declared but were
+    // untested before this feature (each config comment says as much), and an explicit order makes
+    // the guarantee testable and independent of that configuration (IP-03 §1.1). A failure at any
+    // point rolls the whole thing back.
+    //
+    // No remote Agent contact happens here (FS-03 §7.4): the Backend removes only its own records. A
+    // previously activated Agent may still hold its local credentials, but once the Device row is
+    // gone the Backend has nothing to authenticate them against (AC-12).
+    public async Task<BranchDeletionOutcome> DeleteBranchAsync(
+        Guid branchId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var branch = await _dbContext.Branches
+                .SingleOrDefaultAsync(b => b.BranchId == branchId, cancellationToken);
+            if (branch is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BranchDeletionOutcome.NotFound;
+            }
+
+            // Each branch has exactly one Device (BR-002/CON-007); its Activation Keys hang off the
+            // internal DeviceRecordId. Load children before deleting, parents last.
+            var device = await _dbContext.Devices
+                .SingleOrDefaultAsync(d => d.BranchId == branchId, cancellationToken);
+            var cameras = await _dbContext.Cameras
+                .Where(c => c.BranchId == branchId)
+                .ToListAsync(cancellationToken);
+
+            if (device is not null)
+            {
+                var activationKeys = await _dbContext.ActivationKeys
+                    .Where(k => k.DeviceRecordId == device.DeviceRecordId)
+                    .ToListAsync(cancellationToken);
+                _dbContext.ActivationKeys.RemoveRange(activationKeys);
+            }
+
+            if (device is not null)
+            {
+                _dbContext.Devices.Remove(device);
+            }
+
+            _dbContext.Cameras.RemoveRange(cameras);
+            _dbContext.Branches.Remove(branch);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return BranchDeletionOutcome.Deleted;
+        }
+        catch (DbUpdateException ex)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            // No identifier or secret is interpolated into the message (FS-03 §12, ARCH-001 §15.6).
+            throw new InvalidOperationException(
+                "Branch deletion failed while removing the branch and its dependent records.", ex);
+        }
+    }
+
     // The one place Branch/Camera/Device entities become a BranchView, shared by the create response
     // and both read paths so the projection — and its exclusion of DeviceRecordId and any secret —
     // is defined once.

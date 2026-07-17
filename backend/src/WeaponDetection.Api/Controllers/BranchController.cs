@@ -131,4 +131,21 @@ public class BranchController : ControllerBase
             _ => BadRequest(ApiResponse.Fail("VALIDATION_ERROR", "The request is invalid.")),
         };
     }
+
+    // FS-03 §10.2 (IP-03 T-44): hard-deletes a branch and its dependent data transactionally.
+    // Protected by the same fallback Admin JWT + active-session policy. The success response carries
+    // no entity data and no credential — just the standard success envelope with a null data payload
+    // (FS-03 §7.3, AC-14). All ordering and atomicity live in IBranchService.DeleteBranchAsync; this
+    // action only translates the outcome to HTTP. No remote Agent contact occurs (FS-03 §7.4).
+    [HttpDelete("{branchId:guid}")]
+    public async Task<IActionResult> Delete(Guid branchId, CancellationToken cancellationToken)
+    {
+        var outcome = await _branchService.DeleteBranchAsync(branchId, cancellationToken);
+
+        return outcome switch
+        {
+            BranchDeletionOutcome.Deleted => Ok(ApiResponse.Ok(null, "Branch deleted.")),
+            _ => NotFound(ApiResponse.Fail("NOT_FOUND", "Branch not found.")),
+        };
+    }
 }
