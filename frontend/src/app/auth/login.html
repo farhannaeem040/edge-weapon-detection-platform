@@ -1,0 +1,44 @@
+<!-- Admin login view (FS-01 §7, IP-01 T-23). The issued token is never rendered here or anywhere
+     else in the UI; only the two credential fields the Backend contract defines appear. -->
+<section class="login">
+  <h2 class="login__title">Sign in</h2>
+
+  <form class="login__form" [formGroup]="form" (ngSubmit)="submit()" novalidate>
+    <label class="login__field">
+      <span class="login__label">Credential identifier</span>
+      <input
+        type="text"
+        formControlName="credentialIdentifier"
+        autocomplete="username"
+        [attr.aria-invalid]="
+          form.controls.credentialIdentifier.touched && form.controls.credentialIdentifier.invalid
+        "
+      />
+    </label>
+
+    <label class="login__field">
+      <span class="login__label">Password</span>
+      <!-- type="password" is required: the entered password must never be rendered as plain text. -->
+      <input
+        type="password"
+        formControlName="password"
+        autocomplete="current-password"
+        [attr.aria-invalid]="form.controls.password.touched && form.controls.password.invalid"
+      />
+    </label>
+
+    @if (form.touched && form.invalid) {
+      <p class="login__hint" role="status">Enter both a credential identifier and a password.</p>
+    }
+
+    @if (errorMessage(); as message) {
+      <!-- One generic message for every failure — it never distinguishes an unknown identifier
+           from a wrong password, and never surfaces Backend error detail (FS-01 §5.2/§11). -->
+      <p class="login__error" role="alert">{{ message }}</p>
+    }
+
+    <button class="login__submit" type="submit" [disabled]="loading()">
+      {{ loading() ? 'Signing in…' : 'Sign in' }}
+    </button>
+  </form>
+</section>

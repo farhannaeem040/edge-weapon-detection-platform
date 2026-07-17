@@ -1,0 +1,43 @@
+.login {
+  max-width: 22rem;
+}
+
+.login__title {
+  margin-top: 0;
+}
+
+.login__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.login__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.login__label {
+  font-size: 0.875rem;
+}
+
+.login__hint,
+.login__error {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.login__error {
+  color: #b3261e;
+}
+
+.login__submit {
+  align-self: flex-start;
+  padding: 0.5rem 1rem;
+}
+
+.login__submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
