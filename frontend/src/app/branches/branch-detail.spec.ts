@@ -244,6 +244,105 @@ describe('BranchDetailComponent', () => {
       expect(text()).not.toContain(PLACEHOLDER_DEVICE_ID);
       expect(element().querySelector('.branch__device-id-absent')).not.toBeNull();
     });
+
+    it('renders the status through the reusable badge component (T-29)', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      // The same component the list uses — one status treatment, not two that agree by accident.
+      const badge = element().querySelector('app-device-status-badge');
+      expect(badge).not.toBeNull();
+      expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Unactivated',
+      );
+    });
+
+    it('shows the badge as Unactivated when the payload contradicts itself with a Device ID', () => {
+      load({
+        success: true,
+        data: placeholderBranch({
+          device: { activationStatus: 'Unactivated', deviceId: PLACEHOLDER_DEVICE_ID },
+        }),
+      });
+
+      const badge = element().querySelector('.branch__device-status');
+      expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Unactivated',
+      );
+    });
+
+    it('shows the badge as Activated when the payload contradicts itself with no Device ID', () => {
+      // The mirror case: the status is trusted, so the badge reads Activated — and the Device ID
+      // section still renders no fabricated identifier, because there is none to render.
+      load({ success: true, data: placeholderBranch({ device: { activationStatus: 'Activated' } }) });
+
+      const badge = element().querySelector('.branch__device-status');
+      expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+      expect(element().querySelector('.branch__device-id')).toBeNull();
+      expect(element().querySelector('.branch__device-id-absent')).not.toBeNull();
+    });
+
+    it('shows a neutral Unknown badge for a status outside the contract', () => {
+      load({
+        success: true,
+        data: {
+          ...placeholderBranch(),
+          device: { activationStatus: 'PLACEHOLDER-UNEXPECTED-STATUS' },
+        },
+      });
+
+      const badge = element().querySelector('.branch__device-status');
+      expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe('Unknown');
+      expect(text()).not.toContain('PLACEHOLDER-UNEXPECTED-STATUS');
+      // Unknown is not Activated: no Device ID is claimed on the strength of a value we cannot read.
+      expect(element().querySelector('.branch__device-id')).toBeNull();
+    });
+
+    it('gives the status accessible text beyond the bare label', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(element().querySelector('.device-status__context')?.textContent).toContain(
+        'Device status:',
+      );
+      expect(text()).toContain('has not been activated yet');
+    });
+
+    it('shows the latest status when the view is revisited after activation', async () => {
+      // The refresh path FS-02 AC-7 asks for: a Device activated out-of-band via the Backend's own
+      // endpoint appears on the next load. No polling, no cache to invalidate.
+      load({ success: true, data: placeholderBranch() });
+      expect(element().querySelector('.branch__device-status')?.textContent).toContain(
+        'Unactivated',
+      );
+
+      await createWithRouteParam(PLACEHOLDER_BRANCH_ID);
+      load({
+        success: true,
+        data: placeholderBranch({
+          device: { activationStatus: 'Activated', deviceId: PLACEHOLDER_DEVICE_ID },
+        }),
+      });
+
+      expect(element().querySelector('.branch__device-status')?.textContent).toContain('Activated');
+      expect(element().querySelector('.branch__device-id')?.textContent).toContain(
+        PLACEHOLDER_DEVICE_ID,
+      );
+    });
+
+    it('stores no activation status or Device ID in browser storage', () => {
+      // Cleared first so this asserts about the detail view, not about a neighbouring spec.
+      sessionStorage.clear();
+      localStorage.clear();
+
+      load({
+        success: true,
+        data: placeholderBranch({
+          device: { activationStatus: 'Activated', deviceId: PLACEHOLDER_DEVICE_ID },
+        }),
+      });
+
+      expect(sessionStorage.length).toBe(0);
+      expect(localStorage.length).toBe(0);
+    });
   });
 
   describe('Activation Key regeneration (T-28)', () => {

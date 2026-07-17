@@ -12,6 +12,7 @@ import { ActivationKeyDisplayComponent } from './activation-key-display';
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM } from './branch.routes';
+import { DeviceStatusBadgeComponent } from './device-status-badge';
 
 /**
  * One branch in full: its details, its configured cameras, its Device's activation state (IP-01
@@ -42,7 +43,7 @@ import { BRANCHES_ROUTE, BRANCH_ID_PARAM } from './branch.routes';
  */
 @Component({
   selector: 'app-branch-detail',
-  imports: [RouterLink, ActivationKeyDisplayComponent],
+  imports: [RouterLink, ActivationKeyDisplayComponent, DeviceStatusBadgeComponent],
   template: `
     <section class="branch">
       <header class="branch__header">
@@ -69,7 +70,10 @@ import { BRANCHES_ROUTE, BRANCH_ID_PARAM } from './branch.routes';
 
         <section class="branch__device">
           <h3>Device</h3>
-          <p class="branch__device-status">{{ branch.device.activationStatus }}</p>
+          <app-device-status-badge
+            class="branch__device-status"
+            [status]="branch.device.activationStatus"
+          />
 
           @if (branch.device.activationStatus === 'Activated' && branch.device.deviceId) {
             <p class="branch__device-id">Device ID: {{ branch.device.deviceId }}</p>
@@ -179,6 +183,12 @@ import { BRANCHES_ROUTE, BRANCH_ID_PARAM } from './branch.routes';
       align-items: baseline;
       justify-content: space-between;
       gap: 1rem;
+    }
+
+    /* The badge replaced a <p> here; keep the block flow that surrounded it. */
+    .branch__device-status {
+      display: block;
+      margin: 0.5rem 0;
     }
 
     .branch__camera-list {

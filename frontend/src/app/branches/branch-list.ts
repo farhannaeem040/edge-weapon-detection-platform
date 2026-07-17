@@ -4,6 +4,7 @@ import { RouterLink } from '@angular/router';
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
 import { BRANCH_CREATE_ROUTE, branchDetailRoute } from './branch.routes';
+import { DeviceStatusBadgeComponent } from './device-status-badge';
 
 /**
  * The branch list (IP-01 T-26; FS-02 §10.3, AC-1).
@@ -18,7 +19,7 @@ import { BRANCH_CREATE_ROUTE, branchDetailRoute } from './branch.routes';
  */
 @Component({
   selector: 'app-branch-list',
-  imports: [RouterLink],
+  imports: [RouterLink, DeviceStatusBadgeComponent],
   template: `
     <section class="branches">
       <header class="branches__header">
@@ -42,7 +43,11 @@ import { BRANCH_CREATE_ROUTE, branchDetailRoute } from './branch.routes';
             <li class="branches__item">
               <a class="branches__link" [routerLink]="detailRoute(branch)">{{ branch.name }}</a>
               <span class="branches__address">{{ branch.address }}</span>
-              <span class="branches__status-badge">{{ branch.device.activationStatus }}</span>
+              <!-- The explicit status field, and nothing derived from deviceId (FS-02 §10.3). -->
+              <app-device-status-badge
+                class="branches__status-badge"
+                [status]="branch.device.activationStatus"
+              />
             </li>
           }
         </ul>

@@ -170,6 +170,116 @@ describe('BranchListComponent', () => {
     expect(badges[1].textContent).toContain('Unactivated');
   });
 
+  it('renders the status through the reusable badge component (T-29)', () => {
+    load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch')] });
+
+    // One status treatment across the list and the detail, not two that happen to agree.
+    const badges = element().querySelectorAll('app-device-status-badge');
+    expect(badges.length).toBe(1);
+    expect(badges[0].querySelector('.device-status__label')?.textContent?.trim()).toBe(
+      'Unactivated',
+    );
+  });
+
+  it('shows Unactivated even when the payload contradicts itself with a Device ID', () => {
+    // `activationStatus` is the explicit field. A `deviceId` alongside `Unactivated` is not a signal
+    // to reinterpret it — the status wins, and no Device ID reaches the row.
+    load({
+      success: true,
+      data: [
+        placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch', {
+          device: {
+            activationStatus: 'Unactivated',
+            deviceId: '44444444-4444-4444-4444-444444444444',
+          },
+        }),
+      ],
+    });
+
+    const badge = element().querySelector('.branches__status-badge');
+    expect(badge?.textContent).toContain('Unactivated');
+    expect(text()).not.toContain('44444444-4444-4444-4444-444444444444');
+  });
+
+  it('shows Activated even when the payload contradicts itself with no Device ID', () => {
+    load({
+      success: true,
+      data: [
+        placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch', {
+          device: { activationStatus: 'Activated' },
+        }),
+      ],
+    });
+
+    const badge = element().querySelector('.branches__status-badge');
+    expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+  });
+
+  it('shows a neutral Unknown badge for a status outside the contract', () => {
+    load({
+      success: true,
+      data: [
+        {
+          ...placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch'),
+          device: { activationStatus: 'PLACEHOLDER-UNEXPECTED-STATUS' },
+        },
+      ],
+    });
+
+    const badge = element().querySelector('.branches__status-badge');
+    expect(badge?.querySelector('.device-status__label')?.textContent?.trim()).toBe('Unknown');
+    expect(text()).not.toContain('PLACEHOLDER-UNEXPECTED-STATUS');
+  });
+
+  it('loads the latest status from the Backend on each render rather than from a cache', () => {
+    // What a refresh does: the status shown is whatever the Branch API last said, so a Device
+    // activated out-of-band appears on reload with no polling and no client-side invalidation.
+    load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch')] });
+    expect(element().querySelector('.branches__status-badge')?.textContent).toContain(
+      'Unactivated',
+    );
+
+    const reloaded = TestBed.createComponent(BranchListComponent);
+    reloaded.detectChanges();
+    httpTesting.expectOne(BRANCHES_URL).flush({
+      success: true,
+      data: [
+        placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch', {
+          device: {
+            activationStatus: 'Activated',
+            deviceId: '44444444-4444-4444-4444-444444444444',
+          },
+        }),
+      ],
+    });
+    reloaded.detectChanges();
+
+    const badge = (reloaded.nativeElement as HTMLElement).querySelector('.branches__status-badge');
+    expect(badge?.textContent).toContain('Activated');
+  });
+
+  it('stores no activation status in browser storage', () => {
+    // Cleared first so this asserts about the list, not about what a neighbouring spec left behind.
+    sessionStorage.clear();
+    localStorage.clear();
+
+    load({
+      success: true,
+      data: [
+        placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch', {
+          device: {
+            activationStatus: 'Activated',
+            deviceId: '44444444-4444-4444-4444-444444444444',
+          },
+        }),
+      ],
+    });
+
+    // Stale status must not survive a reload; the Branch API is the only source.
+    expect(sessionStorage.length).toBe(0);
+    expect(localStorage.length).toBe(0);
+  });
+
   it('renders no secrets, keys, or internal identifiers', () => {
     // Members the read contract does not define. If a view ever rendered an unmodelled member, this
     // is what would catch it.
