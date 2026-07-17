@@ -9,5 +9,13 @@ export const BRANCHES_ROUTE = '/branches';
 /** The route parameter naming the branch on the detail route (`/branches/:branchId`). */
 export const BRANCH_ID_PARAM = 'branchId';
 
+/**
+ * The branch-creation route (FS-02 §10.1, IP-01 T-27).
+ *
+ * `new` is a literal segment sharing a prefix with `/branches/:branchId`, so its route must be
+ * declared first — the router matches in order and `:branchId` would otherwise swallow it.
+ */
+export const BRANCH_CREATE_ROUTE = `${BRANCHES_ROUTE}/new`;
+
 /** The detail route for one branch. */
 export const branchDetailRoute = (branchId: string): string => `${BRANCHES_ROUTE}/${branchId}`;

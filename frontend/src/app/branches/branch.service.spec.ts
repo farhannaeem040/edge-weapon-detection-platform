@@ -4,12 +4,33 @@ import { TestBed } from '@angular/core/testing';
 
 import { environment } from '../../environments/environment';
 import { BranchService } from './branch.service';
-import { Branch } from './branch.models';
+import { Branch, CreateBranchRequest, CreatedBranch } from './branch.models';
 
 // Every value below is synthetic placeholder data. No real branch, address, contact detail, camera
 // URL, or identifier from any real deployment appears in this suite.
 const BRANCHES_URL = `${environment.apiBaseUrl}/branches`;
 const PLACEHOLDER_BRANCH_ID = '11111111-1111-1111-1111-111111111111';
+
+/**
+ * A synthetic stand-in for an Activation Key, in the Backend's two-part `keyId.secret` shape
+ * (FS-02 §1.4). It is not, and must never be, a real key from any deployment.
+ */
+const PLACEHOLDER_ACTIVATION_KEY = 'placeholderkeyid.placeholdersecretvalue';
+
+/** A branch-creation request exactly as the Backend's `CreateBranchRequestDto` accepts one. */
+function placeholderCreateRequest(): CreateBranchRequest {
+  return {
+    name: 'Placeholder Branch',
+    address: '1 Example Street, Placeholder City',
+    contactDetails: 'placeholder@example.invalid',
+    cameras: [{ name: 'Front Entrance', rtspUrl: 'rtsp://camera.example.invalid:554/stream1' }],
+  };
+}
+
+/** A create response exactly as the Backend's `BranchResponseDto.ForCreate` serializes one. */
+function placeholderCreatedBranch(): CreatedBranch {
+  return { ...placeholderBranch(), activationKey: PLACEHOLDER_ACTIVATION_KEY };
+}
 
 /** A branch exactly as the Backend's `BranchResponseDto.ForRead` serializes one. */
 function placeholderBranch(overrides: Partial<Branch> = {}): Branch {
@@ -169,6 +190,86 @@ describe('BranchService', () => {
 
       expect(errored).toBeTrue();
       expect(branch).toBeUndefined();
+    });
+  });
+
+  describe('create', () => {
+    it('calls POST on the exact branch creation endpoint', () => {
+      service.create(placeholderCreateRequest()).subscribe();
+
+      const request = httpTesting.expectOne(BRANCHES_URL);
+      expect(request.request.method).toBe('POST');
+      request.flush({ success: true, data: placeholderCreatedBranch() });
+    });
+
+    it('sends exactly the Backend CreateBranchRequestDto fields and nothing else', () => {
+      service.create(placeholderCreateRequest()).subscribe();
+
+      const request = httpTesting.expectOne(BRANCHES_URL);
+      const body = request.request.body as CreateBranchRequest;
+
+      // Field-for-field against CreateBranchRequestDto/CameraConfigDto. The key assertions are the
+      // exact key sets: an extra member here (a client-generated id, an activation field, an
+      // `enabled` flag) would be a contract the Backend never agreed to.
+      expect(Object.keys(body).sort()).toEqual(['address', 'cameras', 'contactDetails', 'name']);
+      expect(Object.keys(body.cameras[0]).sort()).toEqual(['name', 'rtspUrl']);
+      expect(body).toEqual(placeholderCreateRequest());
+
+      request.flush({ success: true, data: placeholderCreatedBranch() });
+    });
+
+    it('maps the standard success envelope to the created branch and its Activation Key', () => {
+      let created: CreatedBranch | undefined;
+      service.create(placeholderCreateRequest()).subscribe((result) => (created = result));
+
+      const expected = placeholderCreatedBranch();
+      httpTesting.expectOne(BRANCHES_URL).flush({ success: true, message: null, data: expected });
+
+      expect(created).toEqual(expected);
+      expect(created?.activationKey).toBe(PLACEHOLDER_ACTIVATION_KEY);
+      // The reserved Device is unactivated and carries no deviceId at creation (FS-02 §10.1).
+      expect(created?.device.activationStatus).toBe('Unactivated');
+      expect(created?.device.deviceId).toBeUndefined();
+    });
+
+    it('errors when a 201 envelope carries no Activation Key', () => {
+      let errored = false;
+      service.create(placeholderCreateRequest()).subscribe({ error: () => (errored = true) });
+
+      const { activationKey: _omitted, ...withoutKey } = placeholderCreatedBranch();
+      httpTesting.expectOne(BRANCHES_URL).flush({ success: true, data: withoutKey });
+
+      // The key cannot be re-fetched, so a create response without one is a contract violation that
+      // must not be reported as success.
+      expect(errored).toBeTrue();
+    });
+
+    it('propagates a Backend validation failure', () => {
+      let errored = false;
+      service.create(placeholderCreateRequest()).subscribe({ error: () => (errored = true) });
+
+      httpTesting
+        .expectOne(BRANCHES_URL)
+        .flush(
+          { success: false, message: 'The request is invalid.', errorCode: 'VALIDATION_ERROR' },
+          { status: 400, statusText: 'Bad Request' },
+        );
+
+      expect(errored).toBeTrue();
+    });
+
+    it('does not store the Activation Key on the service or in browser storage', () => {
+      service.create(placeholderCreateRequest()).subscribe();
+      httpTesting.expectOne(BRANCHES_URL).flush({ success: true, data: placeholderCreatedBranch() });
+
+      // The key belongs to the caller's response value alone: the service keeps no copy anywhere it
+      // could outlive that (FS-02 §5.4, §7). It holds only its collaborator and its URL — there is
+      // no field for a key to have been stashed in.
+      expect(Object.keys(service).sort()).toEqual(['branchesUrl', 'http']);
+      expect(Object.values(service)).not.toContain(PLACEHOLDER_ACTIVATION_KEY);
+      expect(sessionStorage.getItem('activationKey')).toBeNull();
+      expect(JSON.stringify(sessionStorage)).not.toContain(PLACEHOLDER_ACTIVATION_KEY);
+      expect(JSON.stringify(localStorage)).not.toContain(PLACEHOLDER_ACTIVATION_KEY);
     });
   });
 

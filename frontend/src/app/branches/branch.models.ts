@@ -62,3 +62,53 @@ export interface Branch {
   cameras: Camera[];
   device: DeviceSummary;
 }
+
+/**
+ * The write-side wire contract of `POST /api/v1/branches` (IP-01 T-27; FS-02 §10.1).
+ *
+ * Transcribed field-for-field from the Backend's `CreateBranchRequestDto`/`CameraConfigDto`. What is
+ * *absent* is as deliberate as what is present: the Backend's create DTO accepts a name, an address,
+ * contact details and cameras, and nothing else. No client-generated `branchId`/`cameraId`, no
+ * device id, no activation status, no activation key, and no `enabled` flag — enablement is not a
+ * creation input (FS-02 §9) and the Backend would ignore any of these, so modelling them here would
+ * invent a contract that does not exist.
+ */
+export interface CreateCameraRequest {
+  name: string;
+  rtspUrl: string;
+}
+
+/** Request body of `POST /api/v1/branches` (backend `CreateBranchRequestDto`). */
+export interface CreateBranchRequest {
+  name: string;
+  address: string;
+  contactDetails: string;
+
+  /** At least one camera is required at branch creation (FS-02 §12). */
+  cameras: CreateCameraRequest[];
+}
+
+/**
+ * `data` of a successful `POST /api/v1/branches` (backend `BranchResponseDto.ForCreate`).
+ *
+ * This is the one and only response shape that carries `activationKey` — the complete plaintext key
+ * (`keyId.secret`), disclosed exactly once at generation time (FS-02 §5.1 step 7, §10.1). It is
+ * required here, not optional, because a create response without it is a contract violation the
+ * service rejects rather than a state any view should try to render.
+ *
+ * The key is never modelled on `Branch` itself, so no read view can ever hold or render one.
+ */
+export interface CreatedBranch extends Branch {
+  activationKey: string;
+}
+
+/**
+ * The Backend's own length limits, mirrored so client-side feedback agrees with the DataAnnotations
+ * that will judge the submission (`Branch.*MaxLength`, `Camera.*MaxLength`). The Backend remains
+ * authoritative; these only spare the Admin a round trip.
+ */
+export const BRANCH_NAME_MAX_LENGTH = 200;
+export const BRANCH_ADDRESS_MAX_LENGTH = 500;
+export const BRANCH_CONTACT_DETAILS_MAX_LENGTH = 500;
+export const CAMERA_NAME_MAX_LENGTH = 200;
+export const CAMERA_RTSP_URL_MAX_LENGTH = 2048;

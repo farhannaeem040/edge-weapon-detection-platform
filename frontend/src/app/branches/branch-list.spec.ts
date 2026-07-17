@@ -56,6 +56,22 @@ describe('BranchListComponent', () => {
     fixture.detectChanges();
   }
 
+  it('offers a create-branch action linking to the create route', () => {
+    load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'First')] });
+
+    const create = element().querySelector('.branches__create') as HTMLAnchorElement | null;
+    expect(create?.textContent?.trim()).toBe('Create branch');
+    expect(create?.getAttribute('href')).toBe('/branches/new');
+  });
+
+  it('offers the create-branch action even when no branches exist yet', () => {
+    load({ success: true, data: [] });
+
+    // The Admin with no branches is precisely the one who needs to create one.
+    expect(text()).toContain('No branches have been created yet.');
+    expect(element().querySelector('.branches__create')).not.toBeNull();
+  });
+
   it('requests the branch list on initialisation', () => {
     fixture.detectChanges();
 

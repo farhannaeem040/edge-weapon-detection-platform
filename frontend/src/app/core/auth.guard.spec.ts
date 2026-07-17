@@ -112,6 +112,29 @@ describe('authGuard', () => {
       expect(location.path()).toBe('/login');
     }));
 
+    it('redirects to /login when the branch create route is opened without a token', fakeAsync(() => {
+      TestBed.createComponent(TestHost);
+
+      router.navigateByUrl('/branches/new');
+      tick();
+
+      expect(location.path()).toBe('/login');
+    }));
+
+    it('renders the branch create route, not a branch detail, for /branches/new', fakeAsync(() => {
+      sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, PLACEHOLDER_TOKEN);
+      const fixture = TestBed.createComponent(TestHost);
+
+      router.navigateByUrl('/branches/new');
+      tick();
+      fixture.detectChanges();
+
+      // `new` shares a prefix with `/branches/:branchId`; the create route must win, or the Admin
+      // gets a detail view fetching a branch called "new".
+      expect(location.path()).toBe('/branches/new');
+      expect((fixture.nativeElement as HTMLElement).textContent).toContain('Create branch');
+    }));
+
     it('keeps /login reachable without a token', fakeAsync(() => {
       const fixture = TestBed.createComponent(TestHost);
 

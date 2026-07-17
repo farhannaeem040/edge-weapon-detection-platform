@@ -3,7 +3,7 @@ import { RouterLink } from '@angular/router';
 
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
-import { branchDetailRoute } from './branch.routes';
+import { BRANCH_CREATE_ROUTE, branchDetailRoute } from './branch.routes';
 
 /**
  * The branch list (IP-01 T-26; FS-02 §10.3, AC-1).
@@ -23,6 +23,7 @@ import { branchDetailRoute } from './branch.routes';
     <section class="branches">
       <header class="branches__header">
         <h2>Branches</h2>
+        <a class="branches__create" [routerLink]="createRoute">Create branch</a>
         <a class="branches__back" routerLink="/dashboard">Dashboard</a>
       </header>
 
@@ -77,6 +78,12 @@ import { branchDetailRoute } from './branch.routes';
 })
 export class BranchListComponent implements OnInit {
   private readonly branchService = inject(BranchService);
+
+  /**
+   * Rendered in the header, outside the loading/failed/empty branches, so an Admin with no branches
+   * yet — the very Admin who needs it — still has the create action in front of them (T-27).
+   */
+  protected readonly createRoute = BRANCH_CREATE_ROUTE;
 
   protected readonly branches = signal<Branch[]>([]);
   protected readonly loading = signal(true);
