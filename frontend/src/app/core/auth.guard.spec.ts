@@ -89,7 +89,27 @@ describe('authGuard', () => {
       fixture.detectChanges();
 
       expect(location.path()).toBe('/dashboard');
-      expect((fixture.nativeElement as HTMLElement).textContent).toContain('You are signed in');
+      expect((fixture.nativeElement as HTMLElement).textContent).toContain('Dashboard');
+    }));
+
+    it('redirects to /login when the branch list is opened without a token', fakeAsync(() => {
+      TestBed.createComponent(TestHost);
+
+      router.navigateByUrl('/branches');
+      tick();
+
+      expect(location.path()).toBe('/login');
+    }));
+
+    it('redirects to /login when a branch detail route is opened without a token', fakeAsync(() => {
+      TestBed.createComponent(TestHost);
+
+      router.navigateByUrl('/branches/11111111-1111-1111-1111-111111111111');
+      tick();
+
+      // The branch views are guarded individually, not merely by way of the shell they are reached
+      // from — a deep link is exactly how a protected route gets opened cold (FS-01 AC-3).
+      expect(location.path()).toBe('/login');
     }));
 
     it('keeps /login reachable without a token', fakeAsync(() => {

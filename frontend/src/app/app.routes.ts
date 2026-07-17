@@ -1,19 +1,24 @@
 import { Routes } from '@angular/router';
 
+import { BranchDetailComponent } from './branches/branch-detail';
+import { BranchListComponent } from './branches/branch-list';
 import { LoginComponent } from './auth/login';
 import { DashboardComponent } from './shared/dashboard';
 import { authGuard } from './core/auth.guard';
 
 /**
- * Application routes (IP-01 T-23, T-24).
+ * Application routes (IP-01 T-23, T-24, T-26).
  *
  * `/login` is public — it is what issues a session, so it cannot require one (FS-01 §9.1, AC-4).
- * `/dashboard` is the protected shell; `authGuard` keeps it from rendering without a local
- * session, as a UX control only (FS-01 §10 — the Backend enforces the real boundary).
+ * `/dashboard` and the branch views are protected; `authGuard` keeps them from rendering without a
+ * local session, as a UX control only (FS-01 §10 — the Backend enforces the real boundary, and it
+ * rejects the underlying `GET /api/v1/branches` calls independently of anything decided here).
  */
 export const routes: Routes = [
   { path: 'login', component: LoginComponent },
   { path: 'dashboard', component: DashboardComponent, canActivate: [authGuard] },
-  { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
-  { path: '**', redirectTo: 'dashboard' },
+  { path: 'branches', component: BranchListComponent, canActivate: [authGuard] },
+  { path: 'branches/:branchId', component: BranchDetailComponent, canActivate: [authGuard] },
+  { path: '', pathMatch: 'full', redirectTo: 'branches' },
+  { path: '**', redirectTo: 'branches' },
 ];

@@ -110,7 +110,7 @@ describe('LoginComponent', () => {
 
     submitForm();
 
-    expect(router.navigateByUrl).toHaveBeenCalledOnceWith('/dashboard');
+    expect(router.navigateByUrl).toHaveBeenCalledOnceWith('/branches');
   });
 
   it('shows a generic error for invalid credentials', () => {
@@ -185,6 +185,6 @@ describe('LoginComponent', () => {
     submitForm();
 
     expect(authService.login).toHaveBeenCalledTimes(2);
-    expect(router.navigateByUrl).toHaveBeenCalledOnceWith('/dashboard');
+    expect(router.navigateByUrl).toHaveBeenCalledOnceWith('/branches');
   });
 });

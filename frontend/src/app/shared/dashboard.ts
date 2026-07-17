@@ -1,20 +1,20 @@
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 
 import { AuthService } from '../auth/auth.service';
 import { LOGIN_ROUTE } from '../auth/auth.routes';
+import { BRANCHES_ROUTE } from '../branches/branch.routes';
 
 /**
- * The minimum protected shell a logged-in Admin lands on (IP-01 T-23/T-24), and the host of the
- * logout action (T-25).
+ * The protected shell a logged-in Admin lands on (IP-01 T-23/T-24), host of the logout action
+ * (T-25), and the navigation entry point to the branch views (T-26).
  *
- * It is deliberately a placeholder: FS-02's branch list/detail views are T-26's work, and T-24
- * needs *some* protected route to apply the guard to. It lives under `shared` because IP-01 §3
- * defines exactly four Angular modules (`core`, `auth`, `branches`, `shared`) and a temporary
- * placeholder does not justify a fifth.
+ * It stays deliberately thin. It lives under `shared` because IP-01 §3 defines exactly four Angular
+ * modules (`core`, `auth`, `branches`, `shared`), and the shell is not a fifth.
  */
 @Component({
   selector: 'app-dashboard',
+  imports: [RouterLink],
   template: `
     <section class="dashboard">
       <header class="dashboard__header">
@@ -23,7 +23,11 @@ import { LOGIN_ROUTE } from '../auth/auth.routes';
           {{ loggingOut() ? 'Signing out…' : 'Sign out' }}
         </button>
       </header>
-      <p>You are signed in. Branch management views arrive in a later task.</p>
+      <nav class="dashboard__nav">
+        <!-- Behind authGuard like every route it reaches, so this link is never a way in without a
+             session — it is navigation, not an authorization decision (FS-01 §10). -->
+        <a class="dashboard__branches-link" [routerLink]="branchesRoute">Branches</a>
+      </nav>
     </section>
   `,
   styles: `
@@ -40,6 +44,7 @@ export class DashboardComponent {
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
 
+  protected readonly branchesRoute = BRANCHES_ROUTE;
   protected readonly loggingOut = signal(false);
 
   /**
