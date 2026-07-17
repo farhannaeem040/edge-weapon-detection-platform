@@ -1,7 +1,7 @@
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/router';
+import { ActivatedRoute, Router, convertToParamMap, provideRouter } from '@angular/router';
 
 import { environment } from '../../environments/environment';
 import { BranchDetailComponent } from './branch-detail';
@@ -139,6 +139,92 @@ describe('BranchDetailComponent', () => {
       load({ success: false, errorCode: 'NOT_FOUND' }, { status: 404, statusText: 'Not Found' });
 
       expect(element().querySelector('.branch__edit')).toBeNull();
+    });
+  });
+
+  describe('delete action (T-46)', () => {
+    const DELETE_URL = `${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`;
+
+    it('renders a delete action naming the branch, as a button not a link', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const del = element().querySelector('.branch__delete') as HTMLButtonElement;
+      expect(del).not.toBeNull();
+      expect(del.tagName).toBe('BUTTON');
+      expect(del.getAttribute('aria-label')).toBe('Delete branch Alpha Branch');
+      expect(del.getAttribute('title')).toBe('Delete branch Alpha Branch');
+    });
+
+    it('opens a confirmation and issues no request on the first click', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      (element().querySelector('.branch__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-branch-delete-confirm')).not.toBeNull();
+    });
+
+    it('sends no request when the confirmation is cancelled', () => {
+      load({ success: true, data: placeholderBranch() });
+      (element().querySelector('.branch__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      (element().querySelector('.delete-confirm__cancel') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-branch-delete-confirm')).toBeNull();
+    });
+
+    it('calls the exact endpoint once on confirm and navigates to the branch list', () => {
+      const navigate = spyOn(TestBed.inject(Router), 'navigateByUrl');
+      load({ success: true, data: placeholderBranch() });
+      (element().querySelector('.branch__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      const requests = httpTesting.match(DELETE_URL);
+      expect(requests.length).toBe(1);
+      expect(requests[0].request.method).toBe('DELETE');
+      requests[0].flush({ success: true, message: 'Branch deleted.' });
+      fixture.detectChanges();
+
+      expect(navigate).toHaveBeenCalledOnceWith('/branches');
+    });
+
+    it('navigates to the list on a 404 (already gone)', () => {
+      const navigate = spyOn(TestBed.inject(Router), 'navigateByUrl');
+      load({ success: true, data: placeholderBranch() });
+      (element().querySelector('.branch__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      httpTesting
+        .expectOne(DELETE_URL)
+        .flush({ success: false, errorCode: 'NOT_FOUND' }, { status: 404, statusText: 'Not Found' });
+      fixture.detectChanges();
+
+      expect(navigate).toHaveBeenCalledOnceWith('/branches');
+    });
+
+    it('shows a generic failure and does not navigate on a server error', () => {
+      const navigate = spyOn(TestBed.inject(Router), 'navigateByUrl');
+      load({ success: true, data: placeholderBranch() });
+      (element().querySelector('.branch__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      httpTesting
+        .expectOne(DELETE_URL)
+        .flush({ success: false, message: 'Boom.' }, { status: 500, statusText: 'Error' });
+      fixture.detectChanges();
+
+      expect(navigate).not.toHaveBeenCalled();
+      expect(text()).toContain('The branch could not be deleted.');
+      expect(text()).not.toContain('Boom.');
     });
   });
 

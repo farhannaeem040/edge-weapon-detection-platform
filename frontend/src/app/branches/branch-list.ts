@@ -3,6 +3,7 @@ import { RouterLink } from '@angular/router';
 
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
+import { BranchDeleteConfirmComponent } from './branch-delete-confirm';
 import { BRANCH_CREATE_ROUTE, branchDetailRoute, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
 
@@ -19,7 +20,7 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
  */
 @Component({
   selector: 'app-branch-list',
-  imports: [RouterLink, DeviceStatusBadgeComponent],
+  imports: [RouterLink, DeviceStatusBadgeComponent, BranchDeleteConfirmComponent],
   template: `
     <section class="branches">
       <header class="branches__header">
@@ -79,10 +80,64 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                     />
                   </svg>
                 </a>
+
+                <!-- The delete control is a button, not the branch name: destructive actions must
+                     never ride on the row's own link (FS-03 §6.1). It only opens the confirmation
+                     (below) — the delete request is issued from there, never on this click. -->
+                <button
+                  class="branches__action branches__delete"
+                  type="button"
+                  [attr.aria-label]="'Delete branch ' + branch.name"
+                  [title]="'Delete branch ' + branch.name"
+                  (click)="startDelete(branch)"
+                >
+                  <!-- Trash/bin. Decorative; the button's aria-label carries meaning. -->
+                  <svg
+                    class="branches__icon"
+                    viewBox="0 0 24 24"
+                    width="20"
+                    height="20"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M4 7h16 M10 11v6 M14 11v6 M6 7l1 13h10l1-13 M9 7V4h6v3"
+                    />
+                  </svg>
+                </button>
               </span>
             </li>
           }
         </ul>
+      }
+
+      @if (deleteFailed()) {
+        <!-- One generic message for a delete that failed (a 500 or a dropped connection); no Backend
+             text and no status code (FS-03 §12). A 401 never reaches here — the session-expiry
+             interceptor has redirected (T-25). -->
+        <p class="branches__status branches__status--error" role="alert">
+          The branch could not be deleted. Try again.
+        </p>
+      }
+
+      @if (deletedName(); as name) {
+        <p class="branches__status branches__deleted" role="status">
+          Branch “{{ name }}” was deleted.
+        </p>
+      }
+
+      @if (pendingDelete(); as branch) {
+        <app-branch-delete-confirm
+          [branchName]="branch.name"
+          [deleting]="deleting()"
+          (confirmed)="confirmDelete(branch)"
+          (cancelled)="cancelDelete()"
+        />
       }
     </section>
   `,
@@ -126,6 +181,13 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       height: 2.25rem;
       color: inherit;
     }
+
+    .branches__delete {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+    }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -141,6 +203,19 @@ export class BranchListComponent implements OnInit {
   protected readonly branches = signal<Branch[]>([]);
   protected readonly loading = signal(true);
   protected readonly failed = signal(false);
+
+  /**
+   * The branch whose deletion is being confirmed, or null when no confirmation is open. Holding the
+   * branch (not just an id) lets the dialog name it without a second lookup.
+   */
+  protected readonly pendingDelete = signal<Branch | null>(null);
+
+  /** True only while a delete request is in flight — the guard against a double deletion. */
+  protected readonly deleting = signal(false);
+  protected readonly deleteFailed = signal(false);
+
+  /** The name of the branch just deleted, shown as confirmation feedback until the next action. */
+  protected readonly deletedName = signal<string | null>(null);
 
   ngOnInit(): void {
     this.branchService.list().subscribe({
@@ -164,5 +239,60 @@ export class BranchListComponent implements OnInit {
 
   protected editRoute(branch: Branch): string {
     return branchEditRoute(branch.branchId);
+  }
+
+  /**
+   * Opens the confirmation for a branch. This issues no request — deletion is destructive and
+   * irreversible, so the first click only asks (FS-03 §6.3, AC-13). Any stale feedback from a
+   * previous attempt is cleared so it cannot sit above a fresh confirmation.
+   */
+  protected startDelete(branch: Branch): void {
+    this.deleteFailed.set(false);
+    this.deletedName.set(null);
+    this.pendingDelete.set(branch);
+  }
+
+  /**
+   * Abandons a pending deletion. Nothing was sent when the confirmation opened and nothing is sent
+   * now: the branch stays exactly as it was (FS-03 §6.3, AC-13).
+   */
+  protected cancelDelete(): void {
+    if (this.deleting()) {
+      return;
+    }
+
+    this.pendingDelete.set(null);
+  }
+
+  protected confirmDelete(branch: Branch): void {
+    // A double-confirm must not issue two deletes: the second would 404 against an already-removed
+    // branch, but the guard keeps the intent single regardless.
+    if (this.deleting()) {
+      return;
+    }
+
+    this.deleting.set(true);
+    this.deleteFailed.set(false);
+
+    this.branchService.delete(branch.branchId).subscribe({
+      next: (result) => {
+        this.deleting.set(false);
+        this.pendingDelete.set(null);
+
+        // Both a confirmed delete (void) and the endpoint's documented 404 (null) mean the branch is
+        // gone: drop it from the list so it no longer appears, without a refetch. `result` carries
+        // nothing about what was removed — no credential, no id (FS-03 §7.3).
+        this.branches.update((branches) => branches.filter((b) => b.branchId !== branch.branchId));
+        this.deletedName.set(branch.name);
+        void result;
+      },
+      // Anything else — a 500, a dropped connection, or a 401 the session-expiry interceptor has
+      // already acted on (T-25) — settles into the generic failure state with the branch untouched.
+      error: () => {
+        this.deleting.set(false);
+        this.pendingDelete.set(null);
+        this.deleteFailed.set(true);
+      },
+    });
   }
 }

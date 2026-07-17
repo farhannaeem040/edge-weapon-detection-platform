@@ -124,6 +124,31 @@ export class BranchService {
   }
 
   /**
+   * Deletes a branch and its dependent data (`DELETE /api/v1/branches/{branchId}`), resolving when
+   * the Backend confirms the hard delete, or to `null` when it answers 404 (IP-03 T-46; FS-03 §10.2).
+   *
+   * The success envelope carries no payload — a delete returns nothing about what it removed and no
+   * credential (FS-03 §7.3) — so this resolves to `void`. The `null`-on-404 mirrors the reads: a
+   * branch already gone is a documented outcome the view distinguishes from a genuine failure.
+   * Every other error, a 401 included (handled globally by `sessionExpiryInterceptor`), propagates.
+   *
+   * This contacts no remote Agent; it is a Backend call only, and the Backend removes only its own
+   * records (FS-03 §7.4). Nothing here is logged.
+   */
+  delete(branchId: string): Observable<void | null> {
+    return this.http
+      .delete<ApiEnvelope<null>>(`${this.branchesUrl}/${encodeURIComponent(branchId)}`)
+      .pipe(
+        map(() => undefined),
+        catchError((error: unknown) =>
+          error instanceof HttpErrorResponse && error.status === 404
+            ? of(null)
+            : throwError(() => error),
+        ),
+      );
+  }
+
+  /**
    * Regenerates a branch's Activation Key (`POST /api/v1/devices/{branchId}/activation-key/
    * regenerate`), returning the new complete plaintext key from that single response, or `null` when
    * the Backend answers 404 (IP-01 T-28; FS-02 §5.3, §10.2, AC-5).

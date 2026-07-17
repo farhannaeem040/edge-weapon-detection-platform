@@ -322,6 +322,182 @@ describe('BranchListComponent', () => {
     });
   });
 
+  describe('delete action (T-46)', () => {
+    function loadTwo(): void {
+      load({
+        success: true,
+        data: [
+          placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch'),
+          placeholderBranch(SECOND_BRANCH_ID, 'Beta Branch'),
+        ],
+      });
+    }
+
+    function deleteUrl(branchId: string): string {
+      return `${BRANCHES_URL}/${branchId}`;
+    }
+
+    it('renders a delete button beside every branch, naming it in the aria-label and title', () => {
+      loadTwo();
+
+      const deletes = element().querySelectorAll('.branches__delete');
+      expect(deletes.length).toBe(2);
+      expect(deletes[0].getAttribute('aria-label')).toBe('Delete branch Alpha Branch');
+      expect(deletes[0].getAttribute('title')).toBe('Delete branch Alpha Branch');
+    });
+
+    it('renders the delete control as a real button, not the branch name link', () => {
+      loadTwo();
+
+      const del = element().querySelector('.branches__delete') as HTMLElement;
+      // A native <button> is keyboard-operable and in the tab order; the destructive action never
+      // rides on the row's own name link (FS-03 §6.1).
+      expect(del.tagName).toBe('BUTTON');
+      expect(element().querySelector('.branches__link')?.classList.contains('branches__delete'))
+        .toBeFalse();
+    });
+
+    it('opens a confirmation and issues no request on the first click', () => {
+      loadTwo();
+
+      (element().querySelector('.branches__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-branch-delete-confirm')).not.toBeNull();
+      // afterEach's verify() asserts nothing was sent by merely opening the confirmation.
+    });
+
+    it('sends no request when the confirmation is cancelled', () => {
+      loadTwo();
+      (element().querySelector('.branches__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      (element().querySelector('.delete-confirm__cancel') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-branch-delete-confirm')).toBeNull();
+      // verify() confirms the cancel path made no HTTP call (FS-03 §6.3, AC-13).
+    });
+
+    it('calls the exact delete endpoint once on confirm and removes the branch from the list', () => {
+      loadTwo();
+      (element().querySelectorAll('.branches__delete')[0] as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      const requests = httpTesting.match(deleteUrl(FIRST_BRANCH_ID));
+      expect(requests.length).toBe(1);
+      expect(requests[0].request.method).toBe('DELETE');
+      requests[0].flush({ success: true, message: 'Branch deleted.' });
+      fixture.detectChanges();
+
+      // The deleted branch's row is gone; the other remains. (The confirmation feedback still names
+      // the deleted branch, so this checks the list rows, not the whole page text.)
+      const links = Array.from(element().querySelectorAll('.branches__link')).map((a) =>
+        a.textContent?.trim(),
+      );
+      expect(links).toEqual(['Beta Branch']);
+      expect(text()).toContain('was deleted');
+    });
+
+    it('prevents a duplicate delete request from a double confirm', () => {
+      loadTwo();
+      (element().querySelectorAll('.branches__delete')[0] as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      const confirm = element().querySelector('.delete-confirm__delete') as HTMLButtonElement;
+      confirm.click();
+      fixture.detectChanges();
+      confirm.click();
+      fixture.detectChanges();
+
+      const requests = httpTesting.match(deleteUrl(FIRST_BRANCH_ID));
+      expect(requests.length).toBe(1);
+      requests[0].flush({ success: true, message: 'Branch deleted.' });
+    });
+
+    it('treats a 404 as the branch already being gone and removes it', () => {
+      loadTwo();
+      (element().querySelectorAll('.branches__delete')[0] as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      httpTesting
+        .expectOne(deleteUrl(FIRST_BRANCH_ID))
+        .flush({ success: false, errorCode: 'NOT_FOUND' }, { status: 404, statusText: 'Not Found' });
+      fixture.detectChanges();
+
+      const links = Array.from(element().querySelectorAll('.branches__link')).map((a) =>
+        a.textContent?.trim(),
+      );
+      expect(links).toEqual(['Beta Branch']);
+    });
+
+    it('shows a generic failure and keeps the branch on a server error', () => {
+      loadTwo();
+      (element().querySelectorAll('.branches__delete')[0] as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      httpTesting
+        .expectOne(deleteUrl(FIRST_BRANCH_ID))
+        .flush({ success: false, message: 'FK constraint on Devices failed.' }, { status: 500, statusText: 'Error' });
+      fixture.detectChanges();
+
+      expect(text()).toContain('The branch could not be deleted.');
+      expect(text()).not.toContain('FK constraint');
+      // The branch is untouched in the list.
+      expect(text()).toContain('Alpha Branch');
+    });
+
+    it('reaches a terminal state on a 401 rather than deleting from the UI', () => {
+      loadTwo();
+      (element().querySelectorAll('.branches__delete')[0] as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (element().querySelector('.delete-confirm__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      // The session-expiry interceptor (T-25) handles the redirect; the view still settles.
+      httpTesting
+        .expectOne(deleteUrl(FIRST_BRANCH_ID))
+        .flush({ success: false, errorCode: 'UNAUTHORIZED' }, { status: 401, statusText: 'Unauthorized' });
+      fixture.detectChanges();
+
+      expect(text()).toContain('The branch could not be deleted.');
+      expect(text()).toContain('Alpha Branch');
+    });
+
+    it('leaves the edit link working alongside delete', () => {
+      loadTwo();
+
+      const edit = element().querySelector('.branches__edit') as HTMLAnchorElement;
+      expect(edit.getAttribute('href')).toBe(`/branches/${FIRST_BRANCH_ID}/edit`);
+    });
+
+    it('renders no secret or internal identifier in the confirmation', () => {
+      load({
+        success: true,
+        data: [
+          {
+            ...placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch'),
+            activationKey: 'PLACEHOLDER-KEY',
+            deviceRecordId: 'PLACEHOLDER-RECORD-ID',
+          } as Branch,
+        ],
+      });
+      (element().querySelector('.branches__delete') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      const rendered = text();
+      expect(rendered).not.toContain('PLACEHOLDER-KEY');
+      expect(rendered).not.toContain('PLACEHOLDER-RECORD-ID');
+    });
+  });
+
   it('renders no secrets, keys, or internal identifiers', () => {
     // Members the read contract does not define. If a view ever rendered an unmodelled member, this
     // is what would catch it.
