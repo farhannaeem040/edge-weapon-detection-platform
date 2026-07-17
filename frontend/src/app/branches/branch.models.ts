@@ -103,6 +103,44 @@ export interface CreatedBranch extends Branch {
 }
 
 /**
+ * The write-side wire contract of `PUT /api/v1/branches/{branchId}` (IP-03 T-43; FS-03 §10.1).
+ *
+ * Transcribed field-for-field from the Backend's `UpdateBranchRequestDto`/`UpdateCameraDto`. It is
+ * deliberately close to `CreateBranchRequest`, with one addition and nothing else: each camera
+ * carries an optional `cameraId`.
+ *
+ * That single optional id is the whole identity contract of an edit (FS-03 §1.3, §5.2):
+ *
+ *  - a camera **with** a `cameraId` is an existing camera being updated in place — its id, and the
+ *    device/activation state hanging off the branch, are preserved;
+ *  - a camera **without** one is a new camera, for which the Backend generates a fresh identity on
+ *    add;
+ *  - an existing camera the request omits entirely is removed.
+ *
+ * The `cameraId` is the same public identifier the read DTOs already return on `Camera`; no new
+ * identifier is introduced. What stays absent is as deliberate as in the create contract: no
+ * `branchId` in the body (it is the route), no device field, no activation state, no activation key,
+ * no `enabled` flag, no `DeviceRecordId`, and no secret — the Backend accepts none of them on an
+ * edit, and editing must never touch device identity, activation, or key state (FS-03 §5.4, §12).
+ */
+export interface UpdateCameraRequest {
+  /** The existing camera's public id when editing it in place; omitted when adding a new camera. */
+  cameraId?: string;
+  name: string;
+  rtspUrl: string;
+}
+
+/** Request body of `PUT /api/v1/branches/{branchId}` (backend `UpdateBranchRequestDto`). */
+export interface UpdateBranchRequest {
+  name: string;
+  address: string;
+  contactDetails: string;
+
+  /** At least one camera must remain after an edit (FS-03 §5.2). */
+  cameras: UpdateCameraRequest[];
+}
+
+/**
  * `data` of a successful `POST /api/v1/devices/{branchId}/activation-key/regenerate` (backend
  * `RegenerateActivationKeyResponseDto`) — IP-01 T-28; FS-02 §5.3 step 5, §10.2.
  *

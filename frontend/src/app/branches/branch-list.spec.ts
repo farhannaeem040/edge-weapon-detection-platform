@@ -280,6 +280,48 @@ describe('BranchListComponent', () => {
     expect(localStorage.length).toBe(0);
   });
 
+  describe('edit action (T-45)', () => {
+    it('renders an edit link beside every branch, pointing at that branch edit route', () => {
+      load({
+        success: true,
+        data: [
+          placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch'),
+          placeholderBranch(SECOND_BRANCH_ID, 'Beta Branch'),
+        ],
+      });
+
+      const editLinks = element().querySelectorAll('.branches__edit');
+      expect(editLinks.length).toBe(2);
+      expect(editLinks[0].getAttribute('href')).toBe(`/branches/${FIRST_BRANCH_ID}/edit`);
+      expect(editLinks[1].getAttribute('href')).toBe(`/branches/${SECOND_BRANCH_ID}/edit`);
+    });
+
+    it('gives the edit link an aria-label and title naming the branch', () => {
+      load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch')] });
+
+      const editLink = element().querySelector('.branches__edit') as HTMLAnchorElement;
+      expect(editLink.getAttribute('aria-label')).toBe('Edit branch Alpha Branch');
+      expect(editLink.getAttribute('title')).toBe('Edit branch Alpha Branch');
+    });
+
+    it('renders the edit icon as decorative, leaving the label to the link', () => {
+      load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch')] });
+
+      const icon = element().querySelector('.branches__edit svg');
+      expect(icon?.getAttribute('aria-hidden')).toBe('true');
+      expect(icon?.getAttribute('focusable')).toBe('false');
+    });
+
+    it('renders the edit control as a real, keyboard-focusable link (an anchor with href)', () => {
+      load({ success: true, data: [placeholderBranch(FIRST_BRANCH_ID, 'Alpha Branch')] });
+
+      const editLink = element().querySelector('.branches__edit') as HTMLAnchorElement;
+      // An <a href> is natively in the tab order — no tabindex needed — unlike a bare clickable span.
+      expect(editLink.tagName).toBe('A');
+      expect(editLink.hasAttribute('href')).toBeTrue();
+    });
+  });
+
   it('renders no secrets, keys, or internal identifiers', () => {
     // Members the read contract does not define. If a view ever rendered an unmodelled member, this
     // is what would catch it.

@@ -9,6 +9,7 @@ import {
   CreateBranchRequest,
   CreatedBranch,
   RegeneratedActivationKey,
+  UpdateBranchRequest,
 } from './branch.models';
 
 /**
@@ -88,6 +89,38 @@ export class BranchService {
         return created;
       }),
     );
+  }
+
+  /**
+   * Updates a branch and reconciles its cameras (`PUT /api/v1/branches/{branchId}`), returning the
+   * safe updated branch, or `null` when the Backend answers 404 (IP-03 T-43; FS-03 §10.1).
+   *
+   * The response is the Backend's ordinary read shape (`BranchResponseDto.ForRead`): it carries no
+   * Activation Key, no key status, no `DeviceRecordId`, and no secret — editing never mints or
+   * exposes any of them (FS-03 §7.1, §12), and `Branch` cannot model them regardless. Camera
+   * identity is the request's own contract: each camera's optional `cameraId` distinguishes an edit
+   * in place from an add, and an omitted existing camera is a removal (see `UpdateBranchRequest`).
+   *
+   * The `null` follows `get`/`regenerateActivationKey`: a not-found branch is a documented outcome of
+   * this endpoint (FS-03 §10.1), so the view can tell it apart from a genuine failure without reading
+   * status codes. Every other error — a 400 for an invalid RTSP URL or a rejected camera id, a 401
+   * the session-expiry interceptor has already acted on, a 500 — propagates. Nothing here logs the
+   * request or response: the body carries RTSP URLs that may embed credentials (FS-03 §12).
+   */
+  update(branchId: string, request: UpdateBranchRequest): Observable<Branch | null> {
+    return this.http
+      .put<ApiEnvelope<Branch>>(
+        `${this.branchesUrl}/${encodeURIComponent(branchId)}`,
+        request,
+      )
+      .pipe(
+        map((envelope) => unwrap(envelope)),
+        catchError((error: unknown) =>
+          error instanceof HttpErrorResponse && error.status === 404
+            ? of(null)
+            : throwError(() => error),
+        ),
+      );
   }
 
   /**

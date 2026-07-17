@@ -3,7 +3,7 @@ import { RouterLink } from '@angular/router';
 
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
-import { BRANCH_CREATE_ROUTE, branchDetailRoute } from './branch.routes';
+import { BRANCH_CREATE_ROUTE, branchDetailRoute, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
 
 /**
@@ -48,6 +48,38 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 class="branches__status-badge"
                 [status]="branch.device.activationStatus"
               />
+              <!-- Edit/Delete actions sit together, beside their own branch, so each icon is
+                   unambiguously associated with that row (FS-03 §6.1, AC-15). The delete control is
+                   added by T-46; edit is the pencil link here. Each is a real, keyboard-focusable
+                   link/button with an aria-label naming the branch and a matching title tooltip, so
+                   it is never "an icon alone" to assistive tech (FS-03 §8, AC-16). -->
+              <span class="branches__actions">
+                <a
+                  class="branches__action branches__edit"
+                  [routerLink]="editRoute(branch)"
+                  [attr.aria-label]="'Edit branch ' + branch.name"
+                  [title]="'Edit branch ' + branch.name"
+                >
+                  <!-- Pencil. Decorative to assistive tech; the link's aria-label carries meaning. -->
+                  <svg
+                    class="branches__icon"
+                    viewBox="0 0 24 24"
+                    width="20"
+                    height="20"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z M13.5 6.5l3 3"
+                    />
+                  </svg>
+                </a>
+              </span>
             </li>
           }
         </ul>
@@ -77,6 +109,22 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
 
     .branches__address {
       flex: 1;
+    }
+
+    .branches__actions {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    /* An adequate click/tap target around the 20px glyph (FS-03 §8, AC-16). */
+    .branches__action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      color: inherit;
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -112,5 +160,9 @@ export class BranchListComponent implements OnInit {
 
   protected detailRoute(branch: Branch): string {
     return branchDetailRoute(branch.branchId);
+  }
+
+  protected editRoute(branch: Branch): string {
+    return branchEditRoute(branch.branchId);
   }
 }

@@ -19,3 +19,11 @@ export const BRANCH_CREATE_ROUTE = `${BRANCHES_ROUTE}/new`;
 
 /** The detail route for one branch. */
 export const branchDetailRoute = (branchId: string): string => `${BRANCHES_ROUTE}/${branchId}`;
+
+/**
+ * The edit route for one branch (FS-03 §10.1, IP-03 T-45): `/branches/:branchId/edit`.
+ *
+ * Its `edit` segment sits below `:branchId`, so — unlike the `new` literal — it cannot be swallowed
+ * by the detail route (that route matches exactly two path segments; this one has three).
+ */
+export const branchEditRoute = (branchId: string): string => `${BRANCHES_ROUTE}/${branchId}/edit`;

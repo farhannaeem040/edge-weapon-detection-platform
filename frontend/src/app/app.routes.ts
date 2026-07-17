@@ -2,6 +2,7 @@ import { Routes } from '@angular/router';
 
 import { BranchCreateComponent } from './branches/branch-create';
 import { BranchDetailComponent } from './branches/branch-detail';
+import { BranchEditComponent } from './branches/branch-edit';
 import { BranchListComponent } from './branches/branch-list';
 import { LoginComponent } from './auth/login';
 import { DashboardComponent } from './shared/dashboard';
@@ -22,6 +23,9 @@ export const routes: Routes = [
   // Declared before `branches/:branchId`: the router takes the first match, and the parameterised
   // route would otherwise capture `new` as a branch id and try to fetch a branch called "new".
   { path: 'branches/new', component: BranchCreateComponent, canActivate: [authGuard] },
+  // The three-segment edit route (FS-03 §10.1, IP-03 T-45). It cannot collide with the two-segment
+  // detail route below, but is kept adjacent to the other write routes for readability.
+  { path: 'branches/:branchId/edit', component: BranchEditComponent, canActivate: [authGuard] },
   { path: 'branches/:branchId', component: BranchDetailComponent, canActivate: [authGuard] },
   { path: '', pathMatch: 'full', redirectTo: 'branches' },
   { path: '**', redirectTo: 'branches' },

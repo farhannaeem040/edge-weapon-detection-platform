@@ -118,6 +118,30 @@ describe('BranchDetailComponent', () => {
     );
   });
 
+  describe('edit action (T-45)', () => {
+    it('renders an edit action pointing at this branch edit route', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const editLink = element().querySelector('.branch__edit') as HTMLAnchorElement;
+      expect(editLink).not.toBeNull();
+      expect(editLink.getAttribute('href')).toBe(`/branches/${PLACEHOLDER_BRANCH_ID}/edit`);
+    });
+
+    it('names the branch in the edit action aria-label and title', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const editLink = element().querySelector('.branch__edit') as HTMLAnchorElement;
+      expect(editLink.getAttribute('aria-label')).toBe('Edit branch Alpha Branch');
+      expect(editLink.getAttribute('title')).toBe('Edit branch Alpha Branch');
+    });
+
+    it('does not render the edit action for a branch that was not found', async () => {
+      load({ success: false, errorCode: 'NOT_FOUND' }, { status: 404, statusText: 'Not Found' });
+
+      expect(element().querySelector('.branch__edit')).toBeNull();
+    });
+  });
+
   it('renders every configured camera', () => {
     load({
       success: true,

@@ -11,7 +11,7 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { ActivationKeyDisplayComponent } from './activation-key-display';
 import { Branch } from './branch.models';
 import { BranchService } from './branch.service';
-import { BRANCHES_ROUTE, BRANCH_ID_PARAM } from './branch.routes';
+import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
 
 /**
@@ -61,6 +61,37 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
           The branch could not be loaded. Try again.
         </p>
       } @else if (branch(); as branch) {
+        <!-- Edit/Delete actions for this branch (FS-03 §6.2, AC-15). The Delete action is added by
+             T-46; Edit is the link here. It names the branch in both its aria-label and its title,
+             so it reads meaningfully to assistive tech and on hover (FS-03 §8, AC-16). -->
+        <div class="branch__actions">
+          <a
+            class="branch__edit"
+            [routerLink]="editRoute()"
+            [attr.aria-label]="'Edit branch ' + branch.name"
+            [title]="'Edit branch ' + branch.name"
+          >
+            <svg
+              class="branch__action-icon"
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z M13.5 6.5l3 3"
+              />
+            </svg>
+            <span>Edit branch</span>
+          </a>
+        </div>
+
         <dl class="branch__fields">
           <dt>Address</dt>
           <dd class="branch__address">{{ branch.address }}</dd>
@@ -183,6 +214,21 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       align-items: baseline;
       justify-content: space-between;
       gap: 1rem;
+    }
+
+    .branch__actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0.5rem 0;
+    }
+
+    .branch__edit {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: inherit;
+      min-height: 2.25rem;
     }
 
     /* The badge replaced a <p> here; keep the block flow that surrounded it. */
@@ -351,6 +397,14 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
    */
   protected completeRegeneration(): void {
     this.regeneratedKey.set(null);
+  }
+
+  /**
+   * The edit route for the branch on screen. Falls back to the list route only for the unreachable
+   * missing-id case (the action is rendered only inside a loaded branch, where the id is present).
+   */
+  protected editRoute(): string {
+    return this.branchId ? branchEditRoute(this.branchId) : this.branchesRoute;
   }
 
   private settleAsNotFound(): void {
