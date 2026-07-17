@@ -63,11 +63,20 @@ The dev server starts, serves the app shell, and proxies `/api` to the real Back
 environment. The steps left for a human pass are listed under
 [Known limitations](#known-limitations-and-deferred-work).
 
+### Scaffolded — Jetson Agent foundation in progress
+
+The [`agent/`](agent/README.md) FastAPI project has been **scaffolded** (IP-02 T-31): `pyproject.toml`,
+development tooling (pytest, Ruff, mypy), a `.gitignore`, and a minimal importable FastAPI
+application with **no endpoints**. It contains none of the Agent's behaviour yet — no activation,
+device identity, SQLite, DeepStream supervision, or Backend communication. Those arrive with IP-02
+tasks T-32–T-41 (see [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
+
 ### Not started — future work
 
-The Jetson Agent, DeepStream integration, and the AI pipeline. `POST /api/v1/activate` is fully
-functional and independently callable by any HTTP client, which is what proves the Agent-facing
-contract is ready before any Agent exists.
+The Jetson Agent's activation/persistence/runtime behaviour (IP-02 T-32–T-41), DeepStream
+integration, and the AI pipeline. `POST /api/v1/activate` is fully functional and independently
+callable by any HTTP client, which is what proves the Agent-facing contract is ready before the
+Agent implements its side.
 
 ---
 
@@ -478,10 +487,11 @@ beyond T-30 is currently approved.
 |------|----------|
 | `docs/foundation/` | Project charter, vision, SRS, engineering principles, development workflow |
 | `docs/architecture/` | ARCH-001, the software architecture document |
-| `specs/features/` | Feature Specifications (FS-01, FS-02) |
-| `specs/implementation-plans/` | Implementation plans (IP-01) |
+| `specs/features/` | Feature Specifications (FS-01, FS-02, FS-03) |
+| `specs/implementation-plans/` | Implementation plans (IP-01 complete; IP-02 Jetson Agent; IP-03 branch edit/delete) |
 | `backend/` | ASP.NET Core solution — `src/` (four layers) and `tests/` (unit + integration) |
 | `frontend/` | Angular Dashboard workspace — see [`frontend/README.md`](frontend/README.md) |
+| `agent/` | Jetson Agent FastAPI project (scaffold — IP-02 T-31) — see [`agent/README.md`](agent/README.md) |
 
 > `specs/features/FS-02-branch-device-onboarding-activation.md` is **superseded** by
 > `specs/features/FS-02-branch-device-onboarding.md` and is retained for history only. Do not

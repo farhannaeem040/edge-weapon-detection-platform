@@ -550,6 +550,11 @@ Numbering continues from IP-01's T-30 so task IDs remain globally unique across 
 - Completion Evidence: A clean `pip install -e .` plus a test/lint/type-check run succeeds on a workstation with no Jetson present.
 - Documentation: `agent/README.md` — install and run instructions; root `README.md` — note the new `agent/` component.
 - Exclusions: No FastAPI app, no endpoints, no business logic, no DeepStream, no placeholder modules for excluded components.
+- **Status: COMPLETE (delivered).** Commit `feat(agent): scaffold FastAPI agent project`.
+  - Created `agent/` with `pyproject.toml` (package metadata; `requires-python = ">=3.10"` — the Jetson Orin Nano / JetPack 6 / Ubuntu 22.04 floor, ARCH-001 pinning no exact version; runtime deps `fastapi`, `uvicorn[standard]`; dev deps `pytest`, `httpx`, `ruff`, `mypy`; pytest/Ruff/mypy config), `src/weapon_detection_agent/__init__.py` (+ `__version__`), `README.md`, `.gitignore` (`.env`, `config/activation-key`, `*.db`, `.venv/`, tool caches), and `tests/test_app_startup.py`.
+  - **Scope note (deviation from the exclusion above, per explicit user approval of T-31):** a *minimal, route-less* FastAPI `app` was added at `src/weapon_detection_agent/main.py` (title/version metadata only) to make the scaffold provably importable via a smoke test. It defines **no endpoints, no lifespan, no startup I/O, and no business logic**; the single-worker Uvicorn runtime and startup lifespan remain T-39's work, and all Agent behaviour (settings, persistence, activation, DeepStream) remains deferred to T-32–T-41.
+  - Verification on a workstation (Python 3.13, no Jetson/GPU/Backend): `pip install -e ".[dev]"` succeeded; `pytest` → 5 passed; `ruff check .` → clean; `ruff format --check .` → clean; `mypy src` → no issues; `python -c "from weapon_detection_agent.main import app; print(app.title)"` → `Weapon Detection Agent`.
+  - The `httpx` HTTP client is a **dev/test** dependency only (FastAPI `TestClient`); the Agent's runtime Backend HTTP client is added by T-37, not here. No secret, `.env`, `*.db`, or virtual environment was committed. No Backend/Angular/SRS/ARCH-001/FS-02 file was modified. T-32–T-41 not started.
 
 **T-32 — Configuration model and settings loading**
 - Objective: Implement the immutable, validated settings object of §6, including key resolution precedence (§6.1) and fail-fast on a missing `WDA_BACKEND_BASE_URL`.
@@ -713,4 +718,4 @@ Numbering continues from IP-01's T-30 so task IDs remain globally unique across 
 
 ---
 
-*IP-02 — Jetson Agent Foundation. Status: Draft, awaiting approval. No implementation task in this plan has been started.*
+*IP-02 — Jetson Agent Foundation. Status: Draft, awaiting full approval. T-31 (project scaffolding and tooling) has been delivered under explicit task-level approval; T-32–T-41 have not been started. Open items OI-1–OI-4 remain open.*
