@@ -344,13 +344,15 @@ cd frontend
 npm start          # or: npx ng serve
 ```
 
-`ng serve` serves the placeholder shell at `http://localhost:4200/` by default (override with `--port`).
+`ng serve` serves the application at `http://localhost:4200/` by default (override with `--port`).
+
+To exercise the Dashboard against the API, start the Backend (`dotnet run --project backend/src/WeaponDetection.Api`) before `ng serve`. The development server proxies `/api` to the Backend, so the browser issues only same-origin requests — see `frontend/proxy.conf.json`.
 
 ### Backend Base-URL Configuration
 
 The Backend API base URL is configured per build environment in `frontend/src/environments/`:
 
-- `environment.development.ts` — used by `ng serve` / development builds; defaults to `http://localhost:5230/api/v1` (the local ASP.NET Core Kestrel HTTP endpoint, see `backend/src/WeaponDetection.Api/Properties/launchSettings.json`).
+- `environment.development.ts` — used by `ng serve` / development builds; uses the host-relative `/api/v1`, which `frontend/proxy.conf.json` forwards to the local ASP.NET Core Kestrel HTTP endpoint (`http://localhost:5230`, see `backend/src/WeaponDetection.Api/Properties/launchSettings.json`). Keeping the path relative in development mirrors the co-located production deployment and avoids requiring a CORS policy the Backend does not otherwise need.
 - `environment.ts` — the production default; uses the host-relative `/api/v1`, since the Dashboard's static assets are served from the same host as the Backend in the co-located prototype deployment (ARCH-001 ARCH-ASM-001).
 
 These files hold **only** the non-secret base URL — no credentials, tokens, or keys. Angular selects the development file automatically via the `fileReplacements` configured in `angular.json`.
