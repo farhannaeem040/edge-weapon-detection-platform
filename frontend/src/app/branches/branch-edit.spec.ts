@@ -105,17 +105,22 @@ describe('BranchEditComponent', () => {
   }
 
   describe('route protection (T-45)', () => {
-    it('guards the edit route with authGuard', () => {
+    // The branch views now render inside the authenticated shell layout route (the Stitch redesign),
+    // so the guard sits on that parent route and the branch paths are its children — the paths are
+    // unchanged, and the guard still gates every one of them (FS-01 §10).
+    const shellRoute = routes.find((r) => r.children?.some((c) => c.path === 'branches/:branchId/edit'));
+
+    it('guards the edit route with authGuard via the authenticated shell route', () => {
       // The Backend enforces the real boundary; the guard keeps the view from rendering without a
       // local session, exactly as the other branch routes are guarded (FS-01 §10).
-      const editRoute = routes.find((r) => r.path === 'branches/:branchId/edit');
-      expect(editRoute).toBeDefined();
-      expect(editRoute?.canActivate).toContain(authGuard);
+      expect(shellRoute).toBeDefined();
+      expect(shellRoute?.canActivate).toContain(authGuard);
     });
 
     it('is declared before the two-segment detail route so it cannot be mis-matched', () => {
-      const editIndex = routes.findIndex((r) => r.path === 'branches/:branchId/edit');
-      const detailIndex = routes.findIndex((r) => r.path === 'branches/:branchId');
+      const children = shellRoute?.children ?? [];
+      const editIndex = children.findIndex((r) => r.path === 'branches/:branchId/edit');
+      const detailIndex = children.findIndex((r) => r.path === 'branches/:branchId');
       expect(editIndex).toBeGreaterThanOrEqual(0);
       expect(editIndex).toBeLessThan(detailIndex);
     });

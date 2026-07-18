@@ -17,25 +17,50 @@ import { BRANCHES_ROUTE } from '../branches/branch.routes';
   imports: [RouterLink],
   template: `
     <section class="dashboard">
-      <header class="dashboard__header">
-        <h2>Dashboard</h2>
-        <button class="dashboard__logout" type="button" [disabled]="loggingOut()" (click)="logout()">
-          {{ loggingOut() ? 'Signing out…' : 'Sign out' }}
-        </button>
-      </header>
-      <nav class="dashboard__nav">
-        <!-- Behind authGuard like every route it reaches, so this link is never a way in without a
-             session — it is navigation, not an authorization decision (FS-01 §10). -->
-        <a class="dashboard__branches-link" [routerLink]="branchesRoute">Branches</a>
-      </nav>
+      <div class="dashboard__card card">
+        <header class="dashboard__header">
+          <h2>Dashboard</h2>
+          <button
+            class="dashboard__logout btn btn--ghost"
+            type="button"
+            [disabled]="loggingOut()"
+            (click)="logout()"
+          >
+            {{ loggingOut() ? 'Signing out…' : 'Sign out' }}
+          </button>
+        </header>
+        <p class="dashboard__lede">Manage the platform's branches, cameras, and device activation.</p>
+        <nav class="dashboard__nav">
+          <!-- Behind authGuard like every route it reaches, so this link is never a way in without a
+               session — it is navigation, not an authorization decision (FS-01 §10). -->
+          <a class="dashboard__branches-link btn btn--primary" [routerLink]="branchesRoute">
+            Go to branches
+          </a>
+        </nav>
+      </div>
     </section>
   `,
   styles: `
+    .dashboard {
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: var(--space-6) var(--space-4);
+    }
+
+    .dashboard__card {
+      padding: var(--space-5);
+    }
+
     .dashboard__header {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       justify-content: space-between;
-      gap: 1rem;
+      gap: var(--space-4);
+    }
+
+    .dashboard__lede {
+      color: var(--color-text-muted);
+      margin: var(--space-3) 0 var(--space-4);
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
