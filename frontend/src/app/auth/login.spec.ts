@@ -142,6 +142,23 @@ describe('LoginComponent', () => {
     expect(input('password').type).toBe('password');
   });
 
+  it('offers no Remember-device, Forgot-password, or SSO options (FS-01 — none exist)', () => {
+    const rendered = (fixture.nativeElement as HTMLElement).textContent?.toLowerCase() ?? '';
+    expect(rendered).not.toContain('remember');
+    expect(rendered).not.toContain('forgot');
+    expect(rendered).not.toContain('single sign-on');
+    expect(rendered).not.toContain('sso');
+    // No checkbox (remember-me) and no third credential field.
+    const element = fixture.nativeElement as HTMLElement;
+    expect(element.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(element.querySelectorAll('input').length).toBe(2);
+  });
+
+  it('accepts a credential identifier, not an email-only field', () => {
+    // FS-01 authenticates by credentialIdentifier + password; the field is not restricted to email.
+    expect(input('credentialIdentifier').type).toBe('text');
+  });
+
   it('never renders the entered password as text anywhere in the view', () => {
     authService.login.and.returnValue(throwError(() => new Error('rejected')));
     fillValidCredentials();

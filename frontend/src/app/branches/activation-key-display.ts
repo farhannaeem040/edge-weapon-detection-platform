@@ -55,7 +55,9 @@ type CopyState = 'idle' | 'copied' | 'failed';
       <p class="activation-key__value">{{ activationKey() }}</p>
 
       @if (clipboardAvailable) {
-        <button class="activation-key__copy" type="button" (click)="copy()">Copy key</button>
+        <button class="activation-key__copy btn btn--secondary" type="button" (click)="copy()">
+          Copy key
+        </button>
       } @else {
         <!-- No clipboard API (an insecure context, or an older browser): say so, rather than
              offering a button that cannot work. The key is on screen to copy by hand. -->
@@ -76,19 +78,60 @@ type CopyState = 'idle' | 'copied' | 'failed';
 
       <!-- A button, not a link: navigation must not carry the key anywhere, and this leaves the
            disclosure only when the Admin says they have it. -->
-      <button class="activation-key__continue" type="button" (click)="continued.emit()">
+      <button class="activation-key__continue btn btn--primary" type="button" (click)="continued.emit()">
         {{ continueLabel() }}
       </button>
     </section>
   `,
   styles: `
+    .activation-key {
+      border: 1px solid var(--color-border, #d0d7de);
+      border-radius: var(--radius-md, 0.75rem);
+      background: var(--color-surface-subtle, #f9faf9);
+      padding: var(--space-4, 1rem);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3, 0.75rem);
+    }
+
+    .activation-key h3 {
+      margin: 0;
+    }
+
+    .activation-key__regenerated,
+    .activation-key__warning {
+      margin: 0;
+      font-size: var(--text-sm, 0.875rem);
+    }
+
+    .activation-key__warning {
+      color: var(--color-warning, #b06a12);
+    }
+
     .activation-key__value {
-      font-family: monospace;
+      font-family: var(--font-mono, monospace);
+      font-size: 1.05rem;
       overflow-wrap: anywhere;
+      background: var(--color-charcoal, #17211c);
+      color: #eaf6ef;
+      border-radius: var(--radius, 0.5rem);
+      padding: var(--space-3, 0.75rem);
+      margin: 0;
+      user-select: all;
+    }
+
+    .activation-key__copy,
+    .activation-key__continue {
+      align-self: flex-start;
     }
 
     .activation-key__copy-status {
-      margin: 0.25rem 0;
+      margin: 0;
+      font-size: var(--text-sm, 0.875rem);
+    }
+
+    .activation-key__copy-status--error {
+      color: var(--color-danger, #ba1a1a);
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,

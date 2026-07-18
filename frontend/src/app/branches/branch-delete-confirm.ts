@@ -1,8 +1,10 @@
+import { DOCUMENT } from '@angular/common';
 import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
   AfterViewInit,
+  OnDestroy,
   inject,
   input,
   output,
@@ -24,16 +26,18 @@ import {
  * not remotely wiped (FS-03 §7.4). No credential or internal identifier appears here; the dialog is
  * given only a name.
  *
- * Accessibility: it is a labelled modal dialog (`role="dialog"`, `aria-modal`, `aria-labelledby`),
- * and focus is moved to the non-destructive Cancel action on open so a keyboard or screen-reader
- * user lands inside the dialog on the safe choice rather than on the destructive one.
+ * Accessibility: it is a labelled modal dialog (`role="dialog"`, `aria-modal`, `aria-labelledby`) on
+ * a backdrop that blocks interaction with the page behind it. Focus is moved to the non-destructive
+ * Cancel action on open, so a keyboard or screen-reader user lands inside the dialog on the safe
+ * choice rather than the destructive one; Escape cancels (safe, since cancelling sends nothing); and
+ * focus is returned to whatever opened the dialog once it closes.
  */
 @Component({
   selector: 'app-branch-delete-confirm',
   template: `
-    <div class="delete-confirm__backdrop">
+    <div class="delete-confirm__backdrop" (keydown.escape)="onEscape()">
       <div
-        class="delete-confirm"
+        class="delete-confirm card"
         role="dialog"
         aria-modal="true"
         aria-labelledby="delete-confirm-heading"
@@ -61,7 +65,7 @@ import {
         <div class="delete-confirm__actions">
           <button
             #cancelButton
-            class="delete-confirm__cancel"
+            class="delete-confirm__cancel btn btn--ghost"
             type="button"
             [disabled]="deleting()"
             (click)="cancelled.emit()"
@@ -72,7 +76,7 @@ import {
           <!-- Destructive wording, and disabled while the request is in flight so a second click
                cannot issue a second delete (FS-03 §6.3, AC-13). -->
           <button
-            class="delete-confirm__delete"
+            class="delete-confirm__delete btn btn--danger"
             type="button"
             [disabled]="deleting()"
             (click)="confirmed.emit()"
@@ -87,42 +91,56 @@ import {
     .delete-confirm__backdrop {
       position: fixed;
       inset: 0;
+      z-index: 50;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(0, 0, 0, 0.5);
-      padding: 1rem;
+      background: rgba(23, 33, 28, 0.4);
+      padding: var(--space-4);
     }
 
     .delete-confirm {
       max-width: 32rem;
-      background: Canvas;
-      color: CanvasText;
-      border: 1px solid;
-      border-radius: 0.5rem;
-      padding: 1.25rem;
+      width: 100%;
+      background: var(--color-surface);
+      color: var(--color-text);
+      box-shadow: var(--shadow-modal);
+      padding: var(--space-5);
     }
 
     .delete-confirm__heading {
       margin-top: 0;
+      margin-bottom: var(--space-3);
+    }
+
+    .delete-confirm__warning {
+      margin: 0 0 var(--space-2);
+      color: var(--color-text);
+    }
+
+    .delete-confirm__effects {
+      margin: 0 0 var(--space-3);
+      padding-left: 1.2rem;
+      color: var(--color-text-muted);
+      font-size: var(--text-sm);
+    }
+
+    .delete-confirm__note {
+      margin: 0;
+      font-size: var(--text-sm);
+      color: var(--color-text-faint);
     }
 
     .delete-confirm__actions {
       display: flex;
       justify-content: flex-end;
-      gap: 0.75rem;
-      margin-top: 1rem;
-    }
-
-    .delete-confirm__cancel,
-    .delete-confirm__delete {
-      min-height: 2.5rem;
-      padding: 0 1rem;
+      gap: var(--space-2);
+      margin-top: var(--space-5);
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class BranchDeleteConfirmComponent implements AfterViewInit {
+export class BranchDeleteConfirmComponent implements AfterViewInit, OnDestroy {
   /** The name of the branch being deleted — shown, never an id or any secret. */
   readonly branchName = input.required<string>();
 
@@ -134,8 +152,26 @@ export class BranchDeleteConfirmComponent implements AfterViewInit {
 
   private readonly cancelButton = viewChild.required<ElementRef<HTMLButtonElement>>('cancelButton');
 
+  /** The control that opened the dialog, so focus can be returned to it on close (FS-03 §8). */
+  private readonly opener = inject(DOCUMENT).activeElement as HTMLElement | null;
+
   ngAfterViewInit(): void {
     // Land the user on the safe, non-destructive action inside the dialog (FS-03 §8).
     this.cancelButton().nativeElement.focus();
+  }
+
+  ngOnDestroy(): void {
+    // Return focus to whatever opened the dialog (the list/detail delete trigger), where practical,
+    // so a keyboard user is not dropped at the top of the document after the dialog closes.
+    this.opener?.focus?.();
+  }
+
+  /** Escape cancels — safe, because cancelling issues no request (FS-03 §6.3). */
+  protected onEscape(): void {
+    if (this.deleting()) {
+      return;
+    }
+
+    this.cancelled.emit();
   }
 }

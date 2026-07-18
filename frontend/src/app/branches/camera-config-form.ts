@@ -21,50 +21,81 @@ import { CAMERA_NAME_MAX_LENGTH, CAMERA_RTSP_URL_MAX_LENGTH } from './branch.mod
   imports: [ReactiveFormsModule],
   template: `
     <fieldset class="camera" [formGroup]="form()">
-      <legend class="camera__legend">Camera {{ position() }}</legend>
+      <div class="camera__head">
+        <legend class="camera__legend">Camera {{ position() }}</legend>
+        @if (removable()) {
+          <button class="camera__remove btn btn--ghost" type="button" (click)="remove.emit()">
+            Remove
+          </button>
+        }
+      </div>
 
-      <label class="camera__field">
-        <span>Camera name</span>
+      <label class="camera__field field">
+        <span class="field__label">Camera name</span>
         <input
           class="camera__name"
           type="text"
           formControlName="name"
           [maxlength]="cameraNameMaxLength"
         />
+        @if (showError('name')) {
+          <span class="camera__error field-error" role="alert">Enter a camera name.</span>
+        }
       </label>
-      @if (showError('name')) {
-        <p class="camera__error" role="alert">Enter a camera name.</p>
-      }
 
-      <label class="camera__field">
-        <span>RTSP URL</span>
+      <label class="camera__field field">
+        <span class="field__label">RTSP URL</span>
         <input
           class="camera__rtsp-url"
           type="text"
           formControlName="rtspUrl"
           [maxlength]="rtspUrlMaxLength"
         />
+        @if (showError('rtspUrl')) {
+          <!-- Fixed text. The submitted URL is never interpolated into an error (FS-02 §11). -->
+          <span class="camera__error field-error" role="alert">Enter a valid RTSP URL.</span>
+        }
       </label>
-      @if (showError('rtspUrl')) {
-        <!-- Fixed text. The submitted URL is never interpolated into an error (FS-02 §11). -->
-        <p class="camera__error" role="alert">Enter a valid RTSP URL.</p>
-      }
-
-      @if (removable()) {
-        <button class="camera__remove" type="button" (click)="remove.emit()">Remove camera</button>
-      }
     </fieldset>
   `,
   styles: `
-    .camera__field {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      padding: 0.25rem 0;
+    .camera {
+      margin: 0;
+      padding: var(--space-4);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      background: var(--color-surface-subtle);
     }
 
-    .camera__error {
-      margin: 0;
+    .camera__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+
+    .camera__legend {
+      float: none;
+      padding: 0;
+      font-family: var(--font-heading);
+      font-weight: var(--weight-semibold);
+      font-size: var(--text-sm);
+      color: var(--color-text);
+    }
+
+    .camera__remove {
+      min-height: 2rem;
+      padding: 0.3rem 0.7rem;
+      color: var(--color-danger);
+    }
+
+    .camera__field {
+      margin-bottom: var(--space-3);
+    }
+
+    .camera__field:last-child {
+      margin-bottom: 0;
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,

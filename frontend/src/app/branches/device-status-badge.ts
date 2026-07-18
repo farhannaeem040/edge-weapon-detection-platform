@@ -61,32 +61,46 @@ const DESCRIPTIONS: Readonly<Record<BadgeState, string>> = {
   `,
   styles: `
     .device-status {
-      display: inline-block;
-      padding: 0.125rem 0.5rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.15rem 0.6rem;
       border: 1px solid;
-      border-radius: 0.75rem;
-      font-size: 0.875rem;
+      border-radius: var(--radius-pill, 9999px);
+      font-family: var(--font-heading, sans-serif);
+      font-size: var(--text-label, 0.75rem);
+      font-weight: var(--weight-medium, 500);
       white-space: nowrap;
+    }
+
+    /* A leading dot reinforces the status without relying on colour to carry meaning on its own. */
+    .device-status::before {
+      content: '';
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      background: currentColor;
+      flex: none;
     }
 
     /* Colour reinforces the label; it never carries the meaning by itself. Each pairing is a dark
        foreground on a pale background, kept well clear of the 4.5:1 minimum for this text size. */
     .device-status--activated {
-      border-color: #1a7f37;
-      background-color: #e6f4ea;
+      border-color: #b7ddc4;
+      background-color: var(--color-success-bg, #e6f4ea);
       color: #10441f;
     }
 
     .device-status--unactivated {
-      border-color: #7a5c00;
-      background-color: #fdf3d7;
+      border-color: #e6cf8a;
+      background-color: var(--color-warning-bg, #fdf3d7);
       color: #4a3800;
     }
 
     .device-status--unknown {
-      border-color: #57606a;
-      background-color: #eef1f4;
-      color: #24292f;
+      border-color: var(--color-border, #d0d7de);
+      background-color: var(--color-neutral-bg, #eef1f4);
+      color: var(--color-neutral-text, #24292f);
     }
 
     /* Present to assistive technology, absent from the visual badge. Not display:none or

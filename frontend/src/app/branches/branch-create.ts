@@ -39,104 +39,138 @@ import { notBlank, rtspUrl } from './branch.validators';
     ActivationKeyDisplayComponent,
   ],
   template: `
-    <section class="branch-create">
-      <header class="branch-create__header">
-        <h2>Create branch</h2>
-        <a class="branch-create__back" [routerLink]="branchesRoute">Back to branches</a>
+    <section class="branch-create branch-form">
+      <header class="branch-create__header page-header">
+        <div class="page-header__titles">
+          <a class="branch-create__back breadcrumb" [routerLink]="branchesRoute">← Branches</a>
+          <h2 class="page-header__title">Create branch</h2>
+        </div>
       </header>
 
       @if (activationKey(); as key) {
-        <p class="branch-create__created" role="status">Branch created.</p>
-        <app-activation-key-display [activationKey]="key" (continued)="continueToBranch()" />
+        <div class="card">
+          <div class="card__body">
+            <p class="branch-create__created banner banner--info" role="status">Branch created.</p>
+            <app-activation-key-display [activationKey]="key" (continued)="continueToBranch()" />
+          </div>
+        </div>
       } @else {
-        <form class="branch-create__form" [formGroup]="form" (ngSubmit)="submit()">
-          <label class="branch-create__field">
-            <span>Branch name</span>
-            <input
-              class="branch-create__name"
-              type="text"
-              formControlName="name"
-              [maxlength]="nameMaxLength"
-            />
-          </label>
-          @if (showError('name')) {
-            <p class="branch-create__error" role="alert">Enter a branch name.</p>
-          }
+        <form class="branch-create__form branch-form__form" [formGroup]="form" (ngSubmit)="submit()">
+          <section class="card">
+            <header class="card__header"><h3>Branch identity</h3></header>
+            <div class="card__body">
+              <label class="branch-create__field field">
+                <span class="field__label">Branch name</span>
+                <input
+                  class="branch-create__name"
+                  type="text"
+                  formControlName="name"
+                  [maxlength]="nameMaxLength"
+                />
+                @if (showError('name')) {
+                  <span class="branch-create__error field-error" role="alert">Enter a branch name.</span>
+                }
+              </label>
 
-          <label class="branch-create__field">
-            <span>Address</span>
-            <input
-              class="branch-create__address"
-              type="text"
-              formControlName="address"
-              [maxlength]="addressMaxLength"
-            />
-          </label>
-          @if (showError('address')) {
-            <p class="branch-create__error" role="alert">Enter an address.</p>
-          }
+              <label class="branch-create__field field">
+                <span class="field__label">Address</span>
+                <input
+                  class="branch-create__address"
+                  type="text"
+                  formControlName="address"
+                  [maxlength]="addressMaxLength"
+                />
+                @if (showError('address')) {
+                  <span class="branch-create__error field-error" role="alert">Enter an address.</span>
+                }
+              </label>
 
-          <label class="branch-create__field">
-            <span>Contact details</span>
-            <input
-              class="branch-create__contact-details"
-              type="text"
-              formControlName="contactDetails"
-              [maxlength]="contactDetailsMaxLength"
-            />
-          </label>
-          @if (showError('contactDetails')) {
-            <p class="branch-create__error" role="alert">Enter contact details.</p>
-          }
+              <label class="branch-create__field field">
+                <span class="field__label">Contact details</span>
+                <input
+                  class="branch-create__contact-details"
+                  type="text"
+                  formControlName="contactDetails"
+                  [maxlength]="contactDetailsMaxLength"
+                />
+                @if (showError('contactDetails')) {
+                  <span class="branch-create__error field-error" role="alert">Enter contact details.</span>
+                }
+              </label>
+            </div>
+          </section>
 
-          <h3>Cameras</h3>
-          @for (cameraForm of cameraForms; track cameraForm; let i = $index) {
-            <app-camera-config-form
-              [form]="cameraForm"
-              [position]="i + 1"
-              [removable]="cameras.length > 1"
-              (remove)="removeCamera(i)"
-            />
-          }
+          <section class="card">
+            <header class="card__header"><h3>Cameras</h3></header>
+            <div class="card__body branch-form__cameras">
+              @for (cameraForm of cameraForms; track cameraForm; let i = $index) {
+                <app-camera-config-form
+                  [form]="cameraForm"
+                  [position]="i + 1"
+                  [removable]="cameras.length > 1"
+                  (remove)="removeCamera(i)"
+                />
+              }
 
-          <button class="branch-create__add-camera" type="button" (click)="addCamera()">
-            Add camera
-          </button>
+              <button
+                class="branch-create__add-camera btn btn--ghost"
+                type="button"
+                (click)="addCamera()"
+              >
+                + Add camera
+              </button>
+            </div>
+          </section>
 
           @if (failed()) {
             <!-- One fixed message for every failure mode: a Backend 400, a 500, or a dropped
                  connection. No Backend text, no status code, no echoed field values — an RTSP URL
                  may carry credentials and an error must not become the leak (FS-02 §11). A 401 never
                  reaches here; sessionExpiryInterceptor has already redirected (T-25). -->
-            <p class="branch-create__error branch-create__error--submit" role="alert">
+            <p class="branch-create__error branch-create__error--submit banner banner--error" role="alert">
               The branch could not be created. Check the details and try again.
             </p>
           }
 
-          <button class="branch-create__submit" type="submit" [disabled]="submitting()">
-            {{ submitting() ? 'Creating…' : 'Create branch' }}
-          </button>
+          <footer class="branch-form__actions">
+            <a class="branch-form__cancel btn btn--ghost" [routerLink]="branchesRoute">Cancel</a>
+            <button class="branch-create__submit btn btn--primary" type="submit" [disabled]="submitting()">
+              {{ submitting() ? 'Creating…' : 'Create branch' }}
+            </button>
+          </footer>
         </form>
       }
     </section>
   `,
   styles: `
-    .branch-create__header {
+    .branch-form__form {
       display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 1rem;
+      flex-direction: column;
+      gap: var(--space-5);
+    }
+
+    .branch-form__cameras {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+    }
+
+    .branch-form__actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: var(--space-2);
+      position: sticky;
+      bottom: 0;
+      background: var(--color-bg);
+      padding: var(--space-3) 0;
     }
 
     .branch-create__field {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      padding: 0.25rem 0;
+      margin-bottom: var(--space-4);
     }
 
-    .branch-create__error {
-      margin: 0;
+    .branch-create__field:last-child {
+      margin-bottom: 0;
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
