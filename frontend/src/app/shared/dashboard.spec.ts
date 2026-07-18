@@ -1,7 +1,7 @@
 import { HttpClient, provideHttpClient, withInterceptors } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Router } from '@angular/router';
+import { Router, provideRouter } from '@angular/router';
 
 import { environment } from '../../environments/environment';
 import { AUTH_TOKEN_STORAGE_KEY, AuthService } from '../auth/auth.service';
@@ -17,20 +17,23 @@ const PROTECTED_URL = `${environment.apiBaseUrl}/branches`;
 describe('DashboardComponent logout', () => {
   let fixture: ComponentFixture<DashboardComponent>;
   let httpTesting: HttpTestingController;
-  let router: jasmine.SpyObj<Router>;
+  let navigateByUrl: jasmine.Spy;
   let authService: AuthService;
 
   beforeEach(async () => {
-    router = jasmine.createSpyObj<Router>('Router', ['navigateByUrl'], { url: '/dashboard' });
-
     await TestBed.configureTestingModule({
       imports: [DashboardComponent],
       providers: [
         provideHttpClient(withInterceptors([authInterceptor, sessionExpiryInterceptor])),
         provideHttpClientTesting(),
-        { provide: Router, useValue: router },
+        // A real Router: the shell's `routerLink` to the branch list needs one it can resolve a
+        // URL tree against. Only the navigation itself is stubbed out, so these tests still assert
+        // where logout sends the user without actually routing there.
+        provideRouter([]),
       ],
     }).compileComponents();
+
+    navigateByUrl = spyOn(TestBed.inject(Router), 'navigateByUrl').and.resolveTo(true);
 
     httpTesting = TestBed.inject(HttpTestingController);
     authService = TestBed.inject(AuthService);
@@ -52,6 +55,14 @@ describe('DashboardComponent logout', () => {
     button.click();
     fixture.detectChanges();
   }
+
+  it('links to the branch list', () => {
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.dashboard__branches-link',
+    ) as HTMLAnchorElement;
+
+    expect(link.getAttribute('href')).toBe('/branches');
+  });
 
   it('calls the Backend logout endpoint', () => {
     clickLogout();
@@ -110,14 +121,14 @@ describe('DashboardComponent logout', () => {
     clickLogout();
     httpTesting.expectOne(LOGOUT_URL).flush({ success: true, message: 'Logged out.' });
 
-    expect(router.navigateByUrl).toHaveBeenCalledWith('/login');
+    expect(navigateByUrl).toHaveBeenCalledWith('/login');
   });
 
   it('redirects to /login even when the logout request fails', () => {
     clickLogout();
     httpTesting.expectOne(LOGOUT_URL).error(new ProgressEvent('network error'));
 
-    expect(router.navigateByUrl).toHaveBeenCalledWith('/login');
+    expect(navigateByUrl).toHaveBeenCalledWith('/login');
   });
 
   it('no longer attaches the old token to later requests', () => {

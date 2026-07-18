@@ -88,4 +88,64 @@ public class BranchController : ControllerBase
 
         return Ok(BranchResponseDto.ForRead(branch));
     }
+
+    // FS-03 §10.1 (IP-03 T-43): edits a branch and reconciles its cameras in one transaction. Like
+    // every action here it is protected by the fallback Admin JWT + active-session policy (this
+    // controller carries no [AllowAnonymous]). All orchestration and the transactional guarantee live
+    // in IBranchService.UpdateBranchAsync; this action only translates the typed result to HTTP.
+    //
+    // The response is the same safe read shape as GET — BranchResponseDto.ForRead — so RTSP
+    // redaction and the no-key/no-secret/no-DeviceRecordId guarantees come for free (FS-03 §7.1,
+    // §12). The Device and Activation Key records are never touched by the update path.
+    [HttpPut("{branchId:guid}")]
+    public async Task<IActionResult> Update(
+        Guid branchId,
+        [FromBody] UpdateBranchRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        // Presence/length and the "at least one camera" rule are already enforced by DataAnnotations
+        // (a blank/oversized field or empty collection is a 400 before this runs). RTSP-URL format
+        // and the camera-identity rules (unknown/foreign/duplicate CameraId) are Application-layer
+        // checks that surface as an Invalid result below.
+        var appRequest = new UpdateBranchRequest(
+            branchId,
+            request.Name,
+            request.Address,
+            request.ContactDetails,
+            request.Cameras
+                // A null element passes model validation; preserve it so the service's own guard
+                // rejects it rather than this mapping throwing an NRE.
+                .Select(c => c is null ? null! : new CameraMutation(c.CameraId, c.Name, c.RtspUrl))
+                .ToList());
+
+        var result = await _branchService.UpdateBranchAsync(appRequest, cancellationToken);
+
+        return result.Status switch
+        {
+            BranchUpdateStatus.Updated => Ok(BranchResponseDto.ForRead(result.Branch!)),
+            BranchUpdateStatus.NotFound =>
+                NotFound(ApiResponse.Fail("NOT_FOUND", "Branch not found.")),
+            // Every business-validation failure — invalid RTSP, unknown/foreign/duplicate CameraId —
+            // collapses to one generic 400 that never echoes a submitted value (FS-03 §6, §12). The
+            // message is fixed and identical to the create path's.
+            _ => BadRequest(ApiResponse.Fail("VALIDATION_ERROR", "The request is invalid.")),
+        };
+    }
+
+    // FS-03 §10.2 (IP-03 T-44): hard-deletes a branch and its dependent data transactionally.
+    // Protected by the same fallback Admin JWT + active-session policy. The success response carries
+    // no entity data and no credential — just the standard success envelope with a null data payload
+    // (FS-03 §7.3, AC-14). All ordering and atomicity live in IBranchService.DeleteBranchAsync; this
+    // action only translates the outcome to HTTP. No remote Agent contact occurs (FS-03 §7.4).
+    [HttpDelete("{branchId:guid}")]
+    public async Task<IActionResult> Delete(Guid branchId, CancellationToken cancellationToken)
+    {
+        var outcome = await _branchService.DeleteBranchAsync(branchId, cancellationToken);
+
+        return outcome switch
+        {
+            BranchDeletionOutcome.Deleted => Ok(ApiResponse.Ok(null, "Branch deleted.")),
+            _ => NotFound(ApiResponse.Fail("NOT_FOUND", "Branch not found.")),
+        };
+    }
 }

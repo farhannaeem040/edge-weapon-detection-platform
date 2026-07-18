@@ -147,6 +147,55 @@ public class CameraTests
         Assert.DoesNotContain("rtsp://", exception.ToString());
     }
 
+    // FS-03 §5.2/§5.3, AC-2: editing a camera changes its configurable fields and preserves its
+    // identity and its branch association.
+    [Fact]
+    public void UpdateConfiguration_ValidValues_ReplacesNameAndUrlAndKeepsIdentity()
+    {
+        var branchId = Guid.NewGuid();
+        var camera = new Camera(branchId, CameraName, RtspUrl);
+        var originalCameraId = camera.CameraId;
+
+        camera.UpdateConfiguration("New Camera", "rtsp://camera.example.invalid:554/stream2");
+
+        Assert.Equal("New Camera", camera.Name);
+        Assert.Equal("rtsp://camera.example.invalid:554/stream2", camera.RtspUrl);
+        Assert.Equal(originalCameraId, camera.CameraId);
+        Assert.Equal(branchId, camera.BranchId);
+    }
+
+    [Fact]
+    public void UpdateConfiguration_KeepsEnabledUnchanged()
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+
+        camera.UpdateConfiguration("New Camera", "rtsp://camera.example.invalid:554/stream2");
+
+        Assert.True(camera.Enabled);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void UpdateConfiguration_BlankName_Throws(string? blank)
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+
+        Assert.Throws<ArgumentException>(() => camera.UpdateConfiguration(blank!, RtspUrl));
+    }
+
+    [Fact]
+    public void UpdateConfiguration_BlankRtspUrl_ExceptionDoesNotEchoTheInput()
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            camera.UpdateConfiguration(CameraName, "   "));
+
+        Assert.DoesNotContain("rtsp://", exception.ToString());
+    }
+
     private static string BuildRtspUrlOfLength(int length)
     {
         const string prefix = "rtsp://camera.example.invalid:554/";

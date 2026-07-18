@@ -10,3 +10,7 @@ dist/
 # Environment / secrets
 *.env
 .env.*
+
+# Local MCP server config — contains an API key; must never be committed.
+mcp.json
+.mcp.json

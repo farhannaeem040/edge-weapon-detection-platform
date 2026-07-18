@@ -158,6 +158,204 @@ public class BranchService : IBranchService
         return MapBranch(branch, cameras, device);
     }
 
+    // Edits a branch and reconciles its cameras as one atomic transaction (FS-03 §5.1, §5.2, §11).
+    // The Device and every Activation Key record are deliberately never written here: an edit
+    // preserves the Device identity, activation status, protected shared secret, and all key records
+    // unchanged (FS-03 §5.3, AC-7, AC-8). Expected non-success outcomes — an unknown branch, or a
+    // business-invalid request — are returned as typed results rather than thrown, so the API layer
+    // maps them to 404/400 without exceptions-as-flow.
+    public async Task<BranchUpdateResult> UpdateBranchAsync(
+        UpdateBranchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        // Database-free validation first, mirroring CreateBranchAsync: nothing below opens a
+        // connection or a transaction until the request is structurally sound.
+
+        // At least one camera must remain — and the only way an edit could leave zero is to submit
+        // zero, since every submitted camera is persisted (FS-03 §5.2, AC-5).
+        if (request.Cameras is null || request.Cameras.Count == 0)
+        {
+            return BranchUpdateResult.Invalid();
+        }
+
+        // Two request cameras may not claim the same existing CameraId (FS-03 §5.2, AC-9).
+        var requestedIds = request.Cameras
+            .Where(c => c is not null && c.CameraId is not null)
+            .Select(c => c.CameraId!.Value)
+            .ToList();
+        if (requestedIds.Count != requestedIds.Distinct().Count())
+        {
+            return BranchUpdateResult.Invalid();
+        }
+
+        // Each camera's RTSP URL must be a valid rtsp:// URL (FS-03 §6). Presence/length are enforced
+        // by the Domain mutators/constructors below; format is the Application-layer rule.
+        foreach (var camera in request.Cameras)
+        {
+            if (camera is null || !IsValidRtspUrl(camera.RtspUrl))
+            {
+                return BranchUpdateResult.Invalid();
+            }
+        }
+
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            // Tracked (not AsNoTracking): this path mutates the branch and its cameras.
+            var branch = await _dbContext.Branches
+                .SingleOrDefaultAsync(b => b.BranchId == request.BranchId, cancellationToken);
+            if (branch is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BranchUpdateResult.NotFound();
+            }
+
+            var storedCameras = await _dbContext.Cameras
+                .Where(c => c.BranchId == request.BranchId)
+                .ToListAsync(cancellationToken);
+            var storedById = storedCameras.ToDictionary(c => c.CameraId);
+
+            // Every existing CameraId in the request must belong to *this* branch (FS-03 §5.2, AC-9).
+            // A foreign camera's id (one owned by another branch) is simply not in this set, so it is
+            // rejected identically to an unknown id — without revealing which it was.
+            if (requestedIds.Any(id => !storedById.ContainsKey(id)))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BranchUpdateResult.Invalid();
+            }
+
+            try
+            {
+                branch.UpdateDetails(request.Name, request.Address, request.ContactDetails);
+
+                foreach (var mutation in request.Cameras)
+                {
+                    if (mutation.CameraId is null)
+                    {
+                        // Add: a brand-new camera identity (FS-03 §5.2).
+                        _dbContext.Cameras.Add(
+                            new Camera(branch.BranchId, mutation.Name, mutation.RtspUrl));
+                    }
+                    else
+                    {
+                        // Update in place: the existing CameraId is preserved (FS-03 §5.3).
+                        storedById[mutation.CameraId.Value]
+                            .UpdateConfiguration(mutation.Name, mutation.RtspUrl);
+                    }
+                }
+            }
+            catch (ArgumentException)
+            {
+                // Presence/length failures from the Domain mutators/constructors. The API layer's
+                // DataAnnotations normally reject these first; this is the defensive backstop, and it
+                // collapses to the same Invalid outcome with no value echoed.
+                await transaction.RollbackAsync(cancellationToken);
+                return BranchUpdateResult.Invalid();
+            }
+
+            // Remove every stored camera the request no longer includes (FS-03 §5.2). Deleting only
+            // the omitted cameras; the kept and added ones remain, so the branch still has ≥1.
+            var keptIds = requestedIds.ToHashSet();
+            var removed = storedCameras.Where(c => !keptIds.Contains(c.CameraId)).ToList();
+            _dbContext.Cameras.RemoveRange(removed);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            // No submitted value is interpolated into the message — an RTSP URL may embed
+            // credentials (FS-03 §12, ARCH-001 §15.6).
+            throw new InvalidOperationException(
+                "Branch update failed while persisting the branch and its cameras.", ex);
+        }
+
+        // Re-project the committed end-state in the same safe shape the read paths use. The Device is
+        // read back unchanged — it was never written by this operation (FS-03 §5.3).
+        var updatedBranch = await _dbContext.Branches
+            .AsNoTracking()
+            .SingleAsync(b => b.BranchId == request.BranchId, cancellationToken);
+        var updatedCameras = await _dbContext.Cameras
+            .AsNoTracking()
+            .Where(c => c.BranchId == request.BranchId)
+            .ToListAsync(cancellationToken);
+        var device = await _dbContext.Devices
+            .AsNoTracking()
+            .SingleAsync(d => d.BranchId == request.BranchId, cancellationToken);
+
+        return BranchUpdateResult.Updated(MapBranch(updatedBranch, updatedCameras, device));
+    }
+
+    // Hard-deletes a branch and its dependent data as one atomic transaction (FS-03 §5.5, §5.6,
+    // §11). The delete is explicit and ordered — Activation Keys, then Device, then Cameras, then the
+    // Branch — rather than relying on the schema's cascade rules: those cascades are declared but were
+    // untested before this feature (each config comment says as much), and an explicit order makes
+    // the guarantee testable and independent of that configuration (IP-03 §1.1). A failure at any
+    // point rolls the whole thing back.
+    //
+    // No remote Agent contact happens here (FS-03 §7.4): the Backend removes only its own records. A
+    // previously activated Agent may still hold its local credentials, but once the Device row is
+    // gone the Backend has nothing to authenticate them against (AC-12).
+    public async Task<BranchDeletionOutcome> DeleteBranchAsync(
+        Guid branchId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var branch = await _dbContext.Branches
+                .SingleOrDefaultAsync(b => b.BranchId == branchId, cancellationToken);
+            if (branch is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BranchDeletionOutcome.NotFound;
+            }
+
+            // Each branch has exactly one Device (BR-002/CON-007); its Activation Keys hang off the
+            // internal DeviceRecordId. Load children before deleting, parents last.
+            var device = await _dbContext.Devices
+                .SingleOrDefaultAsync(d => d.BranchId == branchId, cancellationToken);
+            var cameras = await _dbContext.Cameras
+                .Where(c => c.BranchId == branchId)
+                .ToListAsync(cancellationToken);
+
+            if (device is not null)
+            {
+                var activationKeys = await _dbContext.ActivationKeys
+                    .Where(k => k.DeviceRecordId == device.DeviceRecordId)
+                    .ToListAsync(cancellationToken);
+                _dbContext.ActivationKeys.RemoveRange(activationKeys);
+            }
+
+            if (device is not null)
+            {
+                _dbContext.Devices.Remove(device);
+            }
+
+            _dbContext.Cameras.RemoveRange(cameras);
+            _dbContext.Branches.Remove(branch);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return BranchDeletionOutcome.Deleted;
+        }
+        catch (DbUpdateException ex)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            // No identifier or secret is interpolated into the message (FS-03 §12, ARCH-001 §15.6).
+            throw new InvalidOperationException(
+                "Branch deletion failed while removing the branch and its dependent records.", ex);
+        }
+    }
+
     // The one place Branch/Camera/Device entities become a BranchView, shared by the create response
     // and both read paths so the projection — and its exclusion of DeviceRecordId and any secret —
     // is defined once.
@@ -183,15 +381,22 @@ public class BranchService : IBranchService
             return;
         }
 
-        var trimmed = rtspUrl.Trim();
-        var isRtsp =
-            Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
-            && string.Equals(uri.Scheme, "rtsp", StringComparison.OrdinalIgnoreCase);
-
-        if (!isRtsp)
+        if (!IsRtspUri(rtspUrl.Trim()))
         {
             throw new ArgumentException(
                 "A camera must be configured with a valid rtsp:// URL.", nameof(rtspUrl));
         }
     }
+
+    // The update path's boolean counterpart to EnsureValidRtspUrl (FS-03 §6). Unlike the create
+    // helper — which skips a blank value so the Camera constructor produces the single presence
+    // message — this treats blank as invalid too, so the whole update request collapses to one
+    // Invalid result rather than relying on a Domain throw. Both share the same rtsp:// core.
+    private static bool IsValidRtspUrl(string rtspUrl) =>
+        !string.IsNullOrWhiteSpace(rtspUrl) && IsRtspUri(rtspUrl.Trim());
+
+    // An absolute URI using the rtsp scheme. The value is never echoed by any caller's error path.
+    private static bool IsRtspUri(string trimmed) =>
+        Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+        && string.Equals(uri.Scheme, "rtsp", StringComparison.OrdinalIgnoreCase);
 }

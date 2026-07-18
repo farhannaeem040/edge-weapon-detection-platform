@@ -1,44 +1,93 @@
-<!-- Admin login view (FS-01 §7, IP-01 T-23). The issued token is never rendered here or anywhere
-     else in the UI; only the two credential fields the Backend contract defines appear. -->
-<section class="login">
-  <h2 class="login__title">Sign in</h2>
+<!-- Admin login view (FS-01 §7, IP-01 T-23), styled to the approved Stitch "Sign-in" design.
+     The issued token is never rendered here or anywhere else in the UI; only the two credential
+     fields the Backend contract defines appear. No Remember-device, Forgot-password, or SSO is
+     offered — none exist in FS-01. This view renders standalone, without the authenticated shell. -->
+<div class="login-page">
+  <!-- Brand panel (charcoal). Decorative on small screens; hidden below the form's breakpoint. -->
+  <aside class="login__brand" aria-hidden="true">
+    <div class="login__brand-head">
+      <span class="login__brand-logo">
+        <svg viewBox="0 0 24 24" width="28" height="28" focusable="false">
+          <path
+            fill="currentColor"
+            d="M12 2 4 5v6c0 4.4 3 8.5 8 11 5-2.5 8-6.6 8-11V5l-8-3Z"
+            opacity="0.18"
+          />
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linejoin="round"
+            stroke-linecap="round"
+            d="M12 2 4 5v6c0 4.4 3 8.5 8 11 5-2.5 8-6.6 8-11V5l-8-3Z M9 12l2 2 4-4"
+          />
+        </svg>
+      </span>
+      <span class="login__brand-name">LJMU AI Security Platform</span>
+    </div>
 
-  <form class="login__form" [formGroup]="form" (ngSubmit)="submit()" novalidate>
-    <label class="login__field">
-      <span class="login__label">Credential identifier</span>
-      <input
-        type="text"
-        formControlName="credentialIdentifier"
-        autocomplete="username"
-        [attr.aria-invalid]="
-          form.controls.credentialIdentifier.touched && form.controls.credentialIdentifier.invalid
-        "
-      />
-    </label>
+    <div class="login__brand-body">
+      <h2 class="login__brand-title">Intelligent security at the edge.</h2>
+      <p class="login__brand-lede">
+        Administer branches and their cameras, and issue one-time device activation keys, from a
+        single secure console.
+      </p>
+      <ul class="login__brand-points">
+        <li>Branch &amp; device onboarding</li>
+        <li>Camera configuration management</li>
+        <li>One-time activation-key issuance</li>
+      </ul>
+    </div>
 
-    <label class="login__field">
-      <span class="login__label">Password</span>
-      <!-- type="password" is required: the entered password must never be rendered as plain text. -->
-      <input
-        type="password"
-        formControlName="password"
-        autocomplete="current-password"
-        [attr.aria-invalid]="form.controls.password.touched && form.controls.password.invalid"
-      />
-    </label>
+    <p class="login__brand-foot">Administrator access only.</p>
+  </aside>
 
-    @if (form.touched && form.invalid) {
-      <p class="login__hint" role="status">Enter both a credential identifier and a password.</p>
-    }
+  <!-- Sign-in form panel (white). -->
+  <main class="login">
+    <div class="login__card">
+      <h1 class="login__title">Sign in</h1>
+      <p class="login__subtitle">Enter your credentials to access the security console.</p>
 
-    @if (errorMessage(); as message) {
-      <!-- One generic message for every failure — it never distinguishes an unknown identifier
-           from a wrong password, and never surfaces Backend error detail (FS-01 §5.2/§11). -->
-      <p class="login__error" role="alert">{{ message }}</p>
-    }
+      <form class="login__form" [formGroup]="form" (ngSubmit)="submit()" novalidate>
+        <label class="login__field">
+          <span class="login__label">Credential identifier</span>
+          <input
+            type="text"
+            formControlName="credentialIdentifier"
+            autocomplete="username"
+            [attr.aria-invalid]="
+              form.controls.credentialIdentifier.touched && form.controls.credentialIdentifier.invalid
+            "
+          />
+        </label>
 
-    <button class="login__submit" type="submit" [disabled]="loading()">
-      {{ loading() ? 'Signing in…' : 'Sign in' }}
-    </button>
-  </form>
-</section>
+        <label class="login__field">
+          <span class="login__label">Password</span>
+          <!-- type="password" is required: the entered password must never be rendered as plain text. -->
+          <input
+            type="password"
+            formControlName="password"
+            autocomplete="current-password"
+            [attr.aria-invalid]="form.controls.password.touched && form.controls.password.invalid"
+          />
+        </label>
+
+        @if (form.touched && form.invalid) {
+          <p class="login__hint" role="status">Enter both a credential identifier and a password.</p>
+        }
+
+        @if (errorMessage(); as message) {
+          <!-- One generic message for every failure — it never distinguishes an unknown identifier
+               from a wrong password, and never surfaces Backend error detail (FS-01 §5.2/§11). -->
+          <p class="login__error" role="alert">{{ message }}</p>
+        }
+
+        <button class="login__submit btn btn--primary" type="submit" [disabled]="loading()">
+          {{ loading() ? 'Signing in…' : 'Sign in' }}
+        </button>
+      </form>
+
+      <p class="login__note">Enterprise-grade session security. Your session ends when you sign out.</p>
+    </div>
+  </main>
+</div>

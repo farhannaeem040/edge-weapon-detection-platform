@@ -37,6 +37,20 @@ public class Branch
         BranchId = Guid.NewGuid();
     }
 
+    // Edits the branch's scalar fields (FS-03 §5.1, AC-1). It reuses the same Require validation the
+    // constructor applies, so an edit can never move the entity into a state the constructor would
+    // have rejected — the invariant lives in one place. BranchId is deliberately never touched: the
+    // public branch identity is preserved across every edit (FS-03 §5.3, preservation rules). This
+    // mutator concerns only the branch's own fields; its Device and Activation Key records are a
+    // separate lifecycle this method has, and can have, no effect on.
+    public void UpdateDetails(string name, string address, string contactDetails)
+    {
+        Name = Require(name, NameMaxLength, "Branch name", nameof(name));
+        Address = Require(address, AddressMaxLength, "Branch address", nameof(address));
+        ContactDetails = Require(
+            contactDetails, ContactDetailsMaxLength, "Branch contact details", nameof(contactDetails));
+    }
+
     // Trims first, then length-checks, so trailing whitespace can never push an otherwise valid
     // value over the limit. The offending value is never interpolated into the message — an
     // exception is a diagnostic, not a place to echo back operational data.

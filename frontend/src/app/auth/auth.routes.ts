@@ -7,7 +7,8 @@
 export const LOGIN_ROUTE = '/login';
 
 /**
- * Where a successful login lands. It currently points at the placeholder protected shell; T-26
- * introduces the branch views that become the real destination.
+ * Where a successful login lands: the branch list (IP-01 T-26). It pointed at the placeholder
+ * protected shell until the branch views existed; branch management is what the Dashboard is for
+ * (FS-02 §10.3), so it is now the destination an Admin is dropped at.
  */
-export const PROTECTED_LANDING_ROUTE = '/dashboard';
+export const PROTECTED_LANDING_ROUTE = '/branches';

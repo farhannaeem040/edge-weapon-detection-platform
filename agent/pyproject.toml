@@ -1,0 +1,73 @@
+# Jetson Agent project metadata, dependencies, and tool configuration (IP-02 T-31).
+#
+# This is the single source of truth for the Agent's package metadata, its supported Python
+# baseline, its runtime and development dependencies, and the configuration of pytest, Ruff, and
+# mypy. Only T-31's scaffolding is described here; the later tasks (T-32–T-41) add their own
+# dependencies as they genuinely need them (Engineering Principle 9 — no speculative dependencies).
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weapon-detection-agent"
+version = "0.1.0"
+description = "Jetson Agent control plane for the Edge-Based Weapon Detection platform (FastAPI)."
+readme = "README.md"
+# The Jetson Orin Nano target (JetPack 6 / Ubuntu 22.04) ships Python 3.10; local development runs
+# on newer 3.x. ARCH-001 (§9, §25, ADR-001) fixes FastAPI/Python but pins no exact version, so the
+# baseline is set to the Jetson's floor so nothing that will not run on the device is introduced.
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Farhan Naeem" }]
+
+# Runtime dependencies are only what the delivered tasks genuinely need:
+#   - FastAPI + Uvicorn: the minimal control-plane scaffold (T-31).
+#   - pydantic-settings: the validated, immutable bootstrap-configuration model (T-32, IP-02 §6).
+# The Backend HTTP client (httpx), SQLite persistence, and every other runtime dependency arrive
+# with the task that first uses them (T-37 onward), not now (Engineering Principle 9).
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "pydantic-settings>=2.4,<3.0",
+]
+
+[project.optional-dependencies]
+# Development and test tooling. httpx is present here — not as a runtime dependency — because
+# FastAPI's TestClient uses it for in-process HTTP/API testing; the Agent's own runtime HTTP client
+# is a later task's concern.
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/weapon_detection_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Make the src-layout package importable during tests without requiring an editable install first,
+# so the suite runs the same way in every environment.
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A conventional, conservative rule set: pycodestyle errors/warnings, Pyflakes, import sorting,
+# pyupgrade, flake8-bugbear, and flake8-comprehensions.
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true

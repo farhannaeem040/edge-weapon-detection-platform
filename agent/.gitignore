@@ -1,0 +1,44 @@
+# Jetson Agent — never commit secrets, local state, virtual environments, or generated caches.
+
+# Secrets and machine-specific configuration (IP-02 §6, §15). The Activation Key, the device shared
+# secret, and the Backend URL are provisioned out-of-band and must never enter the repository.
+.env
+.env.*
+config/activation-key
+*.activation-key
+
+# Local SQLite store — device identity and cached config live here at runtime (IP-02 §7). Never
+# committed: it holds the protected shared secret.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Generated Agent log files (IP-02 §15). Written at runtime to the Agent's log directory; never
+# committed — even redacted logs are runtime output, not source.
+*.log
+logs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Test coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Build / packaging output
+build/
+dist/
+*.egg-info/
