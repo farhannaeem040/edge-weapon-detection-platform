@@ -4,16 +4,17 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-33
+## Status — IP-02 T-31–T-34
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
 FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
-(T-32 — see [Configuration](#configuration)), and the **structured logging foundation with secret
-redaction** (T-33 — see [Logging](#logging)). None of the Agent's operational behaviour exists yet.
+(T-32 — see [Configuration](#configuration)), the **structured logging foundation with secret
+redaction** (T-33 — see [Logging](#logging)), and the **filesystem-layout provisioning**
+(T-34 — see [Filesystem layout](#filesystem-layout)). None of the Agent's operational behaviour
+exists yet.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the `/opt/weapon-detection/` filesystem layout (T-34);
 - the local SQLite store and device-identity/config-cache persistence (T-35, T-36);
 - the `POST /api/v1/activate` Backend client and activation/reactivation workflow (T-37, T-38);
 - the startup lifespan and single-worker Uvicorn runtime (T-39);
@@ -44,7 +45,8 @@ agent/
 │       ├── main.py                      # minimal FastAPI `app` (no endpoints yet)
 │       ├── config/
 │       │   ├── __init__.py
-│       │   └── settings.py              # AgentSettings + load_settings() (T-32)
+│       │   ├── settings.py              # AgentSettings + load_settings() (T-32)
+│       │   └── paths.py                 # filesystem layout resolution + provisioning (T-34)
 │       └── logging/                     # structured logging + redaction (T-33)
 │           ├── __init__.py
 │           ├── configuration.py         # configure_logging()
@@ -53,7 +55,8 @@ agent/
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
-    └── test_logging.py                  # logging + redaction tests (T-33)
+    ├── test_logging.py                  # logging + redaction tests (T-33)
+    └── test_paths.py                    # filesystem layout tests (T-34)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -62,9 +65,9 @@ and the central redaction utility. It is named `logging` but never shadows the s
 all imports are absolute, so `import logging` anywhere resolves to the stdlib module while this
 package is always addressed as `weapon_detection_agent.logging`.
 
-The rest of the module structure IP-02 §4 lays out (`config/paths.py`, `persistence/`, `activation/`,
-`runtime/`) is introduced by the tasks that implement each part — not scaffolded ahead of use
-(Engineering Principle 9).
+The rest of the module structure IP-02 §4 lays out (`persistence/`, `activation/`, `runtime/`) is
+introduced by the tasks that implement each part — not scaffolded ahead of use (Engineering
+Principle 9).
 
 ## Dependencies
 
@@ -125,6 +128,45 @@ python -m pytest tests/test_settings.py
 
 > **Never commit** a `.env` file, an Activation Key, a device shared secret, or any real
 > configuration value. See [`.gitignore`](.gitignore).
+
+## Filesystem layout
+
+The Agent keeps its on-disk state under a single root — `/opt/weapon-detection/` by default
+(ADR-008), overridable via `WDA_ROOT_PATH` **solely** so tests and workstation runs avoid `/opt`
+(IP-02 §8.2); the systemd deployment pins the real path (T-41). The layout is resolved and
+provisioned by `weapon_detection_agent.config.paths`.
+
+Only the directories this milestone actually uses are created, each with its ADR-008 mode:
+
+| Directory | Mode | Purpose |
+|-----------|------|---------|
+| `<root>/` | `0750` | Root |
+| `<root>/config/` | `0700` | Activation-key file (a later task; §6.1) |
+| `<root>/database/` | `0700` | SQLite store `agent.db` (T-35) |
+| `<root>/logs/` | `0750` | Agent log files (see [Logging](#logging)) |
+
+- **Resolution is pure.** `resolve_paths(root)` returns an immutable `AgentPaths` whose members
+  (`config_dir`, `database_dir`, `logs_dir`, and the resolved `database_file`, `activation_key_file`,
+  and `log_file` paths) are computed without any filesystem access. **Creating** the layout is a
+  separate, explicit step: `AgentPaths.provision()`.
+- **Provisioning is idempotent and self-healing.** It is safe to run on every startup — existing
+  directories are preserved, and their modes are re-applied so a drifted permission is corrected.
+- **Only directories are created — never files.** The database file (T-35), activation-key file
+  (§6.1), and log file are written by the tasks that own them.
+- **Deferred directories are not created.** `snapshots/`, `recordings/`, `models/`, `pipeline/`, and
+  `runtime/` are part of the approved ADR-008 layout but have no writer in this milestone, so they
+  are not created here.
+- **Ownership** (the unprivileged `weapon-detection` service user, IP-02 D-2) is assigned by the
+  installer on the Jetson (T-41); this module sets permission *modes* only.
+- **Windows:** POSIX modes are not representable, so mode enforcement is skipped there while
+  directory creation still happens (IP-02 §17); the modes are exercised for real on Linux/Jetson.
+  The mode-assertion tests skip on Windows accordingly.
+
+Run the filesystem-layout tests:
+
+```bash
+python -m pytest tests/test_paths.py
+```
 
 ## Logging
 
