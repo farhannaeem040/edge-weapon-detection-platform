@@ -3,6 +3,18 @@
 Branch management feature (IP-01 §3; FS-02 Increment A). Branch/camera **editing and deletion** are
 added by IP-03 (FS-03).
 
+## Visual styling (Stitch redesign)
+
+These views are styled to the approved Stitch design (see [`design/stitch/`](../../../../design/stitch/)):
+the list is a card of rows with a status badge, camera count (from the branch read — no invented
+metric), and Edit/Delete icon actions; the detail view is a card layout; create/edit share one card
+form; the delete confirmation is a restyled labelled dialog. **Only styling changed** — every
+component's behaviour, class/test hooks, user-facing text, and the security rules below are unchanged.
+The detail view renders **only** fields the API returns (name, address, `contactDetails`, device
+`activationStatus`, `DeviceId` once activated, and cameras' name/RTSP/enabled); it shows no persistent
+or masked Activation Key, no gateway id, site manager, timezone, heartbeat, latency, or camera
+IP/resolution/live-state — none exist in the contract.
+
 ## Contents
 
 - `branch.service.ts` — `BranchService`, the client for the Branch/Device endpoints

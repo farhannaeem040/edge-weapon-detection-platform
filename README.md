@@ -456,11 +456,12 @@ hollow.
   roles, and no password reset.
 - **No automatic status updates.** Device activation status changes are seen only on an explicit
   refresh — there is no polling, WebSocket, or live update.
-- **Authenticated-shell/logout navigation is awkward.** The logout action lives only on
-  `/dashboard`, so signing out means navigating there rather than reaching it from the branch views,
-  where an Admin actually spends their time. This is a known UX defect, deliberately left alone: the
-  shared authenticated shell is a production UI change that T-30 does not authorise. It should be
-  addressed by an approved task.
+- **Authenticated shell (resolved).** The Stitch visual redesign (branch `feat/ui-stitch-redesign`,
+  frontend-only) introduced a shared authenticated shell — a sidebar with Branches navigation and a
+  Sign-out action in the top header, reachable from every authenticated view. The Dashboard is
+  rebranded **LJMU AI Security Platform**. Only screens backed by an implemented feature are styled;
+  deferred Stitch screens (alerts, monitoring, analytics, reports, health, device fleet, settings) are
+  not built or linked. See [`design/stitch/`](design/stitch/) and the frontend README.
 - **The visual browser walkthrough still requires a human pass.** No browser automation was
   available, so IP-01 §18 was executed at the API level plus the Angular component suite. Left to
   verify visually in a browser: the unauthenticated redirect to `/login`; login landing on

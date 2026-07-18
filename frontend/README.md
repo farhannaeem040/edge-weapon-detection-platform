@@ -15,7 +15,47 @@ work in this workspace.
 | [`src/app/core`](src/app/core/README.md) | Cross-cutting singletons: auth interceptor, session-expiry interceptor, route guard |
 | [`src/app/auth`](src/app/auth/README.md) | `AuthService`, login view |
 | [`src/app/branches`](src/app/branches/README.md) | Branch list/detail/create/edit, cameras, Edit/Delete actions and the delete-confirmation dialog, Activation Key display, device status badge |
-| [`src/app/shared`](src/app/shared/README.md) | The protected dashboard shell |
+| [`src/app/shared`](src/app/shared/README.md) | The authenticated `ShellComponent` (sidebar/header frame) and the `/dashboard` landing |
+
+## Visual design (Stitch redesign)
+
+The Dashboard is styled to the approved Stitch **"Sentinel Operational System"** visual language,
+rebranded as **LJMU AI Security Platform**. The design is documented under
+[`design/stitch/`](../design/stitch/) (design system, screen inventory, and the Angular
+implementation map).
+
+- **Design tokens** live as CSS custom properties in [`src/styles.css`](src/styles.css) (colours —
+  Sentinel Green `#146B3A` and its supporting scale — surfaces, text, status/danger, typography,
+  spacing, radii, shadows, layout/sidebar/header dimensions, focus ring, transitions), alongside a
+  small set of shared primitive classes (`.btn`, `.card`, `.field`, `.badge`, `.banner`, `.icon-btn`,
+  `.empty-state`, `.spinner`). Feature components consume these and add only their own layout.
+- **No UI framework** (Tailwind/Bootstrap/Material) and **no font files** are introduced. Headings
+  use Geist and body text Inter *only if the viewer already has them*; both degrade to the system
+  sans-serif stack. Icons are inline SVG.
+- **Responsive.** Desktop shows the fixed 260px sidebar + sticky header + fluid content (max 1440px).
+  Below 900px the sidebar becomes an off-canvas panel toggled from the header; below ~820px the login
+  drops its brand panel to a single centred form. Wide content scrolls within its own container.
+- **Accessibility.** Every interactive control has a visible keyboard focus ring, semantic markup, and
+  (for icon-only actions) an `aria-label` + `title` naming its target. The delete dialog is a labelled
+  `role="dialog"` that moves focus to Cancel on open, supports Escape to cancel, blocks the background,
+  and returns focus to its opener on close. Status is never conveyed by colour alone (badges carry
+  text and a shape cue).
+
+### Implemented vs deferred Stitch screens
+
+Only screens backed by an existing feature are styled: **Sign-in**, the authenticated **shell**
+(Operations Overview chrome only — no analytics widgets), **Branch Details**, and the **Branch
+Configuration Form** (create/edit). Every other Stitch screen — Camera Management, Edge Devices, Live
+Monitoring, Alerts Management, Alert Review, System Health, Operational Analytics, Settings — backs no
+implemented feature and is **deferred**; it is neither built nor linked (no alerts, monitoring,
+reports, health, analytics, device fleet, or detection settings exist). See
+[`design/stitch/SCREEN-INVENTORY.md`](../design/stitch/SCREEN-INVENTORY.md).
+
+Preserved unchanged by the redesign: all routes, authentication, `credentialIdentifier`/`password`
+login, JWT interceptor, route guard, session-expiry handling, logout, branch listing/detail/create/
+edit/delete, camera add/edit/remove and the minimum-one-camera rule, device activation status, the
+Activation Key regeneration flow, the one-time (never persistent/masked) key display, all API request/
+response contracts, and validation behaviour. No Backend or Agent source is touched.
 
 ## Commands
 

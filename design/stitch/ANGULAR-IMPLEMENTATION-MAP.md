@@ -15,6 +15,33 @@
 
 ---
 
+## Implementation status
+
+**Implemented** on branch `feat/ui-stitch-redesign` (frontend visual redesign only; no Backend or
+Agent change; all routes, contracts, validation, and security behaviour preserved). Summary of what
+landed against this map:
+
+| Item (below) | Status |
+|--------------|--------|
+| Design tokens (`src/styles.css`) | ✅ done — tokens + shared primitives, no framework, no font files |
+| Authenticated shell (`ShellComponent`) + sidebar + top header | ✅ done — nav lists only Branches; deferred screens absent; responsive off-canvas |
+| Login | ✅ done — split panel; no SSO/Remember/Forgot; `credentialIdentifier`+password kept |
+| Branch list | ✅ done — cards/rows, badge, camera count, Edit/Delete, states |
+| Branch detail | ✅ done — card layout, API-only fields, one-time key regeneration |
+| Create / Edit | ✅ done — shared card form, single `contactDetails`, camera FormArray |
+| Camera FormArray | ✅ done — restyled rows, add/remove, min-one preserved |
+| Status badge / Activation Key display / Edit-Delete icons / delete dialog | ✅ done — restyled, hooks kept; dialog gains Escape + focus return |
+| Loading / error / empty states | ✅ done — banners, spinner, empty-state |
+
+**Deliberate differences from the Stitch mockups** (forced by the API contract and security rules):
+the branch detail omits Site Manager / phone+email split / timezone / gateway id / heartbeat / latency
+and per-camera IP / resolution / live-state (not in the contract); the Activation Key is shown only
+once after create/regenerate, never as a persistent or masked card; the config form keeps a single
+`contactDetails` field; the sidebar shows only Branches (deferred screens are not linked); the login
+drops SSO / Remember-device / Forgot-password.
+
+Tests: **321 passing**; production build clean within budgets; `npm audit` reports 0 vulnerabilities.
+
 ## 0. Existing structure this maps onto
 
 Angular 20 standalone app. Modules (IP-01 §3): `core`, `auth`, `branches`, `shared`.
