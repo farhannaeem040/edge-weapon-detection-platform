@@ -74,10 +74,13 @@ stdout/optional file, with central redaction that keeps the Activation Key and d
 logs at every level), its **filesystem-layout provisioning** (IP-02 T-34: the `/opt/weapon-detection/`
 directories created with their ADR-008 modes, idempotently), and its **SQLite store foundation and
 schema** (IP-02 T-35: connection management plus the idempotent, versioned `SchemaVersion`/
-`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`). It still contains
-none of the Agent's operational behaviour — no activation, device identity, DeepStream supervision, or
-Backend communication, and **nothing reads or writes the SQLite tables yet** (the repositories are
-T-36). Those arrive with IP-02 tasks T-36–T-41 (see
+`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`), and its
+**persistence repositories** (IP-02 T-36: a `DeviceIdentityRepository` — load, first-activation
+store, and atomic shared-secret replacement retaining the permanent Device ID — and a **load-only**
+`ConfigCacheRepository`, its writer deferred under OI-2). It still contains none of the Agent's
+operational behaviour — no activation, Backend communication, or DeepStream supervision — and nothing
+populates or consumes the cached configuration at runtime. Those arrive with IP-02 tasks T-37–T-41
+(see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work

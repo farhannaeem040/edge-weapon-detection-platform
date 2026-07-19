@@ -8,16 +8,27 @@ It stores **metadata only** — the device identity and cached configuration —
 video (BR-006, ADR-004). Importing this subpackage performs no I/O: it opens no connection, creates
 no file, and initializes no schema. Those happen only through explicit function calls.
 
-The device-identity and config-cache *repositories* (reading and writing those records) are T-36 and
-are not part of this task; only the schema that will hold them exists here.
+The repositories (:class:`DeviceIdentityRepository`, :class:`ConfigCacheRepository`) read and — for
+the Device Identity — write those records (T-36). The ``ConfigCache`` repository is load-only (its
+writer is deferred, OI-2). None of this contacts the Backend, performs activation, or wires into
+application startup (T-37/T-38/T-39).
 """
 
+from weapon_detection_agent.persistence.config_cache_repository import ConfigCacheRepository
 from weapon_detection_agent.persistence.database import (
     DatabaseInitializationError,
     connect,
     open_connection,
     transaction,
 )
+from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
+from weapon_detection_agent.persistence.errors import (
+    IdentityAlreadyExistsError,
+    InvalidConfigCacheStateError,
+    InvalidIdentityStateError,
+    RepositoryError,
+)
+from weapon_detection_agent.persistence.models import CachedConfiguration, DeviceIdentity
 from weapon_detection_agent.persistence.schema import (
     CURRENT_SCHEMA_VERSION,
     InvalidSchemaStateError,
@@ -29,8 +40,16 @@ from weapon_detection_agent.persistence.schema import (
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "CachedConfiguration",
+    "ConfigCacheRepository",
     "DatabaseInitializationError",
+    "DeviceIdentity",
+    "DeviceIdentityRepository",
+    "IdentityAlreadyExistsError",
+    "InvalidConfigCacheStateError",
+    "InvalidIdentityStateError",
     "InvalidSchemaStateError",
+    "RepositoryError",
     "UnsupportedSchemaVersionError",
     "connect",
     "initialize_database",

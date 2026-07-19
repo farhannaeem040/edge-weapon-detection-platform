@@ -4,27 +4,29 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-35
+## Status — IP-02 T-31–T-36
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
 FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
 (T-32 — see [Configuration](#configuration)), the **structured logging foundation with secret
 redaction** (T-33 — see [Logging](#logging)), the **filesystem-layout provisioning**
-(T-34 — see [Filesystem layout](#filesystem-layout)), and the **SQLite store foundation and schema**
-(T-35 — see [Local database](#local-database-sqlite)). None of the Agent's operational behaviour
-exists yet — the schema exists, but nothing reads or writes device-identity or config-cache
-*records*.
+(T-34 — see [Filesystem layout](#filesystem-layout)), the **SQLite store foundation and schema**
+(T-35 — see [Local database](#local-database-sqlite)), and the **device-identity and config-cache
+repositories** (T-36 — see [Persistence repositories](#persistence-repositories)). None of the
+Agent's operational behaviour exists yet — the repositories can persist and read the local records,
+but nothing activates, contacts the Backend, or consumes them at runtime.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the device-identity and config-cache repositories that read/write those records (T-36);
-- the `POST /api/v1/activate` Backend client and activation/reactivation workflow (T-37, T-38);
-- the startup lifespan and single-worker Uvicorn runtime (T-39);
+- the `POST /api/v1/activate` Backend client (T-37);
+- the activation/reactivation workflow and Device-ID mismatch policy (T-38);
+- the startup lifespan and single-worker Uvicorn runtime that wires the repositories in (T-39);
 - the simulated-Backend and real-Backend test suites (T-40);
 - the systemd unit and Jetson deployment (T-41).
 
-There is **no** activation, device identity, shared-secret handling, DeepStream supervision,
-heartbeat, or command API here — and no repository reads or writes the SQLite tables yet. See
+There is **no** activation, Backend communication, DeepStream supervision, heartbeat, or command API
+here. The `ConfigCache` repository is **load-only** — its writer is deferred (OI-2), and nothing
+populates or consumes the cache at runtime. See
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](../specs/implementation-plans/IP-02-jetson-agent-foundation.md)
 for the full plan.
 
@@ -54,17 +56,24 @@ agent/
 │       │   ├── configuration.py         # configure_logging()
 │       │   ├── formatter.py             # JSON log formatter
 │       │   └── redaction.py             # central Redactor
-│       └── persistence/                 # SQLite store foundation + schema (T-35)
+│       └── persistence/                 # SQLite store, schema (T-35) + repositories (T-36)
 │           ├── __init__.py
 │           ├── database.py              # connection, PRAGMAs, transaction helper, file mode
-│           └── schema.py                # version-1 tables + idempotent initializer
+│           ├── schema.py                # version-1 tables + idempotent initializer
+│           ├── models.py               # DeviceIdentity / CachedConfiguration records (T-36)
+│           ├── errors.py               # typed repository errors (T-36)
+│           ├── device_identity_repository.py   # load / store / replace secret (T-36)
+│           └── config_cache_repository.py      # load-only (T-36; writer deferred, OI-2)
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
     ├── test_logging.py                  # logging + redaction tests (T-33)
     ├── test_paths.py                    # filesystem layout tests (T-34)
     ├── test_database.py                 # SQLite connection tests (T-35)
-    └── test_schema.py                   # schema + versioning tests (T-35)
+    ├── test_schema.py                   # schema + versioning tests (T-35)
+    ├── test_device_identity_repository.py      # device identity repo tests (T-36)
+    ├── test_config_cache_repository.py         # config cache load tests (T-36)
+    └── test_repository_integration.py          # cross-repository tests (T-36)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -229,10 +238,63 @@ seeds **no** rows: `DeviceIdentity` and `ConfigCache` start empty (writing them 
   installer (T-41). On Windows, POSIX modes are not representable, so the mode step is skipped and
   the mode-assertion tests skip accordingly (IP-02 §17).
 
-Run the persistence tests:
+Run the schema/connection tests:
 
 ```bash
 python -m pytest tests/test_database.py tests/test_schema.py
+```
+
+## Persistence repositories
+
+Two concrete repositories read and write the singleton records, in
+`weapon_detection_agent.persistence`. Each is constructed with the **explicit database path**
+(`AgentPaths.database_file`) — they never resolve `WDA_ROOT_PATH`, create directories, initialize the
+schema, retain a global connection, or perform any import-time I/O. The caller resolves paths (T-34),
+provisions, initializes the schema (T-35), and then constructs the repository:
+
+```text
+AgentSettings → AgentPaths → AgentPaths.database_file → initialize schema → repositories
+```
+
+Records are immutable dataclasses (`persistence.models`). The device shared secret is a `SecretStr`,
+so it is redacted in every `repr`/`str`, log line, and error; timestamps are timezone-aware UTC
+`datetime`s serialized as ISO-8601 UTC. "Protected" on the Jetson means **file-permission-protected**
+(the `0600` database, D-4) — there is **no application-layer encryption**, and the code claims none.
+
+### `DeviceIdentityRepository`
+
+- **`load()`** → the stored `DeviceIdentity`, or **`None` when the Agent has not activated** (no row).
+- **`store(identity)`** — persists the identity from a **first activation**, in one transaction.
+  A second store is **rejected** with `IdentityAlreadyExistsError`: the repository never overwrites a
+  stored identity, so the **Device ID is permanent** (it cannot be changed or cleared here).
+- **`replace_shared_secret(shared_secret=…, last_activated_at=…)`** — the reactivation write. It
+  atomically updates **only** `ProtectedSharedSecret` and `LastActivatedAt`, **retaining the Device
+  ID and the original `ActivatedAt`** (§10, ADR-015). A failure mid-write rolls back, leaving the
+  previously committed secret intact (never torn or empty); replacing when no identity exists raises
+  `InvalidIdentityStateError`.
+
+Deciding **whether** to (re)activate, and what to do if the Backend returns a *different* Device ID,
+is **not** this layer's job — that policy belongs to the activation orchestration (T-38).
+
+### `ConfigCacheRepository`
+
+- **`load()`** → the stored `CachedConfiguration` (raw `ConfigJson` text + UTC `updated_at`), or
+  **`None` when no cache exists** (the normal state in this milestone).
+
+This repository is **load-only by design**: IP-02 defers the `ConfigCache` **writer** (OI-2) — this
+milestone has no configuration source to populate it, and nothing consumes the cache at runtime yet.
+There is no replace, clear, refresh, or polling operation. `ConfigJson` is returned as raw text (no
+configuration schema exists yet, OI-2, so it is not parsed) and is never logged or placed in an error.
+
+Both repositories use the T-35 `transaction()` helper for writes and a fresh short-lived connection
+per operation. Errors carry only safe structural facts — never a secret, configuration payload, SQL
+parameter, or full row.
+
+Run the repository tests:
+
+```bash
+python -m pytest tests/test_device_identity_repository.py \
+  tests/test_config_cache_repository.py tests/test_repository_integration.py
 ```
 
 ## Logging
