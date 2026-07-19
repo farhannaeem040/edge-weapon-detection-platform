@@ -71,9 +71,13 @@ development tooling, a minimal importable FastAPI application with **no endpoint
 loaded into one immutable, validated object with fail-fast on a missing/invalid Backend URL), and its
 **structured logging foundation with secret redaction** (IP-02 T-33: newline-delimited JSON to
 stdout/optional file, with central redaction that keeps the Activation Key and device secret out of
-logs at every level). It still contains none of the Agent's operational behaviour — no activation,
-device identity, SQLite, DeepStream supervision, or Backend communication. Those arrive with IP-02
-tasks T-34–T-41 (see
+logs at every level), its **filesystem-layout provisioning** (IP-02 T-34: the `/opt/weapon-detection/`
+directories created with their ADR-008 modes, idempotently), and its **SQLite store foundation and
+schema** (IP-02 T-35: connection management plus the idempotent, versioned `SchemaVersion`/
+`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`). It still contains
+none of the Agent's operational behaviour — no activation, device identity, DeepStream supervision, or
+Backend communication, and **nothing reads or writes the SQLite tables yet** (the repositories are
+T-36). Those arrive with IP-02 tasks T-36–T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work

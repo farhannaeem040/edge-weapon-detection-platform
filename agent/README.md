@@ -4,25 +4,27 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-34
+## Status — IP-02 T-31–T-35
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
 FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
 (T-32 — see [Configuration](#configuration)), the **structured logging foundation with secret
-redaction** (T-33 — see [Logging](#logging)), and the **filesystem-layout provisioning**
-(T-34 — see [Filesystem layout](#filesystem-layout)). None of the Agent's operational behaviour
-exists yet.
+redaction** (T-33 — see [Logging](#logging)), the **filesystem-layout provisioning**
+(T-34 — see [Filesystem layout](#filesystem-layout)), and the **SQLite store foundation and schema**
+(T-35 — see [Local database](#local-database-sqlite)). None of the Agent's operational behaviour
+exists yet — the schema exists, but nothing reads or writes device-identity or config-cache
+*records*.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the local SQLite store and device-identity/config-cache persistence (T-35, T-36);
+- the device-identity and config-cache repositories that read/write those records (T-36);
 - the `POST /api/v1/activate` Backend client and activation/reactivation workflow (T-37, T-38);
 - the startup lifespan and single-worker Uvicorn runtime (T-39);
 - the simulated-Backend and real-Backend test suites (T-40);
 - the systemd unit and Jetson deployment (T-41).
 
-There is **no** activation, device identity, shared-secret handling, SQLite, DeepStream supervision,
-heartbeat, or command API here. See
+There is **no** activation, device identity, shared-secret handling, DeepStream supervision,
+heartbeat, or command API here — and no repository reads or writes the SQLite tables yet. See
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](../specs/implementation-plans/IP-02-jetson-agent-foundation.md)
 for the full plan.
 
@@ -47,16 +49,22 @@ agent/
 │       │   ├── __init__.py
 │       │   ├── settings.py              # AgentSettings + load_settings() (T-32)
 │       │   └── paths.py                 # filesystem layout resolution + provisioning (T-34)
-│       └── logging/                     # structured logging + redaction (T-33)
+│       ├── logging/                     # structured logging + redaction (T-33)
+│       │   ├── __init__.py
+│       │   ├── configuration.py         # configure_logging()
+│       │   ├── formatter.py             # JSON log formatter
+│       │   └── redaction.py             # central Redactor
+│       └── persistence/                 # SQLite store foundation + schema (T-35)
 │           ├── __init__.py
-│           ├── configuration.py         # configure_logging()
-│           ├── formatter.py             # JSON log formatter
-│           └── redaction.py             # central Redactor
+│           ├── database.py              # connection, PRAGMAs, transaction helper, file mode
+│           └── schema.py                # version-1 tables + idempotent initializer
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
     ├── test_logging.py                  # logging + redaction tests (T-33)
-    └── test_paths.py                    # filesystem layout tests (T-34)
+    ├── test_paths.py                    # filesystem layout tests (T-34)
+    ├── test_database.py                 # SQLite connection tests (T-35)
+    └── test_schema.py                   # schema + versioning tests (T-35)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -65,15 +73,17 @@ and the central redaction utility. It is named `logging` but never shadows the s
 all imports are absolute, so `import logging` anywhere resolves to the stdlib module while this
 package is always addressed as `weapon_detection_agent.logging`.
 
-The rest of the module structure IP-02 §4 lays out (`persistence/`, `activation/`, `runtime/`) is
-introduced by the tasks that implement each part — not scaffolded ahead of use (Engineering
-Principle 9).
+The rest of the module structure IP-02 §4 lays out (`activation/`, `runtime/`) is introduced by the
+tasks that implement each part — not scaffolded ahead of use (Engineering Principle 9). The
+`persistence/` package created here holds connection and schema management only; its
+device-identity/config-cache **repositories** arrive with T-36.
 
 ## Dependencies
 
 - **Runtime:** `fastapi`, `uvicorn[standard]` (control-plane scaffold), `pydantic-settings` (the
-  validated bootstrap-configuration model, T-32). Logging (T-33) uses only the standard library
-  (`logging`, `json`, `datetime`, `traceback`) — no new dependency.
+  validated bootstrap-configuration model, T-32). Logging (T-33) and SQLite persistence (T-35) use
+  only the standard library (`logging`, `json`, `datetime`, `traceback`; `sqlite3`) — no new
+  dependency. In particular, no ORM or migration framework is used (IP-02 D-6).
 - **Development:** `pytest`, `httpx` (FastAPI `TestClient` HTTP/API testing), `ruff` (lint +
   format), `mypy` (static type checking).
 
@@ -166,6 +176,63 @@ Run the filesystem-layout tests:
 
 ```bash
 python -m pytest tests/test_paths.py
+```
+
+## Local database (SQLite)
+
+The Agent's local store is a single SQLite database at `<root>/database/agent.db` (ADR-004, IP-02
+§7), holding **metadata only** — never binary images or video (BR-006). Its path is the resolved
+`AgentPaths.database_file`; the persistence layer never hard-codes the production path. Managed by
+`weapon_detection_agent.persistence` (`database.py` for connections, `schema.py` for the schema).
+
+**Provisioning order.** The database directory must exist before the database is created — the
+persistence layer never calls `mkdir`. The order a later startup task (T-39) will follow, and the
+order tests follow, is:
+
+```text
+resolve_paths(root)  →  AgentPaths.provision()  →  initialize_database(paths.database_file)
+```
+
+Opening a connection whose parent `database/` directory is missing fails with a clear
+`DatabaseInitializationError` rather than silently creating it.
+
+**Schema (version 1, IP-02 §7).** Three tables, created together:
+
+| Table | Purpose |
+|-------|---------|
+| `SchemaVersion` | Single integer `Version` guarding the schema version. |
+| `DeviceIdentity` | The persistent Device ID and protected shared secret (one row, `SingletonGuard = 1`). |
+| `ConfigCache` | The last synchronized configuration for offline startup (one row, `SingletonGuard = 1`). |
+
+`DeviceIdentity` and `ConfigCache` each use `SingletonGuard INTEGER PRIMARY KEY CHECK (SingletonGuard
+= 1)`, giving the "exactly one row" invariant a schema-level guarantee — a second row is rejected by
+SQLite, not merely by application code. **No table stores binary media**, and creating the schema
+seeds **no** rows: `DeviceIdentity` and `ConfigCache` start empty (writing them is T-36's work).
+
+- **Idempotent initialization.** `initialize_database(path)` (or `initialize_schema(connection)`)
+  creates the tables and records version 1 on a fresh database, and is a safe no-op on an
+  already-current one — existing rows are preserved. Safe to run on every startup.
+- **Transactional and atomic.** Schema creation runs inside one explicit transaction; a failure
+  part-way rolls the whole thing back, so the database is never left with only some tables or a
+  version row without its tables.
+- **Version safety.** A database recording a **newer** version raises `UnsupportedSchemaVersionError`
+  (the Agent never downgrades or modifies it); an impossible `SchemaVersion` state (no row, multiple
+  rows, or a non-positive version) raises `InvalidSchemaStateError`. Neither error, and no log line,
+  ever contains a stored row value or secret.
+- **Connection lifecycle.** `connect(path)` returns a configured `sqlite3.Connection`
+  (`row_factory = sqlite3.Row`, `PRAGMA foreign_keys = ON`, manual transaction control); the caller
+  closes it. `open_connection(path)` is a context manager that closes predictably on exit. There is
+  **no** module-level/global connection, and **importing the persistence modules performs no I/O** —
+  no file, database, or socket is touched until an explicit call.
+- **File permissions.** On POSIX the database file is set to mode `0600` (owner read/write only)
+  after creation and reapplied on each connect (IP-02 §7, ARCH-001 §13.3); ownership is left to the
+  installer (T-41). On Windows, POSIX modes are not representable, so the mode step is skipped and
+  the mode-assertion tests skip accordingly (IP-02 §17).
+
+Run the persistence tests:
+
+```bash
+python -m pytest tests/test_database.py tests/test_schema.py
 ```
 
 ## Logging
