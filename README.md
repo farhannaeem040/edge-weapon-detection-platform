@@ -143,7 +143,45 @@ See [`docs/architecture/software-architecture-document.md`](docs/architecture/so
 
 ---
 
+## Running the central platform (recommended)
+
+The Angular dashboard, the ASP.NET Core Backend, SQL Server, and the EF Core migrations run together
+as one Docker Compose stack (IP-04). **Docker Desktop is the only prerequisite** — no local Node.js,
+Angular CLI, .NET SDK, SQL Server, or EF Core tooling is needed.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deployment/start.ps1
+```
+
+or, once a `.env` exists:
+
+```bash
+docker compose up --build -d
+```
+
+Then open <http://localhost:8080> and sign in with the `ADMIN_IDENTIFIER` / `ADMIN_PASSWORD` values
+from the generated `.env`.
+
+See [`deployment/README.md`](deployment/README.md) for logs, stopping, resetting, troubleshooting,
+and the security limitations of this trusted-LAN prototype.
+
+**The Jetson Agent is not containerized.** It runs natively on the Jetson under systemd, because it
+requires NVIDIA, DeepStream, camera, and subprocess access — that deployment is **T-41**. A Jetson
+reaches the central server through the same origin:
+
+```bash
+WDA_BACKEND_BASE_URL=http://<server-ip>:8080
+```
+
+The sections below cover the **local, non-containerized** development setup, which remains fully
+supported (`dotnet run` + `ng serve`).
+
+---
+
 ## Prerequisites
+
+These apply to the local, non-containerized setup below. For the containerized stack, only Docker
+Desktop is required.
 
 Versions this milestone was actually built and verified on:
 

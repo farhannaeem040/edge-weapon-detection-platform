@@ -86,6 +86,22 @@ Backend, so the browser issues only same-origin requests — see `proxy.conf.jso
 co-located production deployment and avoids requiring a CORS policy the Backend does not otherwise
 need.
 
+### Containerized alternative
+
+The whole platform (this dashboard, the Backend, SQL Server, and migrations) also runs as a Docker
+Compose stack, with no local Node.js or .NET required:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deployment/start.ps1
+```
+
+There, `Dockerfile` builds the app with `npm ci` + `npm run build` and serves
+`dist/frontend/browser` from Nginx, which reverse-proxies `/api/` to the Backend container — the same
+single-origin arrangement `proxy.conf.json` provides in development, which is why **no environment
+file changes** were needed for containerization. See [`deployment/README.md`](../deployment/README.md).
+
+This does not affect `ng serve`, which continues to work exactly as described above.
+
 ## Backend base URL
 
 Configured per build environment in `src/environments/`:

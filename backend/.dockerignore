@@ -1,0 +1,58 @@
+# Keeps the build context small and, more importantly, keeps build output, local configuration,
+# and anything secret-bearing out of the image.
+#
+# Note what is NOT excluded, because the build genuinely needs it: *.csproj, dotnet-tools.json
+# (the pinned dotnet-ef manifest used by the migrations stage), src/**, and appsettings*.json
+# (which ship with the publish output and contain no secrets).
+
+# Build output
+**/bin/
+**/obj/
+**/out/
+**/publish/
+
+# Test output and coverage
+**/TestResults/
+**/coverage/
+**/*.trx
+**/*.coverage
+**/coverage.*.json
+**/coverage.*.xml
+
+# Test projects — never part of a runtime image
+tests/
+
+# Local configuration and secrets
+**/.env
+**/.env.*
+**/secrets.json
+**/appsettings.Local.json
+**/*.pfx
+**/*.key
+**/*.pem
+
+# Local databases and logs
+**/*.mdf
+**/*.ldf
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.log
+**/logs/
+
+# IDE and editor metadata
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.suo
+
+# Version control and tooling caches
+**/.git/
+**/.gitignore
+**/.github/
+**/node_modules/
+
+# Docker files themselves
+**/Dockerfile*
+**/.dockerignore

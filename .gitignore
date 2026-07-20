@@ -11,6 +11,9 @@ dist/
 *.env
 .env.*
 
+# ...but the committed placeholder template must stay tracked (it holds no real values).
+!.env.example
+
 # Local MCP server config — contains an API key; must never be committed.
 mcp.json
 .mcp.json
