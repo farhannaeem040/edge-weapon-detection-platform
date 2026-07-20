@@ -84,10 +84,15 @@ secret-safe `ActivationResult`), and its **activation/reactivation orchestration
 T-38: an `ActivationService` that resolves the key env-over-file, calls the client once, persists the
 identity — first activation stores it, reactivation replaces the secret while keeping the permanent
 Device ID and original activation time, and a returned Device-ID mismatch fails loudly — and deletes
-a file key only after success; a timeout is surfaced as an ambiguous outcome, never retried). Every
-piece of the activation flow now exists and is tested, but **nothing runs it at startup yet** —
-`main.py` does not activate the Agent, so **activation is not end-to-end functional**. Those arrive
-with IP-02 tasks T-39–T-41 (see
+a file key only after success; a timeout is surfaced as an ambiguous outcome, never retried), and its
+**FastAPI startup workflow and single-worker runtime** (IP-02 T-39: `create_app()` attaches a
+lifespan that runs the §12.1 startup decision — provision → logging → schema → activation — and
+publishes a secret-free `AgentRuntime` on `app.state.runtime` only on success, closing the owned
+client and refusing to serve on any failure; no operational/health endpoint is defined, OI-3). The
+Agent now **activates in its startup lifespan** and the activation foundation is wired end-to-end at
+the Agent level. It is verified only against a **fake** Backend client, though: real/simulated Backend
+contract verification is **T-40** and the Jetson/systemd deployment is **T-41**, so end-to-end Jetson
+activation is not complete. Those arrive with IP-02 tasks T-40–T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work

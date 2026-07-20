@@ -1,35 +1,38 @@
-"""Minimal FastAPI application for the Jetson Agent (IP-02 T-31 scaffold).
+"""Uvicorn entry point for the Jetson Agent (IP-02 T-39, §5, ADR-010).
 
-This module exposes a single importable ``app`` so the scaffold is provably wired up — the package
-installs, the application object is constructed, and its metadata is set — without yet doing any of
-the Agent's real work.
+``weapon_detection_agent.main:app`` is the ASGI application Uvicorn serves. The application is built
+by :func:`weapon_detection_agent.app.create_app`, which attaches the T-39 startup lifespan — so all
+of the Agent's real work (settings, provisioning, logging, SQLite, activation) runs when the server
+enters the lifespan, **not** at import. Importing this module therefore does no I/O, opens no
+socket, configures no logging, and performs no activation; it only builds the ``FastAPI`` object.
 
-What this deliberately does **not** contain, because it belongs to later IP-02 tasks:
+**Single Uvicorn worker (ADR-010).** The Agent owns process-local singleton responsibilities (device
+identity, and later DeepStream supervision), so it must run under exactly **one** worker. The
+provided :func:`run` helper pins ``workers=1``; the documented launch command does the same:
 
-* no routes or endpoints of any kind — the Agent's approved routes (ARCH-001 §14.2) all belong to
-  excluded features, and no Agent health route is approved (IP-02 §2.2, OI-3);
-* no lifespan/startup handler, settings loading, filesystem or SQLite access, activation, or
-  Backend communication (IP-02 T-32–T-39);
-* no Uvicorn server invocation — the process is launched with a single worker from the command line
-  (``uvicorn weapon_detection_agent.main:app --workers 1``), per ADR-010; wiring the single-worker
-  runtime and the startup lifespan is T-39's work.
+    uvicorn weapon_detection_agent.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-Because it only constructs the ``FastAPI`` object, importing this module does no I/O, opens no
-socket, and touches no platform-specific API, so it imports identically on a workstation and on the
-Jetson.
+Multiple workers are never configured. Enforcing this in the systemd unit is T-41's job; this module
+neither infers nor depends on any Uvicorn CLI internals, and never calls ``uvicorn.run`` at import.
 """
 
-from fastapi import FastAPI
+from weapon_detection_agent.app import create_app
 
-from weapon_detection_agent import __version__
+# The control-plane application object Uvicorn serves. Constructing it runs no startup work.
+app = create_app()
 
-# The control-plane application object. It carries title and version metadata only; endpoints,
-# startup work, and dependencies are added by later tasks.
-app = FastAPI(
-    title="Weapon Detection Agent",
-    version=__version__,
-    description=(
-        "Control-plane API for the Jetson Agent. Scaffold only (IP-02 T-31): no operational "
-        "endpoints are defined yet."
-    ),
-)
+
+def run() -> None:
+    """Run the Agent under a single Uvicorn worker (ADR-010). Not called at import."""
+    import uvicorn
+
+    uvicorn.run(
+        "weapon_detection_agent.main:app",
+        host="0.0.0.0",
+        port=8000,
+        workers=1,
+    )
+
+
+if __name__ == "__main__":
+    run()

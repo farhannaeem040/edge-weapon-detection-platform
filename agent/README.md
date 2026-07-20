@@ -4,32 +4,33 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-38
+## Status — IP-02 T-31–T-39
 
-Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
-FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
+Delivered so far: the project scaffold (T-31), the **validated bootstrap-configuration foundation**
 (T-32 — see [Configuration](#configuration)), the **structured logging foundation with secret
 redaction** (T-33 — see [Logging](#logging)), the **filesystem-layout provisioning**
 (T-34 — see [Filesystem layout](#filesystem-layout)), the **SQLite store foundation and schema**
 (T-35 — see [Local database](#local-database-sqlite)), the **device-identity and config-cache
 repositories** (T-36 — see [Persistence repositories](#persistence-repositories)), the
 **Backend activation HTTP client** (T-37 — see [Backend activation client](#backend-activation-client)),
-and the **activation/reactivation orchestration service** (T-38 — see
-[Activation service](#activation-service)). Every piece of the activation flow now exists and is
-tested, but nothing **runs** it yet: the service must be invoked, and wiring it into application
-startup is T-39.
+the **activation/reactivation orchestration service** (T-38 — see
+[Activation service](#activation-service)), and the **FastAPI startup workflow and runtime**
+(T-39 — see [Startup workflow and runtime](#startup-workflow-and-runtime)). The Agent now **runs its
+activation in the FastAPI lifespan** on startup and publishes an initialized runtime — the activation
+foundation is wired end-to-end at the Agent level.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the startup lifespan and single-worker Uvicorn runtime that invokes the activation service at
-  boot (T-39);
-- the simulated-Backend and real-Backend test suites (T-40);
+- the simulated-Backend and real-Backend contract test suites (T-40);
 - the systemd unit and Jetson deployment (T-41).
 
-There is **no end-to-end activation at startup**, DeepStream supervision, heartbeat, or command API
-here: the activation service can be called to activate/reactivate, but **`main.py` does not run it**,
-so the Agent does not activate on boot yet. The `ConfigCache` repository remains **load-only** — its
-writer is deferred (OI-2), and nothing populates or consumes the cache at runtime. See
+There is **no** DeepStream supervision, detection handling, alerting, heartbeat, health monitoring,
+command API, or configuration polling here, and the Agent defines **no operational HTTP endpoint** (no
+health/status route — OI-3). Startup activation is exercised only against a **fake** Backend client in
+tests; verifying it against the real (and a simulated) Backend is **T-40**, and the Jetson/systemd
+deployment is **T-41** — so end-to-end Jetson activation is **not** complete yet. The `ConfigCache`
+repository remains **load-only** (its writer deferred, OI-2): startup loads it (normally empty) but
+nothing populates or consumes it. See
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](../specs/implementation-plans/IP-02-jetson-agent-foundation.md)
 for the full plan.
 
@@ -49,7 +50,8 @@ agent/
 ├── src/
 │   └── weapon_detection_agent/
 │       ├── __init__.py                  # package marker + __version__
-│       ├── main.py                      # minimal FastAPI `app` (no endpoints yet)
+│       ├── main.py                      # Uvicorn entry point: app = create_app(); run() (T-39)
+│       ├── app.py                       # create_app() FastAPI factory + lifespan (T-39)
 │       ├── config/
 │       │   ├── __init__.py
 │       │   ├── settings.py              # AgentSettings + load_settings() (T-32)
@@ -67,13 +69,17 @@ agent/
 │       │   ├── errors.py               # typed repository errors (T-36)
 │       │   ├── device_identity_repository.py   # load / store / replace secret (T-36)
 │       │   └── config_cache_repository.py      # load-only (T-36; writer deferred, OI-2)
-│       └── activation/                  # Backend client (T-37) + orchestration service (T-38)
+│       ├── activation/                  # Backend client (T-37) + orchestration service (T-38)
+│       │   ├── __init__.py
+│       │   ├── backend_client.py        # BackendActivationClient — one request, no retry (T-37)
+│       │   ├── models.py               # ActivationResult (deviceId/sharedSecret/branchId) (T-37)
+│       │   ├── errors.py               # typed, message-safe client + service errors (T-37/T-38)
+│       │   ├── key_resolver.py          # ActivationKeyResolver — env-over-file key (T-38)
+│       │   └── service.py               # ActivationService — first activation / reactivation (T-38)
+│       └── runtime/                     # FastAPI startup workflow + published state (T-39)
 │           ├── __init__.py
-│           ├── backend_client.py        # BackendActivationClient — one request, no retry (T-37)
-│           ├── models.py               # ActivationResult (deviceId/sharedSecret/branchId) (T-37)
-│           ├── errors.py               # typed, message-safe client + service errors (T-37/T-38)
-│           ├── key_resolver.py          # ActivationKeyResolver — env-over-file key (T-38)
-│           └── service.py               # ActivationService — first activation / reactivation (T-38)
+│           ├── startup.py               # create_lifespan + startup/shutdown orchestration
+│           └── state.py                 # AgentRuntime + get_runtime (app.state.runtime)
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
@@ -88,7 +94,10 @@ agent/
     ├── test_activation_models.py               # activation result model tests (T-37)
     ├── test_activation_key_resolver.py         # key resolver tests (T-38)
     ├── test_activation_service.py              # activation service tests (T-38)
-    └── test_activation_service_integration.py  # activation lifecycle integration (T-38)
+    ├── test_activation_service_integration.py  # activation lifecycle integration (T-38)
+    ├── test_runtime_state.py                   # AgentRuntime state tests (T-39)
+    ├── test_app_lifespan.py                    # app factory + lifespan tests (T-39)
+    └── test_runtime_startup.py                 # startup workflow + lifecycle tests (T-39)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -433,6 +442,82 @@ python -m pytest tests/test_activation_key_resolver.py tests/test_activation_ser
   tests/test_activation_service_integration.py
 ```
 
+## Startup workflow and runtime
+
+The application is built by `weapon_detection_agent.app.create_app()` and served as
+`weapon_detection_agent.main:app`. All of the Agent's real work runs inside the **FastAPI lifespan**
+on startup — **not** at import: importing `main` builds only the `FastAPI` object (no settings, no
+directories, no database, no logging handlers, no HTTP client, no activation). `create_app()` takes
+injectable dependencies (a settings loader, a clock, and a Backend client factory) so tests exercise
+startup without a real Backend, network, or `/opt`; production uses the real defaults.
+
+### Startup order (IP-02 §12.1)
+
+```text
+load settings → resolve paths → provision layout → configure logging → initialize SQLite schema
+  → construct repositories → construct the Backend client → construct the key resolver + service
+  → run activation (first / reactivate / no-op) → load ConfigCache (may be empty, OI-2)
+  → publish app.state.runtime → serve
+```
+
+Logging is configured **after** the layout is provisioned (so the `logs/` directory exists for the
+`<root>/logs/agent.log` file, alongside stdout), with the environment Activation Key registered as a
+redacted literal. The activation call runs **exactly once** and is never retried (IP-02 §14).
+
+### The four startup branches
+
+- **First activation** (no stored identity + a key): the Backend is called once, the identity is
+  persisted, and a file-sourced key is removed — then startup continues.
+- **Reactivation** (a stored identity + a key): the Backend is called once; the returned Device ID
+  must match the stored one; the secret is replaced (keeping the Device ID and original
+  `ActivatedAt`, advancing `LastActivatedAt`); a file key is removed — then startup continues.
+- **Already activated / no key** (a stored identity + no key): a **no-op** — no Backend request, no
+  change. This is the ordinary restart, and it starts successfully even with the Backend unreachable
+  (offline startup).
+- **Unactivated with no key**: startup **fails** clearly (`ActivationKeyMissingError`) — the Agent
+  does not enter the serving state.
+
+Any activation failure (401, timeout → ambiguous, transport, 5xx, malformed response, Device-ID
+mismatch, persistence failure, or key-cleanup failure) **fails startup**: the app does not serve, the
+owned Backend client is closed, and `app.state.runtime` is **not** published. Nothing is retried, and
+local state / the key file are preserved per the [Activation service](#activation-service) contract.
+
+### Runtime state
+
+On success the lifespan publishes a small, immutable `AgentRuntime` on **`app.state.runtime`** (read
+it with `weapon_detection_agent.runtime.get_runtime(app)`), holding the validated settings, resolved
+paths, both repositories, and the activation result. It carries **no** secret — the Activation Key
+lives only inside the settings' `SecretStr`, and the result holds no shared secret — so it cannot leak
+one through a `repr`. It is **not** exposed through any HTTP endpoint. Before startup and after
+shutdown, `get_runtime(app)` returns `None`.
+
+### Shutdown
+
+The lifespan shutdown closes the owned Backend HTTP client and clears the runtime reference. It is
+idempotent, makes **no** Backend call, and deletes **nothing** — not the Device Identity, the
+ConfigCache, the database, the key file, the logs, or any directory.
+
+### One worker; no endpoints
+
+The Agent must run under **exactly one** Uvicorn worker (ADR-010) — process-local singleton state and
+later DeepStream supervision require a single process. `main.run()` pins `workers=1`, and the
+documented command uses `--workers 1`; systemd enforcement is T-41. The app defines **no** operational
+routes (no `/health`, `/status`, `/ready`, `/live`, `/activate` — no Agent health endpoint is approved,
+OI-3); only FastAPI's built-in `/docs`/`/openapi.json` remain.
+
+### Not here yet
+
+Startup activation is verified only against a **fake** Backend client in tests. Verifying it against
+the real (and a simulated) Backend is **T-40**; the systemd unit and Jetson deployment are **T-41**.
+There is no DeepStream, detection, alert, heartbeat, health-monitoring, or command handling, and the
+`ConfigCache` is loaded at startup but **never populated** (OI-2).
+
+Run the runtime tests:
+
+```bash
+python -m pytest tests/test_runtime_state.py tests/test_app_lifespan.py tests/test_runtime_startup.py
+```
+
 ## Logging
 
 The Agent logs as **newline-delimited JSON** (IP-02 §15) — one object per line, suitable for the
@@ -514,13 +599,19 @@ pip install -e ".[dev]"
 
 ### 4. Run the Agent locally
 
-The application currently exposes no endpoints, so this serves an empty app (plus FastAPI's built-in
-`/docs`). A single Uvicorn worker is used deliberately — later Agent state and process supervision
-require a single process (ADR-010):
+Running the Agent **activates it** in the startup lifespan (see
+[Startup workflow and runtime](#startup-workflow-and-runtime)), so it needs its settings configured
+first — at minimum `WDA_BACKEND_BASE_URL`, plus an Activation Key (`WDA_ACTIVATION_KEY` or the
+key file) the first time. A **single** Uvicorn worker is used deliberately — Agent state and later
+process supervision are process-local (ADR-010):
 
 ```bash
-uvicorn weapon_detection_agent.main:app --workers 1
+uvicorn weapon_detection_agent.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
+
+Equivalently, `python -m weapon_detection_agent.main` (or `weapon_detection_agent.main:run()`) runs
+the app pinned to one worker. Do **not** use `--reload` or `--workers N > 1`. The application exposes
+**no operational endpoints** — only FastAPI's built-in `/docs` and `/openapi.json`.
 
 ### 5. Run the tests
 
