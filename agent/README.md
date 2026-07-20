@@ -4,7 +4,7 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-37
+## Status — IP-02 T-31–T-38
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
 FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
@@ -12,23 +12,24 @@ FastAPI application with no endpoints), the **validated bootstrap-configuration 
 redaction** (T-33 — see [Logging](#logging)), the **filesystem-layout provisioning**
 (T-34 — see [Filesystem layout](#filesystem-layout)), the **SQLite store foundation and schema**
 (T-35 — see [Local database](#local-database-sqlite)), the **device-identity and config-cache
-repositories** (T-36 — see [Persistence repositories](#persistence-repositories)), and the
-**Backend activation HTTP client** (T-37 — see [Backend activation client](#backend-activation-client)).
-None of the Agent's operational behaviour is wired together yet — the pieces exist, but nothing
-decides when to activate, persists the result, or runs at startup.
+repositories** (T-36 — see [Persistence repositories](#persistence-repositories)), the
+**Backend activation HTTP client** (T-37 — see [Backend activation client](#backend-activation-client)),
+and the **activation/reactivation orchestration service** (T-38 — see
+[Activation service](#activation-service)). Every piece of the activation flow now exists and is
+tested, but nothing **runs** it yet: the service must be invoked, and wiring it into application
+startup is T-39.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the activation/reactivation workflow that calls the client and persists the result, and the
-  Device-ID mismatch policy (T-38);
-- the startup lifespan and single-worker Uvicorn runtime that wires it all in (T-39);
+- the startup lifespan and single-worker Uvicorn runtime that invokes the activation service at
+  boot (T-39);
 - the simulated-Backend and real-Backend test suites (T-40);
 - the systemd unit and Jetson deployment (T-41).
 
-There is **no** end-to-end activation, DeepStream supervision, heartbeat, or command API here: the
-activation client can perform one request and return a typed result, but nothing calls it, and no
-Device credentials are saved by T-37. The `ConfigCache` repository is **load-only** — its writer is
-deferred (OI-2), and nothing populates or consumes the cache at runtime. See
+There is **no end-to-end activation at startup**, DeepStream supervision, heartbeat, or command API
+here: the activation service can be called to activate/reactivate, but **`main.py` does not run it**,
+so the Agent does not activate on boot yet. The `ConfigCache` repository remains **load-only** — its
+writer is deferred (OI-2), and nothing populates or consumes the cache at runtime. See
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](../specs/implementation-plans/IP-02-jetson-agent-foundation.md)
 for the full plan.
 
@@ -66,11 +67,13 @@ agent/
 │       │   ├── errors.py               # typed repository errors (T-36)
 │       │   ├── device_identity_repository.py   # load / store / replace secret (T-36)
 │       │   └── config_cache_repository.py      # load-only (T-36; writer deferred, OI-2)
-│       └── activation/                  # Backend activation HTTP client (T-37)
+│       └── activation/                  # Backend client (T-37) + orchestration service (T-38)
 │           ├── __init__.py
-│           ├── backend_client.py        # BackendActivationClient — one request, no retry
-│           ├── models.py               # ActivationResult (deviceId/sharedSecret/branchId)
-│           └── errors.py               # typed, message-safe activation errors
+│           ├── backend_client.py        # BackendActivationClient — one request, no retry (T-37)
+│           ├── models.py               # ActivationResult (deviceId/sharedSecret/branchId) (T-37)
+│           ├── errors.py               # typed, message-safe client + service errors (T-37/T-38)
+│           ├── key_resolver.py          # ActivationKeyResolver — env-over-file key (T-38)
+│           └── service.py               # ActivationService — first activation / reactivation (T-38)
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
@@ -82,7 +85,10 @@ agent/
     ├── test_config_cache_repository.py         # config cache load tests (T-36)
     ├── test_repository_integration.py          # cross-repository tests (T-36)
     ├── test_activation_client.py               # activation client tests (T-37)
-    └── test_activation_models.py               # activation result model tests (T-37)
+    ├── test_activation_models.py               # activation result model tests (T-37)
+    ├── test_activation_key_resolver.py         # key resolver tests (T-38)
+    ├── test_activation_service.py              # activation service tests (T-38)
+    └── test_activation_service_integration.py  # activation lifecycle integration (T-38)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -356,6 +362,75 @@ Run the activation-client tests:
 
 ```bash
 python -m pytest tests/test_activation_client.py tests/test_activation_models.py
+```
+
+## Activation service
+
+`weapon_detection_agent.activation.ActivationService` orchestrates the whole activation decision —
+resolving the Activation Key, calling the client **once**, persisting via the Device Identity
+repository, and cleaning up a file key. It is the piece a later startup task (**T-39**) will invoke;
+**`main.py` does not run it, so the Agent does not activate on boot yet.** Dependencies are injected
+(the client, the repository, a key resolver, and a clock) — the service constructs nothing globally,
+reads no settings or environment, initializes no schema, provisions no directory, and writes no
+`ConfigCache`.
+
+### Activation Key resolution (`ActivationKeyResolver`)
+
+The key comes from one of two approved sources, in precedence order (IP-02 §6.1):
+
+1. the `WDA_ACTIVATION_KEY` environment variable — already validated into `AgentSettings` and passed
+   in as a `SecretStr`. **It wins, and the key file is not read.**
+2. a single-line file at `<root>/config/activation-key` (`AgentPaths.activation_key_file`), read
+   only through an explicit call.
+
+Surrounding whitespace (including a normal trailing newline) is stripped; an empty or whitespace-only
+file is rejected (`ActivationKeyFileError`). The key is always a `SecretStr`, and the resolver records
+whether it came from the environment or the file — only a **file** key is ever deleted after success.
+
+### `ActivationService.activate()`
+
+Runs the startup decision (IP-02 §12.1) once and returns a safe, immutable `ActivationServiceResult`
+(`outcome`, `device_id`, timestamps, and `branch_id` when the Backend returned one — **never** the
+shared secret):
+
+- **First activation** (no stored identity + a key): call the Backend once; on success store a new
+  `DeviceIdentity` with the returned `deviceId`/`sharedSecret` and one injected UTC timestamp for both
+  `ActivatedAt` and `LastActivatedAt`; then delete a file-sourced key. No key at all →
+  `ActivationKeyMissingError` (no Backend call). The `branchId` is returned in the result only — the
+  schema stores no branch id.
+- **Already activated / no key** (stored identity + no key): a **no-op** — no Backend call, no SQLite
+  change, timestamps untouched. This is the ordinary restart path.
+- **Reactivation** (stored identity + a key): call the Backend once; if the returned `deviceId`
+  **differs** from the stored one, raise `DeviceIdentityMismatchError` and change nothing (the Device
+  ID is permanent, OI-4); otherwise atomically replace the shared secret, **retaining the Device ID
+  and the original `ActivatedAt`** and advancing `LastActivatedAt` to the clock value; then delete a
+  file-sourced key.
+
+**Environment keys never delete the file.** A file key is deleted **only after** the complete local
+operation succeeds (Backend success **and** committed persistence). It is never deleted after a key
+read failure, `401`, timeout, transport failure, `5xx`, malformed response, Device-ID mismatch, or a
+persistence failure.
+
+**One request, no retry, ambiguous timeout.** The service makes exactly one Backend request and never
+retries (the one-time key is not idempotent; IP-02 §14). A **timeout** becomes
+`ActivationOutcomeAmbiguousError` — the Backend may have activated the device, but no reliable result
+arrived, so the local state is left unchanged and a **new key / operator recovery** is required.
+Transport, `5xx`, `401`, and malformed responses propagate the client's typed errors, leaving the
+database and key file unchanged.
+
+**Backend success then local failure.** If the Backend succeeds but storing (first activation) or
+replacing the secret (reactivation) fails, the service raises `ActivationPersistenceError` — it does
+**not** retry the Backend, does **not** delete the key file, and the prior local state is preserved by
+the repository transaction. If persistence commits but removing the file key then fails, the service
+raises `ActivationKeyCleanupError` **without** rolling back the committed identity (only the leftover
+file needs operator attention). No error, and no log line, ever contains the key, the shared secret,
+or configuration content.
+
+Run the activation-service tests:
+
+```bash
+python -m pytest tests/test_activation_key_resolver.py tests/test_activation_service.py \
+  tests/test_activation_service_integration.py
 ```
 
 ## Logging
