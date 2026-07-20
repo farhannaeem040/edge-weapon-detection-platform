@@ -50,8 +50,18 @@ packages = ["src/weapon_detection_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Make the src-layout package importable during tests without requiring an editable install first,
-# so the suite runs the same way in every environment.
-pythonpath = ["src"]
+# so the suite runs the same way in every environment. "tests" is added too so the shared
+# `support` package (the T-40 real-Backend harness) is importable from the contract suite.
+pythonpath = ["src", "tests"]
+markers = [
+    # The real-Backend contract suite (T-40, §16.3): launches the actual ASP.NET Core Backend on a
+    # loopback port against a throwaway SQL Server database. Deselected from the fast default run;
+    # opt in with `-m backend_contract` (and WDA_RUN_BACKEND_CONTRACT_TESTS=1). Skips cleanly when
+    # the external infrastructure (dotnet, SQL Server) is absent — it never silently passes.
+    "backend_contract: real ASP.NET Core Backend contract tests (require dotnet + SQL Server)",
+]
+# Keep the fast default run free of the infrastructure-dependent contract suite.
+addopts = "-m 'not backend_contract'"
 
 [tool.ruff]
 line-length = 100

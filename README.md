@@ -90,9 +90,14 @@ lifespan that runs the §12.1 startup decision — provision → logging → sch
 publishes a secret-free `AgentRuntime` on `app.state.runtime` only on success, closing the owned
 client and refusing to serve on any failure; no operational/health endpoint is defined, OI-3). The
 Agent now **activates in its startup lifespan** and the activation foundation is wired end-to-end at
-the Agent level. It is verified only against a **fake** Backend client, though: real/simulated Backend
-contract verification is **T-40** and the Jetson/systemd deployment is **T-41**, so end-to-end Jetson
-activation is not complete. Those arrive with IP-02 tasks T-40–T-41 (see
+the Agent level. It is also **verified against the real Backend** (IP-02 T-40): a simulated-contract
+layer exercises every Agent branch and failure mode in-memory, and an opt-in contract layer runs the
+real Agent against the **actual** ASP.NET Core Backend over loopback HTTP, backed by a throwaway SQL
+Server database, with the Branch and Activation Key created through the real authenticated API —
+confirming first activation, one-time-key consumption, the uniform `401`, a restart making no
+activation call, and reactivation retaining the Device ID while rotating the secret. What remains is
+the Jetson/systemd deployment (**T-41**), so end-to-end activation *on the Jetson itself* is not yet
+complete. That arrives with IP-02 task T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work

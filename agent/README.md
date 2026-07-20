@@ -619,6 +619,10 @@ the app pinned to one worker. Do **not** use `--reload` or `--workers N > 1`. Th
 python -m pytest
 ```
 
+This runs the **fast** suite only. It needs no SQL Server, no `dotnet`, and no network: the
+real-Backend contract suite is deselected by default (`addopts = -m 'not backend_contract'`). See
+[Test layers](#test-layers) below for the contract suite.
+
 ### 6. Lint
 
 ```bash
@@ -642,6 +646,114 @@ python -m mypy src
 ```bash
 python -c "from weapon_detection_agent.main import app; print(app.title)"
 ```
+
+## Test layers
+
+IP-02 T-40 (§16.2, §16.3) organises the Agent's cross-component verification into two layers. The
+rule is IP-01 §9's: *a test may only claim what its substrate can actually prove.*
+
+| Layer | Location | Substrate | Proves | In the default run? |
+|-------|----------|-----------|--------|---------------------|
+| Unit | `tests/test_*.py` | Fakes and temporary roots | Each component in isolation (T-31–T-39) | Yes |
+| **A — simulated contract** | `tests/integration/` | In-memory Backend over `httpx.MockTransport` | The Agent's *behaviour* across every branch and failure mode | Yes |
+| **B — real contract** | `tests/contract/` | The **actual** ASP.NET Core Backend + SQL Server | That the contract is *real* | No — opt-in |
+
+### Layer A — simulated Backend (`tests/integration/`)
+
+A stateful in-memory Backend serves `POST /api/v1/activate` with the exact delivered wire contract
+through `httpx.MockTransport`. It is a test double for the *Backend* only — every Agent component is
+real: the real `BackendActivationClient` (so real JSON bytes are produced and parsed), the real
+`ActivationKeyResolver` and `ActivationService`, the real SQLite store, and the real FastAPI
+lifespan, against a temporary root.
+
+Covered: first activation, restart no-op, reactivation, uniform `401` rejection, consumed key,
+Device-ID mismatch, timeout/transport/`5xx`/malformed handling, the one-request **no-retry**
+guarantee, `ConfigCache` left untouched, runtime published only on success, owned client closed on
+every path, and no key or secret in any log.
+
+### Layer B — real Backend contract (`tests/contract/`)
+
+Layer A proves behaviour but cannot prove the contract is real: a stub that mis-encoded the envelope
+would pass every Layer-A test and still fail against the actual server. So Layer B runs the real
+Agent against the **actual** Backend:
+
+```text
+real Agent (real lifespan, real httpx client)
+  -> loopback HTTP on 127.0.0.1:<dynamic port>
+    -> actual WeaponDetection.Api process
+      -> throwaway SQL Server database
+```
+
+The harness (`tests/support/backend_process.py`) owns the entire lifecycle:
+
+1. **Throwaway database.** A uniquely named `WeaponDetectionContract_<random>` database is created
+   through `sqlcmd` using **trusted (integrated) authentication** — no SQL password exists to
+   hard-code, print, or commit. The harness refuses to touch any database not matching that prefix,
+   so a development database can never be dropped by mistake.
+2. **Real migrations.** The Backend does not migrate at startup (its startup Admin bootstrap needs
+   an existing schema), so `dotnet ef database update` is applied explicitly, pointed at the
+   throwaway database through the Backend's existing design-time seam,
+   `EFCORE_DESIGNTIME_CONNECTION`. **No Backend production change is required.**
+3. **Real Backend process.** The solution is built once, then the built `WeaponDetection.Api.dll` is
+   launched directly (not `dotnet run`, whose child process can be orphaned on Windows — this keeps
+   the "no `dotnet` process remains" guarantee). Kestrel binds `http://127.0.0.1:0`, so the OS
+   assigns a free port race-free and the host is **never bound publicly**. All configuration travels
+   through the process environment, never argv.
+4. **Readiness.** The harness polls the Backend's **existing** anonymous `GET /api/v1/health` route
+   under a bounded timeout. No health endpoint was added to either side.
+5. **Provisioning.** The Branch, its Camera, its Device, and the one-time Activation Key are created
+   through the **real authenticated API** — the same routes the Dashboard uses. No test-only
+   endpoint, no seeding shortcut, no domain bypass.
+6. **Cleanup.** The process is terminated and awaited in fixture teardown (killed only as a last
+   resort), the log file is deleted, the temporary Agent root is removed, and only the generated
+   throwaway database is dropped (forced to `SINGLE_USER WITH ROLLBACK IMMEDIATE` first so a
+   lingering pooled connection cannot block it). A cleanup failure is reported loudly, never
+   swallowed.
+
+**Prerequisites:** a reachable SQL Server instance, `sqlcmd`, and the .NET SDK with `dotnet ef`.
+
+**Configuration:**
+
+| Variable | Required | Meaning |
+|----------|----------|---------|
+| `WDA_RUN_BACKEND_CONTRACT_TESTS` | Yes — set to `1` | Opt-in switch. Unset, the suite **skips** with a precise reason. Set, any misconfiguration **fails** rather than skipping, so a contract test can never silently pass without having run. |
+| `WDA_BACKEND_CONTRACT_SQL_SERVER` | No | SQL Server instance hosting the throwaway database. Defaults to `localhost\SQLEXPRESS`, the instance the Backend's own integration tests already use. This names an *instance*, never a credential — authentication is trusted, so no connection string with a password is ever needed or stored. |
+
+**Commands:**
+
+```bash
+# fast suite (default) — no SQL Server, no dotnet, no network
+python -m pytest
+
+# real-Backend contract suite
+WDA_RUN_BACKEND_CONTRACT_TESTS=1 python -m pytest -m backend_contract
+```
+
+Layer B verifies, against the real server: the exact request (`POST /api/v1/activate`, sole
+`activationKey` body property, **no** `Authorization` header — the endpoint is anonymous because the
+key *is* the credential); the exact success envelope (`data.deviceId`, `data.sharedSecret`,
+`data.branchId`, with null members omitted); real first activation persisting the Backend's public
+Device ID into SQLite; the issued shared secret persisting intact; the key file removed only *after*
+local persistence; the Device flipping to `Activated`; the one-time key being **consumed** (a reuse
+gets the exact `401 INVALID_ACTIVATION_KEY`); an invalid key writing no identity, retaining the key
+file, and publishing no runtime; a restart making **zero** activation requests (observed through a
+call counter, not assumed) and reporting `ALREADY_ACTIVATED`; and **real reactivation** through the
+real regeneration endpoint retaining the Device ID, advancing `LastActivatedAt`, leaving
+`ActivatedAt` unchanged, and rotating the secret.
+
+**No-retry** is preserved throughout: exactly one HTTP request per activation attempt, on every path
+including rejection. `ConfigCache` stays empty — it remains **load-only** in this milestone (OI-2).
+
+**Secret safety.** The Activation Key and the device shared secret live in memory only (plus the
+Agent's own protected key file, inside a temporary root that is deleted on teardown). Neither is
+printed, placed in an assertion message, used in a test name or filename, passed on a command line,
+or written to a fixture. Secret equality is asserted as a boolean, never by displaying the values,
+and any Backend log tail surfaced in a failure message is passed through a sanitizer that scrubs
+both values and anything resembling a SQL password.
+
+**Not covered here:** concurrent activation (AC-16) is a *Backend* guarantee already verified
+against real SQL Server by IP-01 T-21 (IP-02 §16.4). Timeout, transport, and malformed-response
+behaviour stay in Layer A, where they are deterministic rather than dependent on unreliable sleeps.
 
 ## Security
 
