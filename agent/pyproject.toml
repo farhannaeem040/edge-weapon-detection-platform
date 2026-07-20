@@ -24,21 +24,22 @@ authors = [{ name = "Farhan Naeem" }]
 # Runtime dependencies are only what the delivered tasks genuinely need:
 #   - FastAPI + Uvicorn: the minimal control-plane scaffold (T-31).
 #   - pydantic-settings: the validated, immutable bootstrap-configuration model (T-32, IP-02 §6).
-# The Backend HTTP client (httpx), SQLite persistence, and every other runtime dependency arrive
-# with the task that first uses them (T-37 onward), not now (Engineering Principle 9).
+#   - httpx: the Agent's runtime HTTP client for the Backend activation call (T-37, IP-02 §11).
+# SQLite persistence (T-35) uses the standard library. Every other runtime dependency arrives with
+# the task that first uses it (Engineering Principle 9).
 dependencies = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
     "pydantic-settings>=2.4,<3.0",
+    "httpx>=0.27,<1.0",
 ]
 
 [project.optional-dependencies]
-# Development and test tooling. httpx is present here — not as a runtime dependency — because
-# FastAPI's TestClient uses it for in-process HTTP/API testing; the Agent's own runtime HTTP client
-# is a later task's concern.
+# Development and test tooling. httpx is NOT listed here — it is a runtime dependency (above), and so
+# is always installed with the package; FastAPI's TestClient and the activation-client tests use that
+# same runtime httpx (no duplicate pin).
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
     "ruff>=0.6",
     "mypy>=1.11",
 ]

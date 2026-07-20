@@ -346,17 +346,22 @@ This milestone's contribution to that future work is negative and deliberate: it
 
 ## 14. Error and Retry Behavior
 
-ARCH-001 §23 fixes the *shape* (caller-side timeout/retry with backoff) and states that exact retry counts, backoff intervals, and timeout values are Feature Specification detail. FS-02 does not fix them for the activation call. **Decision D-5**, within that explicitly delegated space:
+ARCH-001 §23 fixes a *caller-side* timeout/retry-with-backoff *shape* for Backend calls in general, and states that exact retry counts, intervals, and timeout values are Feature-Specification/plan detail. **Decision D-5 (amended — approved during T-37):** the general retry/backoff shape does **not** apply to `POST /api/v1/activate`. **Automatic retries for the activation call are prohibited** until the Backend provides an idempotency mechanism.
 
-| Condition | Behavior |
-|-----------|----------|
-| Transport failure / timeout / connection refused | Retry with exponential backoff: 3 attempts, ~1s/2s/4s, jittered. Then fail startup with a clear error. Rationale: ARCH-001 §16.3 makes initial activation *require* Backend connectivity — an Agent that cannot activate has no identity and cannot function, so silently continuing is wrong. |
-| `401` with `errorCode: INVALID_ACTIVATION_KEY` | **Never retried.** Fail startup immediately with an actionable error ("the configured Activation Key was rejected; regenerate it via the Dashboard and reprovision"). Retrying a deterministic credential rejection cannot succeed. |
-| `5xx` | Retried under the same backoff as a transport failure — a server-side fault may be transient. |
-| Other non-2xx, or `200` with `success: false`, or an unparseable/incomplete envelope | Not retried; fail startup with a clear error. The Agent does not guess at a contract it does not recognize. |
-| Success | No retry. The key is now consumed (BR-003); a blind retry would present a consumed key and be correctly rejected. |
+Rationale: the activation endpoint consumes a **one-time** Activation Key (BR-003) and is **not idempotent**. A timeout or transport failure can occur *after* the Backend commits the activation but *before* the Agent receives the response; an automatic retry of the same key would then be rejected as `INVALID_ACTIVATION_KEY`, hiding that the original attempt actually succeeded. Retrying therefore risks masking a successful activation and is unsafe. (This supersedes the earlier D-5, which retried transport/`5xx` failures 3× — that behavior is withdrawn for the activation endpoint.)
 
-The Agent is **idempotent-safe by construction**: it attempts activation at most once per startup per outcome, and never retries after a success or a credential rejection. Retry counts and intervals are configuration-free constants in this milestone; making them tunable would be speculative (Engineering Principle 9).
+The T-37 client performs **exactly one** HTTP attempt per call and maps every outcome to a distinct, message-safe typed result:
+
+| Condition | Client behavior |
+|-----------|-----------------|
+| Timeout | Raise `ActivationTimeoutError`. **Ambiguous outcome** — never retried. |
+| Transport failure / connection refused / DNS / reset / protocol error | Raise `ActivationTransportError`. Never retried. |
+| `401` (any reason: malformed / unknown `keyId` / wrong secret / consumed / invalidated) | Raise `ActivationRejectedError` (status + `INVALID_ACTIVATION_KEY`). A deterministic credential rejection — never retried. |
+| `5xx`, or any other unexpected non-`200`/`401` status | Raise `ActivationServerError` (status only). Never retried. |
+| `200` with an invalid body (bad JSON, wrong envelope, `success` not `true`, or a missing/blank/mistyped field) | Raise `InvalidActivationResponseError`. Never retried. |
+| `200`, valid | Return `ActivationResult`. No retry — the key is now consumed (BR-003). |
+
+**Ownership of the ambiguous outcome.** Because a timeout/transport failure can leave activation in an unknown state, the T-37 client does not decide what to do next — it surfaces the typed error only. The activation/reactivation orchestration (T-38) must surface that ambiguous outcome **safely** and require a **new** Activation Key (regenerated via the Dashboard) or an explicitly approved recovery workflow; it must **not** re-present the same one-time key automatically, and it must **not** reintroduce automatic retries. The general timeout/backoff shape (ARCH-001 §23) remains available to *future idempotent* operations — heartbeat, `GET /api/v1/config`, alert synchronization — but never to activation.
 
 ## 15. Logging and Secret-Redaction Requirements
 
@@ -383,8 +388,8 @@ Realizes NFR-TST-001 and FS-02 §1.2/AC-13. The organizing rule is IP-01 §9's: 
 | SQLite schema | Tables created; schema application idempotent across repeated runs; `SingletonGuard` rejects a second `DeviceIdentity` row |
 | `DeviceIdentityRepository` | Store/load round-trip; atomic secret replacement leaves `DeviceId` unchanged; a simulated mid-transaction failure leaves the prior secret intact (never torn/empty) |
 | `ConfigCacheRepository` | Absent cache returns empty, not an error (OI-2); round-trip when present |
-| `BackendActivationClient` | Sends the complete key verbatim; parses a success envelope; maps `401`/`INVALID_ACTIVATION_KEY` to a typed rejection; maps transport failure, `5xx`, and malformed envelopes to their distinct typed results |
-| Retry policy (§14) | Transport failure retries 3× then fails; `401` never retried; success never retried; `5xx` retried |
+| `BackendActivationClient` | Sends the complete key verbatim; parses a success envelope; maps `401`/`INVALID_ACTIVATION_KEY` to a typed rejection; maps timeout, transport failure, `5xx`/unexpected status, and malformed envelopes to their distinct typed results |
+| No-retry guarantee (§14, amended) | Exactly one HTTP request per `activate()` call; timeout, transport failure, `401`, `5xx`, and malformed responses each raise their typed error and are **never** retried |
 | `ActivationService` | First activation persists identity; reactivation retains `DeviceId` and replaces the secret; a returned `DeviceId` mismatch fails startup (§9.2 step 3) |
 | Startup decision (§12.1) | All four branches: no identity + key → activate; no identity + no key → fail; identity + key → reactivate; identity + no key → normal restart with no HTTP call whatsoever |
 | Logging redaction | Key and secret absent from output across success and every failure path; secret-carrying models redact under `repr()`/`str()` and inside exception text |
@@ -647,15 +652,24 @@ Numbering continues from IP-01's T-30 so task IDs remain globally unique across 
   - No Backend activation client, activation/reactivation workflow, Device-ID mismatch policy, startup integration, DeepStream, systemd, or heartbeat was implemented (those remain T-37–T-41). T-31–T-35 tests still pass. No secret, `.env`, `*.db`, `*.log`, or virtual environment was committed. No Backend/Angular/SRS/ARCH-001/FS-02 file was modified. `ConfigCache` remains **load-only under OI-2**. T-37–T-41 not started; OI-1–OI-4 unchanged.
 
 **T-37 — Backend activation client**
-- Objective: Implement the `POST /api/v1/activate` HTTP client per §11 and the retry policy of §14 (D-5): send the complete key verbatim, parse the envelope, and map every outcome to a distinct typed result.
+- Objective: Implement the `POST /api/v1/activate` HTTP client per §11: send the complete key verbatim in **exactly one request** (no automatic retry — §14, amended), parse the envelope, and map every outcome to a distinct, message-safe typed result.
 - Dependencies: T-32, T-33
-- Files/Components: `activation/backend_client.py`, `activation/models.py`
-- Serves: FS-02 AC-3, AC-15, §10.4; ARCH-001 §23
-- Expected Output: Success parses `deviceId`/`sharedSecret`/`branchId`; `401` maps to a typed rejection and is never retried; transport/`5xx` failures retry with backoff then fail; malformed envelopes fail without guessing.
-- Tests: Unit — §16.1 (`BackendActivationClient`, retry policy), with the transport layer stubbed.
-- Completion Evidence: Unit tests pass across every outcome, including the never-retry-a-401 assertion.
-- Documentation: none (contract stated in §11)
-- Exclusions: No other Backend endpoint; no `X-Device-Id`/`X-Device-Secret` usage; no heartbeat/sync/config calls.
+- Files/Components: `activation/backend_client.py`, `activation/models.py`, `activation/errors.py`
+- Serves: FS-02 AC-3, AC-15, §10.4; ARCH-001 §23 (activation exempted from automatic retry, §14 amended)
+- Expected Output: Success parses `deviceId`/`sharedSecret`/`branchId`; `401` maps to a typed rejection; timeout, transport failure, `5xx`/unexpected status, and malformed envelopes each map to a distinct typed error; **exactly one request per call, never retried**.
+- Tests: Unit — §16.1 (`BackendActivationClient`, no-retry guarantee), with the transport layer stubbed (HTTPX `MockTransport`).
+- Completion Evidence: Unit tests pass across every outcome, including the exactly-one-request and never-retry assertions.
+- Documentation: `agent/README.md` — the activation-client section (contract stated in §11).
+- Exclusions: No automatic retry/backoff for activation (§14, amended); no other Backend endpoint; no `X-Device-Id`/`X-Device-Secret` usage; no heartbeat/sync/config calls; no identity persistence, Device-ID comparison, key resolution, or startup wiring (T-38/T-39).
+- **Status: COMPLETE (delivered).** Commit `feat(agent): add backend activation client`.
+  - Added the `src/weapon_detection_agent/activation/` subpackage: `backend_client.py` (`BackendActivationClient` — async, one `POST /api/v1/activate` per `activate()` call), `models.py` (immutable `ActivationResult` with `deviceId`/`sharedSecret`/`branchId`; `sharedSecret` a `SecretStr`; strict field validation), and `errors.py` (`ActivationClientError` base + `ActivationTimeoutError`/`ActivationTransportError`/`ActivationRejectedError`/`ActivationServerError`/`InvalidActivationResponseError`). Added `tests/test_activation_client.py` and `tests/test_activation_models.py`.
+  - **Dependency:** `httpx` moved from a dev dependency to a **runtime** dependency (`httpx>=0.27,<1.0`) and de-duplicated from `[dev]`; FastAPI's `TestClient` uses the same runtime httpx. No other networking/retry library added.
+  - **Contract (verified against the delivered Backend, unchanged):** `POST /api/v1/activate`; request `{"activationKey": "<keyId.secret>"}` (camelCase); `[AllowAnonymous]` (no Authorization header); success `200` `{"success": true, "data": {"deviceId", "sharedSecret", "branchId"}}`; every rejection `401` `{"success": false, "errorCode": "INVALID_ACTIVATION_KEY"}`; camelCase, nulls omitted; **no configuration** in the response (OI-2). Matches FS-02 §10.4 / §11 exactly.
+  - **No retries (§14 amended):** exactly one HTTP attempt per call; timeout → `ActivationTimeoutError`, transport failure → `ActivationTransportError`, `401` → `ActivationRejectedError` (status + errorCode), `5xx`/unexpected status → `ActivationServerError`, malformed/`success!=true`/missing-blank-mistyped fields → `InvalidActivationResponseError`. All asserted, including the one-request/no-retry assertions.
+  - **Secret-safe:** the Activation Key is a `SecretStr`, revealed only into the JSON body at the request boundary — never the URL, query, a header, or a log; the shared secret is a `SecretStr` in the result, redacted in `repr`/`str`. No key/secret/request-body/response-body appears in any log or error (asserted). URL join preserves a base-path prefix and tolerates trailing slashes; the configured timeout is applied per request.
+  - **Boundaries:** async `httpx.AsyncClient` (fits the T-39 lifespan, §5.1); base URL and timeout passed explicitly (never reads settings/env/key file); an injected client is caller-owned and not closed, an owned client is closed by `aclose()`/async-context-manager; no module-level client; importing the activation modules performs no I/O (asserted); `main.py` import stays side-effect-free. No identity persistence, Device-ID comparison, key resolution, or startup wiring (T-38/T-39).
+  - Verification (Python 3.13, Windows, no Backend/network): `pip install -e ".[dev]"` succeeded; `pytest tests/test_activation_client.py tests/test_activation_models.py` → 61 passed; full `pytest` → **199 passed, 6 skipped** (skips = POSIX-only mode assertions, §17); `ruff check .` → clean; `ruff format --check .` → clean; `mypy src` → no issues in 20 source files; an in-memory `MockTransport` smoke test confirmed one request, method/path/body, a typed result, and secret access only via `SecretStr` (no value printed). T-31–T-36 tests still pass.
+  - No Device Identity persistence was called; no `ConfigCache` was written; no activation orchestration, Device-ID mismatch policy, or startup integration was implemented (those remain T-38–T-41). No secret, `.env`, `*.db`, `*.log`, request capture, or virtual environment was committed. No Backend/Angular/SRS/ARCH-001/FS-02 file was modified. T-38–T-41 not started; OI-1–OI-4 unchanged.
 
 **T-38 — Activation service (first activation and reactivation)**
 - Objective: Implement §9's orchestration — first activation persists identity and deletes the key file; reactivation retains `DeviceId`, atomically replaces the secret, and fails loudly on a `DeviceId` mismatch (OI-4).
@@ -753,4 +767,4 @@ Numbering continues from IP-01's T-30 so task IDs remain globally unique across 
 
 ---
 
-*IP-02 — Jetson Agent Foundation. Status: Draft, awaiting full approval. T-31 (project scaffolding and tooling), T-32 (configuration model and settings loading), T-33 (logging foundation with secret redaction), T-34 (filesystem layout provisioning), T-35 (SQLite foundation and schema), and T-36 (device-identity and config-cache repositories) have been delivered under explicit task-level approval; T-37–T-41 have not been started. Open items OI-1–OI-4 remain open (ConfigCache is load-only under OI-2).*
+*IP-02 — Jetson Agent Foundation. Status: Draft, awaiting full approval. T-31 (project scaffolding and tooling), T-32 (configuration model and settings loading), T-33 (logging foundation with secret redaction), T-34 (filesystem layout provisioning), T-35 (SQLite foundation and schema), T-36 (device-identity and config-cache repositories), and T-37 (Backend activation client) have been delivered under explicit task-level approval; T-38–T-41 have not been started. Open items OI-1–OI-4 remain open (ConfigCache is load-only under OI-2). §14/D-5 amended (approved during T-37): automatic retries for the one-time activation endpoint are prohibited until the Backend supports idempotency.*

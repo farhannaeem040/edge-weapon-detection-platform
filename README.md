@@ -74,13 +74,15 @@ stdout/optional file, with central redaction that keeps the Activation Key and d
 logs at every level), its **filesystem-layout provisioning** (IP-02 T-34: the `/opt/weapon-detection/`
 directories created with their ADR-008 modes, idempotently), and its **SQLite store foundation and
 schema** (IP-02 T-35: connection management plus the idempotent, versioned `SchemaVersion`/
-`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`), and its
+`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`), its
 **persistence repositories** (IP-02 T-36: a `DeviceIdentityRepository` — load, first-activation
 store, and atomic shared-secret replacement retaining the permanent Device ID — and a **load-only**
-`ConfigCacheRepository`, its writer deferred under OI-2). It still contains none of the Agent's
-operational behaviour — no activation, Backend communication, or DeepStream supervision — and nothing
-populates or consumes the cached configuration at runtime. Those arrive with IP-02 tasks T-37–T-41
-(see
+`ConfigCacheRepository`, its writer deferred under OI-2), and its **Backend activation HTTP client**
+(IP-02 T-37: an async `BackendActivationClient` that performs exactly one `POST /api/v1/activate` per
+call — **no automatic retry**, since the one-time key is not idempotent — and returns a typed,
+secret-safe `ActivationResult`). The pieces are not yet wired together — **activation is not
+end-to-end functional**: nothing decides when to activate, persists the result, or runs at startup,
+and no Device credentials are saved yet. Those arrive with IP-02 tasks T-38–T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work

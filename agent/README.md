@@ -4,29 +4,31 @@ The **control plane** for the Edge-Based Weapon Detection platform, running on t
 Orin Nano as a FastAPI application (ARCH-001 §9, ADR-001). It is the Jetson-side counterpart to the
 ASP.NET Core Backend.
 
-## Status — IP-02 T-31–T-36
+## Status — IP-02 T-31–T-37
 
 Delivered so far: the project scaffold (T-31 — package metadata, tooling, a minimal importable
 FastAPI application with no endpoints), the **validated bootstrap-configuration foundation**
 (T-32 — see [Configuration](#configuration)), the **structured logging foundation with secret
 redaction** (T-33 — see [Logging](#logging)), the **filesystem-layout provisioning**
 (T-34 — see [Filesystem layout](#filesystem-layout)), the **SQLite store foundation and schema**
-(T-35 — see [Local database](#local-database-sqlite)), and the **device-identity and config-cache
-repositories** (T-36 — see [Persistence repositories](#persistence-repositories)). None of the
-Agent's operational behaviour exists yet — the repositories can persist and read the local records,
-but nothing activates, contacts the Backend, or consumes them at runtime.
+(T-35 — see [Local database](#local-database-sqlite)), the **device-identity and config-cache
+repositories** (T-36 — see [Persistence repositories](#persistence-repositories)), and the
+**Backend activation HTTP client** (T-37 — see [Backend activation client](#backend-activation-client)).
+None of the Agent's operational behaviour is wired together yet — the pieces exist, but nothing
+decides when to activate, persists the result, or runs at startup.
 
 Delivered by later IP-02 tasks, **not present now**:
 
-- the `POST /api/v1/activate` Backend client (T-37);
-- the activation/reactivation workflow and Device-ID mismatch policy (T-38);
-- the startup lifespan and single-worker Uvicorn runtime that wires the repositories in (T-39);
+- the activation/reactivation workflow that calls the client and persists the result, and the
+  Device-ID mismatch policy (T-38);
+- the startup lifespan and single-worker Uvicorn runtime that wires it all in (T-39);
 - the simulated-Backend and real-Backend test suites (T-40);
 - the systemd unit and Jetson deployment (T-41).
 
-There is **no** activation, Backend communication, DeepStream supervision, heartbeat, or command API
-here. The `ConfigCache` repository is **load-only** — its writer is deferred (OI-2), and nothing
-populates or consumes the cache at runtime. See
+There is **no** end-to-end activation, DeepStream supervision, heartbeat, or command API here: the
+activation client can perform one request and return a typed result, but nothing calls it, and no
+Device credentials are saved by T-37. The `ConfigCache` repository is **load-only** — its writer is
+deferred (OI-2), and nothing populates or consumes the cache at runtime. See
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](../specs/implementation-plans/IP-02-jetson-agent-foundation.md)
 for the full plan.
 
@@ -56,14 +58,19 @@ agent/
 │       │   ├── configuration.py         # configure_logging()
 │       │   ├── formatter.py             # JSON log formatter
 │       │   └── redaction.py             # central Redactor
-│       └── persistence/                 # SQLite store, schema (T-35) + repositories (T-36)
+│       ├── persistence/                 # SQLite store, schema (T-35) + repositories (T-36)
+│       │   ├── __init__.py
+│       │   ├── database.py              # connection, PRAGMAs, transaction helper, file mode
+│       │   ├── schema.py                # version-1 tables + idempotent initializer
+│       │   ├── models.py               # DeviceIdentity / CachedConfiguration records (T-36)
+│       │   ├── errors.py               # typed repository errors (T-36)
+│       │   ├── device_identity_repository.py   # load / store / replace secret (T-36)
+│       │   └── config_cache_repository.py      # load-only (T-36; writer deferred, OI-2)
+│       └── activation/                  # Backend activation HTTP client (T-37)
 │           ├── __init__.py
-│           ├── database.py              # connection, PRAGMAs, transaction helper, file mode
-│           ├── schema.py                # version-1 tables + idempotent initializer
-│           ├── models.py               # DeviceIdentity / CachedConfiguration records (T-36)
-│           ├── errors.py               # typed repository errors (T-36)
-│           ├── device_identity_repository.py   # load / store / replace secret (T-36)
-│           └── config_cache_repository.py      # load-only (T-36; writer deferred, OI-2)
+│           ├── backend_client.py        # BackendActivationClient — one request, no retry
+│           ├── models.py               # ActivationResult (deviceId/sharedSecret/branchId)
+│           └── errors.py               # typed, message-safe activation errors
 └── tests/
     ├── test_app_startup.py              # scaffold smoke tests
     ├── test_settings.py                 # settings/configuration tests (T-32)
@@ -73,7 +80,9 @@ agent/
     ├── test_schema.py                   # schema + versioning tests (T-35)
     ├── test_device_identity_repository.py      # device identity repo tests (T-36)
     ├── test_config_cache_repository.py         # config cache load tests (T-36)
-    └── test_repository_integration.py          # cross-repository tests (T-36)
+    ├── test_repository_integration.py          # cross-repository tests (T-36)
+    ├── test_activation_client.py               # activation client tests (T-37)
+    └── test_activation_models.py               # activation result model tests (T-37)
 ```
 
 The `logging/` subpackage realizes IP-02 §4's single `logging/setup.py` sketch as a small package
@@ -82,21 +91,19 @@ and the central redaction utility. It is named `logging` but never shadows the s
 all imports are absolute, so `import logging` anywhere resolves to the stdlib module while this
 package is always addressed as `weapon_detection_agent.logging`.
 
-The rest of the module structure IP-02 §4 lays out (`activation/`, `runtime/`) is introduced by the
-tasks that implement each part — not scaffolded ahead of use (Engineering Principle 9). The
-`persistence/` package created here holds connection and schema management only; its
-device-identity/config-cache **repositories** arrive with T-36.
+The remaining module IP-02 §4 lays out (`runtime/`) is introduced by the task that implements it
+(T-39) — not scaffolded ahead of use (Engineering Principle 9).
 
 ## Dependencies
 
 - **Runtime:** `fastapi`, `uvicorn[standard]` (control-plane scaffold), `pydantic-settings` (the
-  validated bootstrap-configuration model, T-32). Logging (T-33) and SQLite persistence (T-35) use
-  only the standard library (`logging`, `json`, `datetime`, `traceback`; `sqlite3`) — no new
-  dependency. In particular, no ORM or migration framework is used (IP-02 D-6).
-- **Development:** `pytest`, `httpx` (FastAPI `TestClient` HTTP/API testing), `ruff` (lint +
-  format), `mypy` (static type checking).
-
-The Agent's own runtime HTTP client for calling the Backend is added by T-37, not here.
+  validated bootstrap-configuration model, T-32), and `httpx` (the Backend activation HTTP client,
+  T-37). Logging (T-33) and SQLite persistence (T-35) use only the standard library (`logging`,
+  `json`, `datetime`, `traceback`; `sqlite3`) — no ORM or migration framework (IP-02 D-6), and no
+  retry/backoff library (activation is one-shot; see below).
+- **Development:** `pytest`, `ruff` (lint + format), `mypy` (static type checking). `httpx` is a
+  runtime dependency, so FastAPI's `TestClient` and the activation-client tests use that same httpx
+  — it is not listed again under dev.
 
 ## Configuration
 
@@ -295,6 +302,60 @@ Run the repository tests:
 ```bash
 python -m pytest tests/test_device_identity_repository.py \
   tests/test_config_cache_repository.py tests/test_repository_integration.py
+```
+
+## Backend activation client
+
+`weapon_detection_agent.activation.BackendActivationClient` calls the Backend's device-activation
+endpoint and returns a typed result. That is its **entire** responsibility:
+
+```text
+Activation Key → one POST /api/v1/activate → validate the response → ActivationResult (or a typed error)
+```
+
+**Endpoint / contract** (verified against the delivered Backend, unchanged by T-37):
+
+- **`POST /api/v1/activate`**, no `Authorization` header (the endpoint is `[AllowAnonymous]` — the
+  Activation Key is itself the credential).
+- Request body: `{"activationKey": "<keyId.secret>"}` (`application/json`, camelCase). The key travels
+  **only** in the body — never the URL, a query string, or a header.
+- Success `200`: envelope `{"success": true, "data": {"deviceId", "sharedSecret", "branchId"}}`. The
+  response carries **no configuration** (OI-2) — the client neither expects nor invents any.
+- Rejection `401`: `{"success": false, "errorCode": "INVALID_ACTIVATION_KEY"}` — the same body for
+  every reason (malformed / unknown / wrong secret / consumed / invalidated).
+
+**Base URL and timeout are passed in explicitly** — the caller (the T-38/T-39 layer) supplies
+`settings.backend_base_url` and `settings.http_timeout_seconds`. The client never reads settings, the
+environment, or a key file. The URL join preserves a base-path prefix and tolerates trailing slashes.
+
+**Typed result.** `ActivationResult(device_id, shared_secret, branch_id)` — an immutable record. The
+shared secret is a `SecretStr`, redacted in every `repr`/`str` and by the logger; it cannot be leaked
+through a generic `asdict`/JSON dump.
+
+**Exactly one request, no automatic retry.** `POST /api/v1/activate` consumes a one-time key and is
+**not idempotent**: a timeout or transport failure may occur *after* the Backend commits activation
+but *before* the Agent sees the response, so retrying the same key could return
+`INVALID_ACTIVATION_KEY` and hide that the original attempt succeeded. Automatic retries for this
+endpoint are therefore **prohibited** (IP-02 §14, amended). Each outcome maps to a distinct,
+message-safe error — `ActivationTimeoutError`, `ActivationTransportError`, `ActivationRejectedError`
+(status + error code), `ActivationServerError` (5xx / unexpected status), or
+`InvalidActivationResponseError` (malformed body). No message ever contains the key, the shared
+secret, or a raw request/response body. Surfacing an ambiguous timeout outcome — and requiring a
+**new** Activation Key or an approved recovery workflow — is the activation orchestration's job
+(**T-38**), not the client's.
+
+**What T-37 does not do:** it does not decide whether activation is required, read the key from
+env/file, persist Device Identity, replace a secret, compare Device IDs, write the `ConfigCache`, or
+wire into startup. Those are **T-38** (activation/reactivation policy) and **T-39** (runtime
+startup). The client is async (`httpx.AsyncClient`) to fit the future lifespan; an injected client is
+caller-owned (not closed), an owned client is closed by `aclose()` or `async with`. Importing the
+activation modules performs no I/O and constructs no HTTP client. **Activation is not end-to-end
+functional yet, and T-37 saves no Device credentials.**
+
+Run the activation-client tests:
+
+```bash
+python -m pytest tests/test_activation_client.py tests/test_activation_models.py
 ```
 
 ## Logging
