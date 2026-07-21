@@ -17,3 +17,10 @@ dist/
 # Local MCP server config — contains an API key; must never be committed.
 mcp.json
 .mcp.json
+
+# Local SQLite artifacts (e.g. a stray agent.db from a dev/test run). No .db fixture is tracked;
+# the Agent's real store lives under /opt/weapon-detection on the Jetson, never in the repo.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

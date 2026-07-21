@@ -595,9 +595,11 @@ HTTP means Device Secrets, JWTs, and stream tokens are not protected from LAN in
 
 ## 16. Device Lifecycle
 
+> **Amendment 2026-07-21 (reactivation-security change, IP-05).** §16.1 and §16.4 (and ADR-015 in §26) are amended so that regenerating the Activation Key of an already-activated device is a security-first credential reset — it immediately and atomically revokes that device's shared secret and moves it to `ReactivationRequired`. **Superseded behaviour:** the shared secret was previously left valid and the status `Activated` until the Agent later reactivated, at which point the secret was replaced. **Reason:** eliminate the window in which a regenerated-away credential still authenticates. See FS-02 §5.3 and `specs/implementation-plans/IP-05-device-reactivation-security.md`.
+
 ### 16.1 Lifecycle States
 
-`Unprovisioned → Activation Pending → Activated → Online ⇄ Offline`, with `Reactivation Pending → Activated` as a credential-reset transition (not a permanent state).
+`Unprovisioned → Activation Pending → Activated → Online ⇄ Offline`, with `ReactivationRequired → Activated` as a credential-reset transition. `ReactivationRequired` is entered when the Admin regenerates the Activation Key of an already-activated device (§16.4), which immediately revokes that device's current shared secret; it is distinct from the health states Online/Offline (a device in `ReactivationRequired` is not "Offline" — that word is reserved for heartbeat-based connectivity). The device leaves `ReactivationRequired` on successful reactivation. *(Amended — reactivation-security change; the earlier "Reactivation Pending" naming is realized as the concrete `DeviceActivationStatus.ReactivationRequired`. See ADR-015, FS-02 §5.3, IP-05.)*
 
 ### 16.2 Activation Sequence
 
@@ -609,11 +611,13 @@ Initial activation requires Backend connectivity. Every subsequent Agent startup
 
 ### 16.4 Reactivation and Device ID Behavior
 
-- Regenerating the Activation Key invalidates the previous, unused Activation Key.
-- Successful reactivation of the branch's existing logical device **retains** the persistent Device ID.
-- Successful reactivation issues a **new** shared secret and invalidates the previous one.
-- The Agent replaces its locally stored secret atomically after successful activation.
+- Regenerating the Activation Key invalidates the previous Activation Key(s), leaving at most one `Unconsumed` key per device.
+- **Regenerating the key of an already-activated device is a security-first credential reset:** in one atomic transaction it also immediately **revokes** that device's current shared secret (so the old secret can never authenticate again) and sets `ActivationStatus = ReactivationRequired`, while preserving the permanent Device ID, the Device record, and all relationships. A failure rolls the whole operation back. *(Amended — reactivation-security change; previously the shared secret was replaced only later, at the Agent's reactivation call. See FS-02 §5.3, IP-05.)*
+- Successful reactivation of the branch's existing logical device **retains** the persistent Device ID; any result that would change it is rejected.
+- Successful reactivation issues a **new** shared secret (the previous one having been revoked at regeneration) and returns the device to `Activated`.
+- The Agent replaces its locally stored secret atomically after successful activation, retaining its local `ActivatedAt` and advancing `LastActivatedAt`.
 - Historical alerts and health records remain correlated to the retained Device ID.
+- Because no authenticated device endpoint exists yet, revocation is realized as the atomic clearing/replacement of the stored protected shared secret; every current and future authenticated Backend endpoint derives device authorization from this stored credential state, and Dashboard status derives from credential state, not process connectivity.
 - Creating an entirely separate device identity is future fleet-management scope, not this prototype.
 
 ### 16.5 Offline Detection
@@ -788,7 +792,7 @@ Exact retry counts, backoff intervals, and timeout values are Feature Specificat
 | ADR-012 | Event Idempotency | Detection events are assigned a Jetson-generated `EventId`. The Backend enforces a unique `(DeviceId, EventId)` constraint on the Alert table so that retried offline synchronization cannot create duplicate alerts. |
 | ADR-013 | Dashboard Session Revocation | JWTs carry a unique session identifier (`jti`) and expiry; the Backend maintains an `AdminSession` revocation record in SQL Server. Protected requests require both a valid JWT and a non-revoked session record. Logout marks the session revoked. No refresh-token flow is introduced. |
 | ADR-014 | WebRTC Stream Token Mechanism | The Backend generates a cryptographically random, short-lived, single-use stream token scoped to a Device ID, registers it with the target Agent via the device shared secret, and returns the token and signaling endpoint to the browser. The Agent validates and consumes the token during WebRTC signaling, holding pending tokens in memory only (no persistence across Agent restarts required). No JWTs, certificates, OAuth, or HMAC signing are used for this mechanism. |
-| ADR-015 | Device Reactivation Policy | Regenerating a branch's Activation Key invalidates the previous unused key. Successful reactivation retains the device's persistent Device ID but issues and atomically replaces the shared secret, invalidating the previous one. Historical alerts/health records remain correlated to the retained Device ID. Creating an entirely separate device identity is future fleet-management scope. |
+| ADR-015 | Device Reactivation Policy | Regenerating a branch's Activation Key invalidates the previous key(s), leaving at most one unused key. **For an already-activated device, regeneration is a security-first credential reset: in one atomic transaction it immediately revokes the current shared secret and sets the device to `ReactivationRequired`, preserving the permanent Device ID and all relationships (amended — the secret is no longer left valid until the Agent reactivates).** Successful reactivation retains the persistent Device ID, issues a new shared secret, and returns the device to `Activated`. Historical alerts/health records remain correlated to the retained Device ID. Concurrency (at most one unused key per device) is enforced by a filtered unique index. Creating an entirely separate device identity is future fleet-management scope. See FS-02 §5.3, IP-05. |
 | ADR-016 | Media Production Ownership | DeepStream/GStreamer (data plane) performs all mechanical video-processing work: RTSP ingestion, decoding, preprocessing, inference, snapshot generation, segmented recording, and WebRTC media production, sharing one RTSP camera connection across these outputs via pipeline branching. The Jetson Agent (control plane) owns supervision, validation, identity, persistence, synchronization, retention-policy enforcement, security, signaling orchestration, command handling, and hardware control. This preserves the control-plane/data-plane boundary established in ADR-001 while resolving the previously deferred question of which process physically produces media files/streams. |
 
 ---
