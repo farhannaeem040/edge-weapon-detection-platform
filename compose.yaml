@@ -24,6 +24,8 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${SQL_SERVER_PASSWORD:?SQL_SERVER_PASSWORD is required - run deployment/start.ps1 or copy .env.example to .env}
       MSSQL_PID: Developer
+    ports:
+      - "127.0.0.1:11433:1433" # Only for local debugging; the Backend never connects to localhost. The Jetson Agent never connects to localhost. The browser never connects to localhost. In production, this port is firewalled off.
     volumes:
       # Named volume, not a bind mount: the database survives `docker compose down` and is removed
       # only by an explicit `down -v` (deployment/reset.ps1).
