@@ -80,4 +80,45 @@ public class Device
         ActivationStatus = DeviceActivationStatus.Activated;
         ProtectedSharedSecret = protectedSharedSecret;
     }
+
+    // The security-first credential reset (IP-05, FS-02 §5.3 amended, ADR-015 amended). When the
+    // Admin regenerates the Activation Key of a device that has already activated, the device's
+    // current shared secret is revoked *immediately* — not left valid until a later reactivation.
+    //
+    // This is the only transition into ReactivationRequired, and it does two things atomically at the
+    // entity level: it moves the status to ReactivationRequired and clears ProtectedSharedSecret, so
+    // the old secret can never authenticate again (the credential-state form of revocation, §11 —
+    // there is no live device-auth endpoint yet). The permanent DeviceId is deliberately untouched
+    // (FR-BRN-007, AC-2/AC-12): a credential reset is not a new identity.
+    //
+    // Only valid for a device that has completed a first activation (DeviceId assigned). An
+    // Unactivated device has no DeviceId and no secret to revoke, so calling this on one is a caller
+    // bug (the regeneration service must branch on status, §5.3) — a thrown invariant violation, not
+    // a silent no-op. Calling it again while already ReactivationRequired is safe and idempotent:
+    // the status stays ReactivationRequired, the DeviceId is preserved, and the secret stays null.
+    public void RequireReactivation()
+    {
+        if (DeviceId is null)
+        {
+            // States only the invariant, never any credential value.
+            throw new InvalidOperationException(
+                "A device that has never activated cannot be moved to ReactivationRequired.");
+        }
+
+        ActivationStatus = DeviceActivationStatus.ReactivationRequired;
+        ProtectedSharedSecret = null;
+    }
+
+    // The credential-state prerequisite for device authentication (IP-05 §2.1, FS-02 §11). Every
+    // current or future device-authentication path must gate on this *in addition to* cryptographic
+    // secret verification — it does not replace that verification, it precedes it.
+    //
+    // Authentication is permitted only when the device is Activated AND a protected shared secret is
+    // present. Status is checked first, so a device in ReactivationRequired (or Unactivated) is
+    // rejected even if inconsistent/legacy data left a secret value present: a regenerated-away
+    // credential can never authenticate. This makes revocation robust against a stray secret rather
+    // than relying solely on ProtectedSharedSecret having been nulled.
+    public bool CanAuthenticate() =>
+        ActivationStatus == DeviceActivationStatus.Activated
+        && !string.IsNullOrEmpty(ProtectedSharedSecret);
 }
