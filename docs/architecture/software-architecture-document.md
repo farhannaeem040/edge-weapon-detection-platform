@@ -308,7 +308,7 @@ Three primary flows:
 3. **Streaming flow**: Browser ↔ Jetson Agent direct WebRTC, authorization issued by Backend, media never traverses the Backend.
 
 **Diagrams:** C4 Container diagram (Level 2); logical component diagram; Data Flow Diagram (Level 0/1) per the three flows above.
-**Traceability:** Realizes ADR-001 through ADR-016 collectively; SRS §2.1, §8.3.
+**Traceability:** Realizes ADR-001 through ADR-017 collectively; SRS §2.1, §8.3.
 
 ---
 
@@ -515,6 +515,7 @@ Uploaded snapshot images are stored on the Server Host filesystem under an appli
 | `POST /api/v1/alerts/{id}/snapshot` | Agent | `X-Device-Id` + `X-Device-Secret` |
 | `POST /api/v1/sync/events` | Agent | `X-Device-Id` + `X-Device-Secret` |
 | `GET /api/v1/config` | Agent | `X-Device-Id` + `X-Device-Secret` |
+| `POST /api/v1/device/credentials/validate` | Agent | `X-Device-Id` + `X-Device-Secret` — detect-only credential check (Amendment 2026-07-21, IP-05); success `200 {success:true,data:null}`, uniform `401 INVALID_DEVICE_CREDENTIALS`; never returns a key/secret, not a heartbeat, updates no last-seen/health state. Only this `401` is a confirmed-revocation signal the Agent locks on |
 | `GET/POST /api/v1/branches`, `/devices`, `/cameras` | Dashboard | JWT |
 | `GET /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Dashboard | JWT |
 | `PATCH /api/v1/alerts/{id}/status` | Dashboard | JWT |
@@ -608,6 +609,8 @@ Admin creates branch → Backend generates Activation Key → installer configur
 ### 16.3 Startup Behavior
 
 Initial activation requires Backend connectivity. Every subsequent Agent startup: (1) loads the persistent Device ID, protected shared secret, and cached configuration from local storage; (2) starts/supervises DeepStream using cached configuration even if the Backend is unavailable; (3) begins buffering local events; (4) resumes authenticated synchronization once connectivity returns. DeepStream is not gated on a live activation exchange after the device's first successful activation.
+
+> **Amendment 2026-07-21 (IP-05 Agent-lock), reconciled with NFR-REL-001:** step (2)'s offline-start applies only while the local credential state is `Operational`. A **confirmed** credential revocation (a `401 INVALID_DEVICE_CREDENTIALS` from the credential-validation endpoint, §14.1/ADR-017 — no other status locks) causes the Agent to **clear its local secret** and enter a persistent local `ReactivationRequired` state in which operational components are stopped/prevented and the Agent must **not** fall back to offline operation on the revoked credential. Network failure alone still must not stop local operation — an unreachable/ambiguous outcome never locks the Agent; only a confirmed rejection does. An Agent disconnected during key regeneration detects the revocation only after connectivity returns (bounded by one interval + timeout).
 
 ### 16.4 Reactivation and Device ID Behavior
 
@@ -794,6 +797,7 @@ Exact retry counts, backoff intervals, and timeout values are Feature Specificat
 | ADR-014 | WebRTC Stream Token Mechanism | The Backend generates a cryptographically random, short-lived, single-use stream token scoped to a Device ID, registers it with the target Agent via the device shared secret, and returns the token and signaling endpoint to the browser. The Agent validates and consumes the token during WebRTC signaling, holding pending tokens in memory only (no persistence across Agent restarts required). No JWTs, certificates, OAuth, or HMAC signing are used for this mechanism. |
 | ADR-015 | Device Reactivation Policy | Regenerating a branch's Activation Key invalidates the previous key(s), leaving at most one unused key. **For an already-activated device, regeneration is a security-first credential reset: in one atomic transaction it immediately revokes the current shared secret and sets the device to `ReactivationRequired`, preserving the permanent Device ID and all relationships (amended — the secret is no longer left valid until the Agent reactivates).** Successful reactivation retains the persistent Device ID, issues a new shared secret, and returns the device to `Activated`. Historical alerts/health records remain correlated to the retained Device ID. Concurrency (at most one unused key per device) is enforced by a filtered unique index. Creating an entirely separate device identity is future fleet-management scope. See FS-02 §5.3, IP-05. |
 | ADR-016 | Media Production Ownership | DeepStream/GStreamer (data plane) performs all mechanical video-processing work: RTSP ingestion, decoding, preprocessing, inference, snapshot generation, segmented recording, and WebRTC media production, sharing one RTSP camera connection across these outputs via pipeline branching. The Jetson Agent (control plane) owns supervision, validation, identity, persistence, synchronization, retention-policy enforcement, security, signaling orchestration, command handling, and hardware control. This preserves the control-plane/data-plane boundary established in ADR-001 while resolving the previously deferred question of which process physically produces media files/streams. |
+| ADR-017 | Device Credential Validation & Agent Lock (Added 2026-07-21) | A running Agent detects confirmed credential revocation by periodically validating its `DeviceId`+shared secret against a dedicated device-authenticated endpoint (`POST /api/v1/device/credentials/validate`, §14.1) — one request per configured interval (default 30s), detect-only, never fetching a key and never a heartbeat. **Only** a `401 INVALID_DEVICE_CREDENTIALS` from that endpoint locks the Agent (a `403`/`404`/`5xx`/timeout/transport/malformed outcome is ambiguous and never locks it — NFR-REL-001), so a proxy/authorization/deployment/transient error cannot disable the Jetson. On the confirmed `401` the Agent **clears its local secret** and persists a `ReactivationRequired` state that stops operational functionality and the validation loop, and survives restart/reboot. Recovery is manual, out-of-band, single-disclosure via `set-activation-key.sh`; the Agent never auto-retries activation. Bounded (interval+timeout) detection, not instantaneous remote shutdown. See FS-02 §8.1/§10.5, IP-05. |
 
 ---
 

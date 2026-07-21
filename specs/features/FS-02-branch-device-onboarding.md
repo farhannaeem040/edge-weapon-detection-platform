@@ -241,6 +241,16 @@ Activation Key generation is not a standalone workflow independent of branch cre
 - Never log the Activation Key, its `secret` portion, or the shared secret in plaintext.
 - A simulated Agent fulfills every bullet above identically to the real Agent, using the same endpoint, fields, and headers; it may persist `DeviceIdentity`/`ConfigCache` equivalents in whatever lightweight form suits the simulator (e.g., a local file or in-memory store), provided the Backend-facing behavior is indistinguishable from the real Agent.
 
+### 8.1 Agent revocation detection and operational lock (Amendment 2026-07-21 — IP-05 Agent-lock)
+
+> **Superseded assumption:** an earlier revision implied the Agent needed no change for the reactivation-security behaviour. That is withdrawn. **Reason:** Backend revocation prevents *future* authenticated requests, but a **running** Agent does not otherwise learn its secret was revoked. **Relationship:** realized by `specs/implementation-plans/IP-05-device-reactivation-security.md`.
+
+- The running Agent must **detect confirmed credential revocation** by periodically validating its stored `DeviceId` + shared secret against the dedicated device-authenticated endpoint (§10.5), one non-overlapping request per configured interval (`WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS`, default 30s) while operational. This validation is **detect-only**: neither activation nor a heartbeat, and it never fetches or receives a key.
+- **Only** a `401` from that endpoint carrying `errorCode = INVALID_DEVICE_CREDENTIALS` is a confirmed revocation. On it, the Agent **atomically clears its local shared secret** and enters a **persistent locked** local state (`ReactivationRequired`), **stops the validation loop**, stops/prevents all operational functionality (future DeepStream/detection/alerts/commands/siren), retains its `DeviceId`/`ActivatedAt`/`LastActivatedAt`/identity record, and does **not** auto-activate. The locked state is persisted locally and **survives restart/reboot**. Detection when connected is bounded by one interval + request timeout.
+- On any **ambiguous/infrastructural** outcome (`403`, `404`, `408`, `429`, `5xx`, timeout, DNS, connection refused, Tailscale outage, malformed, unexpected code) the Agent does **not** lock, does **not** erase credentials, preserves offline-reliability, and retries at the next interval — so a reverse-proxy/authorization/deployment/transient error cannot permanently disable the Jetson. "Offline" is never used for revocation.
+- The Agent resumes only after an **operator manually** provisions the new Activation Key via `set-activation-key.sh` (out-of-band, single-disclosure), then performs exactly **one** `POST /api/v1/activate` (§5.8). The Agent must never download, request (using its old secret), or receive the key from any endpoint, place it in `agent.env`/argv, log it, or auto-retry activation.
+- **Honest limitation (no instantaneous remote shutdown):** if the Jetson is disconnected when the Admin regenerates the key, the Agent detects the revocation only after connectivity returns and its next validation receives a confirmed rejection — a bounded delay of one interval + timeout, not a remote kill switch.
+
 ## 9. Data Requirements
 
 | Entity/Field | Purpose | Increment Introduced |
@@ -322,6 +332,23 @@ All endpoints below are real, production endpoints. None is simulator-specific; 
 | Caller | Real FastAPI Agent or a simulated Agent client (§1.2) — identical contract for both |
 
 All responses use the uniform response envelope defined in ARCH-001 §14.3 / ADR-009. Exemption from Admin JWT authentication applies only to that specific check; the endpoint still performs full request validation (§12), Activation Key validation, standard error handling (§13), and uses the standard response envelope like any other endpoint.
+
+### 10.5 Device Credential Validation (Amendment 2026-07-21 — IP-05 Agent-lock; proposed)
+
+A dedicated, **detect-only** endpoint that lets a running Agent confirm whether its current credentials are still valid, so it can lock itself when the Admin has revoked them (§8.1). It never returns, rotates, or distributes a key or secret, is not a heartbeat, and updates no last-seen/Online-Offline state.
+
+| Aspect | Detail |
+|--------|--------|
+| Endpoint | `POST /api/v1/device/credentials/validate` (ARCH-001 §14.1 amended) |
+| Auth required | None for Admin-JWT purposes (`[AllowAnonymous]`); **device-authenticated** by the headers below |
+| Headers | `X-Device-Id: <permanent public Device ID>`, `X-Device-Secret: <current private shared secret>` |
+| Request body | None (no operational or health payload) |
+| Success | `200`; standard envelope `{"success": true, "data": null}` — no key, secret, status, config, health, Online/Offline, or replacement credential |
+| Authorized only when | the `X-Device-Id` identifies an existing Device **and** `ActivationStatus == Activated` **and** `ProtectedSharedSecret` is present **and** the presented `X-Device-Secret` cryptographically matches (state guard first, then `Unprotect` + constant-time compare) |
+| Failure | `401`; `{"success": false, "message": "The device credentials are invalid.", "errorCode": "INVALID_DEVICE_CREDENTIALS"}` — **uniform** for every reason (missing/malformed/unknown Device ID, missing/incorrect/revoked secret, missing stored protected secret, status `Unactivated`, status `ReactivationRequired`); never reveals which, never returns `ReactivationRequired` details. Should not normally return `403` |
+| Caller | The real or simulated Agent's validation loop (one request per interval) |
+
+A `ReactivationRequired` device is rejected **even if** inconsistent data leaves a secret present (status is checked first). Only a `401 INVALID_DEVICE_CREDENTIALS` from this endpoint is a confirmed-revocation signal the Agent may lock on; all other outcomes are ambiguous. The Admin Dashboard obtains explicit device status through its authenticated management read endpoints (§10.3), never from this endpoint.
 
 ## 11. Security Rules
 
