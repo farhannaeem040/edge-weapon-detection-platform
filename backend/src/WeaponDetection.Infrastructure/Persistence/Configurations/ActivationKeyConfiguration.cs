@@ -45,6 +45,17 @@ public class ActivationKeyConfiguration : IEntityTypeConfiguration<ActivationKey
         // are Consumed or Invalidated (FS-02 §5.3).
         builder.HasIndex(k => new { k.DeviceRecordId, k.Status });
 
+        // IP-05 T-49: at most one Unconsumed Activation Key per Device, enforced by the schema rather
+        // than by application code (AC-6/AC-17). Filtered so the many historical Consumed/Invalidated
+        // keys never collide — uniqueness applies only to the single live (Unconsumed) key. Status is
+        // stored as its enum name (above), so the filter matches the literal 'Unconsumed'. This is
+        // what makes two concurrent regenerations unable to both commit a live key: the losing INSERT
+        // of a second Unconsumed row violates this index and its transaction rolls back.
+        builder.HasIndex(k => k.DeviceRecordId)
+            .IsUnique()
+            .HasFilter("[Status] = 'Unconsumed'")
+            .HasDatabaseName("IX_ActivationKeys_DeviceRecordId_Unconsumed");
+
         // The FK is to the *internal* DeviceRecordId, never to the external DeviceId — which is
         // NULL at the moment a key is first issued and so could not be a foreign key at all
         // (FS-02 §1.3, §9). Cascade: a key is meaningless without the Device it activates.
