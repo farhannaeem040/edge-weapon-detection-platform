@@ -1,0 +1,123 @@
+# Central platform stack (IP-04): Angular + Nginx, ASP.NET Core Backend, SQL Server, and a
+# one-shot EF Core migration job.
+#
+#   docker compose up --build -d
+#
+# The Jetson Agent is deliberately NOT here. It runs natively on the Jetson under systemd (T-41)
+# because it needs NVIDIA, DeepStream, camera, and subprocess access.
+#
+# Only the frontend publishes a host port. The browser and the Jetson both reach the Backend
+# through the frontend's Nginx reverse proxy on that single origin, so SQL Server and the Backend
+# stay on the internal network with no host exposure.
+#
+# No `version:` key — it is obsolete in the current Compose specification.
+
+name: weapon-detection
+
+services:
+  # --- SQL Server -----------------------------------------------------------------------------
+  sqlserver:
+    # Pinned to an explicit CU tag rather than a floating `2022-latest`, so a rebuild months from
+    # now gets the same database engine.
+    image: mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SQL_SERVER_PASSWORD:?SQL_SERVER_PASSWORD is required - run deployment/start.ps1 or copy .env.example to .env}
+      MSSQL_PID: Developer
+    ports:
+      - "127.0.0.1:11433:1433" # Only for local debugging; the Backend never connects to localhost. The Jetson Agent never connects to localhost. The browser never connects to localhost. In production, this port is firewalled off.
+    volumes:
+      # Named volume, not a bind mount: the database survives `docker compose down` and is removed
+      # only by an explicit `down -v` (deployment/reset.ps1).
+      - sqlserver-data:/var/opt/mssql
+    networks:
+      - internal
+    # No `ports:` — SQL Server is never reachable from the host or the LAN.
+    healthcheck:
+      # sqlcmd path verified against this image: only /opt/mssql-tools18/bin/sqlcmd exists (the
+      # older /opt/mssql-tools is absent). Tools 18 default to encrypted connections, so -C
+      # (trust the self-signed certificate) is required. Running a real query proves the engine
+      # accepts connections, rather than merely proving the process is alive.
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -b -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # SQL Server's first start initialises system databases and is genuinely slow; the grace
+      # period stops those early attempts from counting as failures.
+      start_period: 60s
+    restart: unless-stopped
+
+  # --- EF Core migrations (one-shot) ----------------------------------------------------------
+  migrations:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: migrations
+    environment:
+      # The Backend's existing design-time seam (WeaponDetectionDbContextFactory). Supplied through
+      # the environment, never as a command-line argument, so no credential lands in a process list.
+      EFCORE_DESIGNTIME_CONNECTION: Server=sqlserver,1433;Database=${SQL_DATABASE:-WeaponDetection};User Id=sa;Password=${SQL_SERVER_PASSWORD:?SQL_SERVER_PASSWORD is required};TrustServerCertificate=True;Encrypt=True
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    networks:
+      - internal
+    # A one-shot job: it applies migrations, exits 0, and stays exited. Never restart it.
+    restart: "no"
+
+  # --- Backend API ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      # `sqlserver,1433` is the Compose service name. It must not be localhost/127.0.0.1 — inside
+      # this container, localhost is the Backend itself.
+      ConnectionStrings__DefaultConnection: Server=sqlserver,1433;Database=${SQL_DATABASE:-WeaponDetection};User Id=sa;Password=${SQL_SERVER_PASSWORD:?SQL_SERVER_PASSWORD is required};TrustServerCertificate=True;Encrypt=True
+      # Issuer, Audience, and lifetime already ship in appsettings.json; only the signing key must
+      # be supplied. JwtOptionsValidator requires >= 32 UTF-8 bytes and fails startup otherwise.
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is required}
+      # AdminBootstrapper provisions the single Admin account at startup and fails startup if these
+      # are missing while no Admin exists.
+      BootstrapAdmin__CredentialIdentifier: ${ADMIN_IDENTIFIER:-admin}
+      BootstrapAdmin__Password: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+    depends_on:
+      # The Backend does not migrate on startup, and its Admin bootstrap needs an existing schema,
+      # so it must not start until the migration job has succeeded.
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    # No `ports:` — the Backend is reached only through the Nginx proxy.
+    restart: unless-stopped
+
+  # --- Angular SPA + Nginx reverse proxy ------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
+    ports:
+      # The single public entry point for the browser and for the Jetson Agent.
+      - "${APP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+    # Receives no secrets: no SQL password, no JWT signing key, no Admin credential.
+    restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  sqlserver-data:

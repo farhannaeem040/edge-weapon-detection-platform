@@ -24,21 +24,22 @@ authors = [{ name = "Farhan Naeem" }]
 # Runtime dependencies are only what the delivered tasks genuinely need:
 #   - FastAPI + Uvicorn: the minimal control-plane scaffold (T-31).
 #   - pydantic-settings: the validated, immutable bootstrap-configuration model (T-32, IP-02 §6).
-# The Backend HTTP client (httpx), SQLite persistence, and every other runtime dependency arrive
-# with the task that first uses them (T-37 onward), not now (Engineering Principle 9).
+#   - httpx: the Agent's runtime HTTP client for the Backend activation call (T-37, IP-02 §11).
+# SQLite persistence (T-35) uses the standard library. Every other runtime dependency arrives with
+# the task that first uses it (Engineering Principle 9).
 dependencies = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
     "pydantic-settings>=2.4,<3.0",
+    "httpx>=0.27,<1.0",
 ]
 
 [project.optional-dependencies]
-# Development and test tooling. httpx is present here — not as a runtime dependency — because
-# FastAPI's TestClient uses it for in-process HTTP/API testing; the Agent's own runtime HTTP client
-# is a later task's concern.
+# Development and test tooling. httpx is NOT listed here — it is a runtime dependency (above), and so
+# is always installed with the package; FastAPI's TestClient and the activation-client tests use that
+# same runtime httpx (no duplicate pin).
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
     "ruff>=0.6",
     "mypy>=1.11",
 ]
@@ -49,8 +50,18 @@ packages = ["src/weapon_detection_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Make the src-layout package importable during tests without requiring an editable install first,
-# so the suite runs the same way in every environment.
-pythonpath = ["src"]
+# so the suite runs the same way in every environment. "tests" is added too so the shared
+# `support` package (the T-40 real-Backend harness) is importable from the contract suite.
+pythonpath = ["src", "tests"]
+markers = [
+    # The real-Backend contract suite (T-40, §16.3): launches the actual ASP.NET Core Backend on a
+    # loopback port against a throwaway SQL Server database. Deselected from the fast default run;
+    # opt in with `-m backend_contract` (and WDA_RUN_BACKEND_CONTRACT_TESTS=1). Skips cleanly when
+    # the external infrastructure (dotnet, SQL Server) is absent — it never silently passes.
+    "backend_contract: real ASP.NET Core Backend contract tests (require dotnet + SQL Server)",
+]
+# Keep the fast default run free of the infrastructure-dependent contract suite.
+addopts = "-m 'not backend_contract'"
 
 [tool.ruff]
 line-length = 100

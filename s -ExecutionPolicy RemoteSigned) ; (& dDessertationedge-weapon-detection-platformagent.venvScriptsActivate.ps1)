@@ -1,0 +1,30 @@
+warning: in the working copy of 'compose.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'deployment/start.ps1', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/compose.yaml b/compose.yaml[m
+[1mindex decf27c..b0eb5af 100644[m
+[1m--- a/compose.yaml[m
+[1m+++ b/compose.yaml[m
+[36m@@ -24,6 +24,8 @@[m [mservices:[m
+       ACCEPT_EULA: "Y"[m
+       MSSQL_SA_PASSWORD: ${SQL_SERVER_PASSWORD:?SQL_SERVER_PASSWORD is required - run deployment/start.ps1 or copy .env.example to .env}[m
+       MSSQL_PID: Developer[m
+[32m+[m[32m    ports:[m
+[32m+[m[32m      - "11433:1433" # Only for local debugging; the Backend never connects to localhost. The Jetson Agent never connects to localhost. The browser never connects to localhost. In production, this port is firewalled off.[m
+     volumes:[m
+       # Named volume, not a bind mount: the database survives `docker compose down` and is removed[m
+       # only by an explicit `down -v` (deployment/reset.ps1).[m
+[1mdiff --git a/deployment/start.ps1 b/deployment/start.ps1[m
+[1mindex 209d802..2c8738c 100644[m
+[1m--- a/deployment/start.ps1[m
+[1m+++ b/deployment/start.ps1[m
+[36m@@ -103,8 +103,8 @@[m [mtry {[m
+             }[m
+         }[m
+ [m
+[31m-        $sqlPassword   = New-CompliantPassword -Length 32[m
+[31m-        $adminPassword = New-CompliantPassword -Length 24[m
+[32m+[m[32m        $sqlPassword   = New-CompliantPassword -Length 3[m
+[32m+[m[32m        $adminPassword = New-CompliantPassword -Length 4[m
+         # Comfortably above the 32-UTF-8-byte minimum JwtOptionsValidator enforces.[m
+         $jwtSigningKey = New-Secret -Length 64[m
+ [m

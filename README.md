@@ -71,9 +71,33 @@ development tooling, a minimal importable FastAPI application with **no endpoint
 loaded into one immutable, validated object with fail-fast on a missing/invalid Backend URL), and its
 **structured logging foundation with secret redaction** (IP-02 T-33: newline-delimited JSON to
 stdout/optional file, with central redaction that keeps the Activation Key and device secret out of
-logs at every level). It still contains none of the Agent's operational behaviour — no activation,
-device identity, SQLite, DeepStream supervision, or Backend communication. Those arrive with IP-02
-tasks T-34–T-41 (see
+logs at every level), its **filesystem-layout provisioning** (IP-02 T-34: the `/opt/weapon-detection/`
+directories created with their ADR-008 modes, idempotently), and its **SQLite store foundation and
+schema** (IP-02 T-35: connection management plus the idempotent, versioned `SchemaVersion`/
+`DeviceIdentity`/`ConfigCache` schema at `<root>/database/agent.db`, mode `0600`), its
+**persistence repositories** (IP-02 T-36: a `DeviceIdentityRepository` — load, first-activation
+store, and atomic shared-secret replacement retaining the permanent Device ID — and a **load-only**
+`ConfigCacheRepository`, its writer deferred under OI-2), and its **Backend activation HTTP client**
+(IP-02 T-37: an async `BackendActivationClient` that performs exactly one `POST /api/v1/activate` per
+call — **no automatic retry**, since the one-time key is not idempotent — and returns a typed,
+secret-safe `ActivationResult`), and its **activation/reactivation orchestration service** (IP-02
+T-38: an `ActivationService` that resolves the key env-over-file, calls the client once, persists the
+identity — first activation stores it, reactivation replaces the secret while keeping the permanent
+Device ID and original activation time, and a returned Device-ID mismatch fails loudly — and deletes
+a file key only after success; a timeout is surfaced as an ambiguous outcome, never retried), and its
+**FastAPI startup workflow and single-worker runtime** (IP-02 T-39: `create_app()` attaches a
+lifespan that runs the §12.1 startup decision — provision → logging → schema → activation — and
+publishes a secret-free `AgentRuntime` on `app.state.runtime` only on success, closing the owned
+client and refusing to serve on any failure; no operational/health endpoint is defined, OI-3). The
+Agent now **activates in its startup lifespan** and the activation foundation is wired end-to-end at
+the Agent level. It is also **verified against the real Backend** (IP-02 T-40): a simulated-contract
+layer exercises every Agent branch and failure mode in-memory, and an opt-in contract layer runs the
+real Agent against the **actual** ASP.NET Core Backend over loopback HTTP, backed by a throwaway SQL
+Server database, with the Branch and Activation Key created through the real authenticated API —
+confirming first activation, one-time-key consumption, the uniform `401`, a restart making no
+activation call, and reactivation retaining the Device ID while rotating the secret. What remains is
+the Jetson/systemd deployment (**T-41**), so end-to-end activation *on the Jetson itself* is not yet
+complete. That arrives with IP-02 task T-41 (see
 [`specs/implementation-plans/IP-02-jetson-agent-foundation.md`](specs/implementation-plans/IP-02-jetson-agent-foundation.md)).
 
 ### Not started — future work
@@ -119,7 +143,45 @@ See [`docs/architecture/software-architecture-document.md`](docs/architecture/so
 
 ---
 
+## Running the central platform (recommended)
+
+The Angular dashboard, the ASP.NET Core Backend, SQL Server, and the EF Core migrations run together
+as one Docker Compose stack (IP-04). **Docker Desktop is the only prerequisite** — no local Node.js,
+Angular CLI, .NET SDK, SQL Server, or EF Core tooling is needed.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deployment/start.ps1
+```
+
+or, once a `.env` exists:
+
+```bash
+docker compose up --build -d
+```
+
+Then open <http://localhost:8080> and sign in with the `ADMIN_IDENTIFIER` / `ADMIN_PASSWORD` values
+from the generated `.env`.
+
+See [`deployment/README.md`](deployment/README.md) for logs, stopping, resetting, troubleshooting,
+and the security limitations of this trusted-LAN prototype.
+
+**The Jetson Agent is not containerized.** It runs natively on the Jetson under systemd, because it
+requires NVIDIA, DeepStream, camera, and subprocess access — that deployment is **T-41**. A Jetson
+reaches the central server through the same origin:
+
+```bash
+WDA_BACKEND_BASE_URL=http://<server-ip>:8080
+```
+
+The sections below cover the **local, non-containerized** development setup, which remains fully
+supported (`dotnet run` + `ng serve`).
+
+---
+
 ## Prerequisites
+
+These apply to the local, non-containerized setup below. For the containerized stack, only Docker
+Desktop is required.
 
 Versions this milestone was actually built and verified on:
 

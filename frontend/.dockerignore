@@ -1,0 +1,43 @@
+# Keeps installed dependencies, build output, and local configuration out of the build context —
+# `npm ci` reinstalls dependencies inside the image from the lockfile, so copying a host
+# node_modules would be both slow and wrong (it may hold platform-specific binaries).
+#
+# Note what is NOT excluded, because the build needs it: package.json, package-lock.json,
+# angular.json, tsconfig*.json, src/, and public/.
+
+# Installed dependencies and build output
+node_modules/
+dist/
+.angular/
+out-tsc/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+**/*.lcov
+
+# Local configuration and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# IDE and editor metadata
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Version control and CI
+.git/
+.gitignore
+.github/
+
+# Docker files themselves
+Dockerfile*
+.dockerignore
