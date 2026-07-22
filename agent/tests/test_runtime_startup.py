@@ -47,6 +47,8 @@ from weapon_detection_agent.persistence.models import DeviceIdentity
 from weapon_detection_agent.persistence.schema import UnsupportedSchemaVersionError
 from weapon_detection_agent.runtime.startup import default_backend_client_factory
 from weapon_detection_agent.runtime.state import get_runtime
+from weapon_detection_agent.runtime.supervisor import StartupBranch
+from weapon_detection_agent.validation.models import CredentialValidationResult
 
 DEVICE_ID = "device-test-001"
 OTHER_DEVICE_ID = "device-test-different"
@@ -87,6 +89,28 @@ class FakeBackendClient:
         self.closed = True
 
 
+class FakeValidationClient:
+    """A T-57-shaped validation client for lifespan tests — no network, scripted result, no waits.
+
+    The default result is Valid; the supervisor's startup validation (Branch D) and the running
+    monitor share this one client, so ``validate_calls`` counts both and is not asserted exactly.
+    """
+
+    def __init__(self, *, result: CredentialValidationResult | None = None) -> None:
+        self._result = result if result is not None else CredentialValidationResult.valid(200)
+        self.validate_calls = 0
+        self.closed = False
+
+    async def validate(
+        self, device_id: str, shared_secret: SecretStr
+    ) -> CredentialValidationResult:
+        self.validate_calls += 1
+        return self._result
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _result(device_id: str = DEVICE_ID, secret: str = SECRET_1) -> ActivationResult:
     return ActivationResult(
         device_id=device_id, shared_secret=SecretStr(secret), branch_id=BRANCH_ID
@@ -107,12 +131,19 @@ def _loader(tmp_root: Path, *, key: str | None):
 
 
 def _app(
-    tmp_root: Path, backend: object, *, key: str | None, clock: object = lambda: T0
+    tmp_root: Path,
+    backend: object,
+    *,
+    key: str | None,
+    clock: object = lambda: T0,
+    validation: object = None,
 ) -> FastAPI:
+    vclient = validation if validation is not None else FakeValidationClient()
     return create_app(
         settings_loader=_loader(tmp_root, key=key),
         clock=clock,  # type: ignore[arg-type]
         backend_client_factory=lambda settings: backend,  # type: ignore[arg-type,return-value]
+        validation_client_factory=lambda settings: vclient,  # type: ignore[arg-type,return-value]
     )
 
 
@@ -149,21 +180,28 @@ def _config_row(paths: AgentPaths) -> tuple[str, str] | None:
     return None if row is None else (row["ConfigJson"], row["UpdatedAt"])
 
 
-# --- 24-28. Existing identity + no key (no-op) -------------------------------------------------
+# --- 24-28. Existing identity + no key — Branch D validate-then-operate (IP-05 T-61) -----------
 
 
-def test_existing_identity_no_key_starts_without_backend(tmp_path: Path) -> None:
+def test_existing_identity_no_key_validates_then_operates(tmp_path: Path) -> None:
+    # Branch D1: an Operational identity with no key does one startup validation (no activation),
+    # and becomes operational. The activation Backend endpoint is never called.
     paths = _ready_root(tmp_path)
     _prestore_identity(paths)
     backend = FakeBackendClient(result=_result())
-    app = _app(tmp_path, backend, key=None)
+    validation = FakeValidationClient(result=CredentialValidationResult.valid(200))
+    app = _app(tmp_path, backend, key=None, validation=validation)
 
     with TestClient(app):
         runtime = get_runtime(app)
         assert runtime is not None
-        assert runtime.activation.outcome is ActivationOutcome.ALREADY_ACTIVATED
+        assert runtime.activation is None  # no activation happened
+        assert runtime.supervisor is not None
+        assert runtime.supervisor.startup_branch is StartupBranch.OPERATIONAL_VALIDATED
+        assert runtime.supervisor.is_monitor_running is True
 
-    assert backend.activate_calls == 0
+    assert backend.activate_calls == 0  # never activates
+    assert validation.validate_calls >= 1  # at least the one startup validation
 
 
 def test_existing_identity_no_key_leaves_identity_unchanged(tmp_path: Path) -> None:
@@ -412,7 +450,7 @@ def test_repeated_lifespan_does_not_duplicate_log_handlers(tmp_path: Path) -> No
     assert first == second  # configure_logging replaces its own handlers, not stacks them
 
 
-def test_second_startup_after_activation_is_noop(tmp_path: Path) -> None:
+def test_second_startup_after_activation_validates_without_activating(tmp_path: Path) -> None:
     paths = _ready_root(tmp_path)
     paths.activation_key_file.write_text("a-file-key", encoding="utf-8")
 
@@ -422,12 +460,17 @@ def test_second_startup_after_activation_is_noop(tmp_path: Path) -> None:
     assert backend1.activate_calls == 1  # first activation
 
     backend2 = FakeBackendClient(result=_result())
-    app2 = _app(tmp_path, backend2, key=None)  # key file now gone → no key
+    app2 = _app(tmp_path, backend2, key=None)  # key file now gone → no key → Branch D
     with TestClient(app2):
         runtime = get_runtime(app2)
         assert runtime is not None
-        assert runtime.activation.outcome is ActivationOutcome.ALREADY_ACTIVATED
-    assert backend2.activate_calls == 0  # no Backend call on the second run
+        assert runtime.activation is None  # no activation on the second run
+        assert runtime.supervisor is not None
+        assert runtime.supervisor.startup_branch in {
+            StartupBranch.OPERATIONAL_VALIDATED,
+            StartupBranch.OPERATIONAL_OFFLINE,
+        }
+    assert backend2.activate_calls == 0  # no activation Backend call on the second run
 
 
 def test_injected_client_is_caller_owned(tmp_path: Path) -> None:

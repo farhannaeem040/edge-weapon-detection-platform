@@ -1,26 +1,29 @@
-"""FastAPI lifespan startup/shutdown for the Jetson Agent (IP-02 T-39, §5, §12).
+"""FastAPI lifespan startup/shutdown for the Jetson Agent (IP-02 T-39; IP-05 T-61, §5, §12).
 
-This module composes the foundations built by T-32–T-38 into the §12.1 startup decision, run inside
-the FastAPI **lifespan** — never at import time. The order is fixed (§12.1, with logging configured
-after the layout exists so the log file's directory is present):
+This module composes the T-32–T-38 foundations and then hands the startup *decision* to the T-61
+:class:`AgentRuntimeSupervisor`, which owns the approved decision tree (first activation / manual
+reactivation / locked / validate-then-operate) and the running validation-monitor task. The order of
+the foundation steps is fixed (§12.1, logging after the layout exists so the log directory is
+present):
 
     load settings → resolve paths → provision layout → configure logging → initialize SQLite schema
-    → construct repositories → construct the Backend client → construct the resolver + service
-    → run activation (first / reactivate / no-op) → load ConfigCache (may be empty, OI-2)
-    → publish app.state.runtime → serve
+    → construct repositories → construct the activation Backend client + validation client
+    → construct the resolver + activation service + supervisor → run supervisor startup
+    → load ConfigCache (may be empty, OI-2) → publish app.state.runtime → serve
 
-The runtime state is published **only** after every required step succeeds; on any failure the
-application does not serve, an owned Backend client already created is closed, and no runtime state
-is left half-published. The activation call happens exactly once and is never retried (IP-02 §14).
+The runtime is published **only** after the supervisor's startup succeeds. On any startup failure
+the application does not serve: the supervisor is shut down (cancelling any monitor task, closing
+the validation client it owns) and the owned activation Backend client is closed, so no resource
+leaks and no half-published runtime is left. The FastAPI process is able to stay alive in the locked
+branches (C / D3) — a locked startup is a normal, non-failing outcome, not an exception.
 
-Shutdown closes the owned HTTP client and clears the runtime reference. It never contacts the
-Backend, and never deletes the Device Identity, the ConfigCache, the database, the key file, logs,
-or any directory (§12.4).
+Shutdown drives the supervisor's shutdown (cancel + await the monitor task, stop operational
+components, close the owned validation client), then closes the owned Backend client and clears the
+runtime reference. It contacts no Backend and deletes no local state (§12.4).
 
-Dependencies are injected through :func:`create_lifespan` (a settings loader, a clock, and a Backend
-client factory) so tests can substitute fakes without a real Backend, network, or ``/opt``. The
-defaults are the real T-32/T-37 components. This module writes **no** ConfigCache, starts no
-DeepStream/heartbeat/background task, and adds no HTTP route.
+Dependencies are injected through :func:`create_lifespan` (a settings loader, a clock, a Backend
+client factory, and a validation client factory) so tests substitute fakes without a real Backend,
+network, or ``/opt``. This module adds no HTTP route and starts no DeepStream/detection component.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -43,12 +47,15 @@ from weapon_detection_agent.persistence.config_cache_repository import ConfigCac
 from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
 from weapon_detection_agent.persistence.schema import initialize_database
 from weapon_detection_agent.runtime.state import RUNTIME_STATE_ATTR, AgentRuntime
+from weapon_detection_agent.runtime.supervisor import AgentRuntimeSupervisor
+from weapon_detection_agent.validation.client import CredentialValidationClient
 
 _LOGGER = logging.getLogger("weapon_detection_agent.runtime.startup")
 
 SettingsLoader = Callable[[], AgentSettings]
 Clock = Callable[[], datetime]
 BackendClientFactory = Callable[[AgentSettings], BackendActivationClient]
+ValidationClientFactory = Callable[[AgentSettings], CredentialValidationClient]
 
 
 def default_clock() -> datetime:
@@ -57,10 +64,29 @@ def default_clock() -> datetime:
 
 
 def default_backend_client_factory(settings: AgentSettings) -> BackendActivationClient:
-    """Build the real Backend activation client from the settings (owned by the runtime)."""
+    """Build the real Backend activation client from the settings (owned by the lifespan)."""
     return BackendActivationClient(
         settings.backend_base_url, timeout_seconds=settings.http_timeout_seconds
     )
+
+
+def default_validation_client_factory(settings: AgentSettings) -> CredentialValidationClient:
+    """Build the real credential-validation client (T-57) — ownership passes to the supervisor.
+
+    It uses ``http_timeout_seconds`` as the per-request timeout (never the validation interval); the
+    monitor's cadence uses ``credential_validation_interval_seconds`` instead.
+    """
+    return CredentialValidationClient(
+        settings.backend_base_url, timeout_seconds=settings.http_timeout_seconds
+    )
+
+
+@dataclass
+class _StartedRuntime:
+    """The owned resources returned by :func:`_start` so :func:`_shutdown` can dispose of them."""
+
+    backend_client: BackendActivationClient
+    supervisor: AgentRuntimeSupervisor
 
 
 def create_lifespan(
@@ -68,25 +94,28 @@ def create_lifespan(
     settings_loader: SettingsLoader = load_settings,
     clock: Clock = default_clock,
     backend_client_factory: BackendClientFactory = default_backend_client_factory,
+    validation_client_factory: ValidationClientFactory = default_validation_client_factory,
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     """Build the FastAPI lifespan context manager with injectable dependencies.
 
-    The defaults are the real components; tests pass a settings loader, a fixed clock, and a fake
-    Backend client factory to exercise startup without a real Backend, network, or ``/opt`` root.
+    The defaults are the real components; tests pass a settings loader, a fixed clock, a fake
+    Backend client factory, and a fake validation client factory to exercise every branch without a
+    real Backend, network, or ``/opt`` root.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        client = await _start(
+        started = await _start(
             app,
             settings_loader=settings_loader,
             clock=clock,
             backend_client_factory=backend_client_factory,
+            validation_client_factory=validation_client_factory,
         )
         try:
             yield
         finally:
-            await _shutdown(app, client)
+            await _shutdown(app, started)
 
     return lifespan
 
@@ -97,12 +126,14 @@ async def _start(
     settings_loader: SettingsLoader,
     clock: Clock,
     backend_client_factory: BackendClientFactory,
-) -> BackendActivationClient:
-    """Run the §12.1 startup steps and publish the runtime; return the owned Backend client.
+    validation_client_factory: ValidationClientFactory,
+) -> _StartedRuntime:
+    """Run the foundation steps, drive the supervisor's startup, and publish the runtime.
 
-    Steps before the Backend client is created (settings, provisioning, logging, schema) fail by
-    propagating their own clear, safe errors — no client exists to close. Once the client exists, an
-    activation or persistence failure closes it before re-raising, so no owned resource leaks.
+    Foundation failures (settings, provisioning, logging, schema) propagate their own safe errors —
+    no client exists yet to close. Once the clients and supervisor exist, any startup failure shuts
+    the supervisor down (closing the validation client it owns) and closes the Backend client before
+    re-raising, so no owned resource leaks.
     """
     settings = settings_loader()
 
@@ -120,22 +151,32 @@ async def _start(
     identity_repository = DeviceIdentityRepository(paths.database_file)
     config_cache_repository = ConfigCacheRepository(paths.database_file)
 
-    client = backend_client_factory(settings)
+    backend_client = backend_client_factory(settings)
+    supervisor: AgentRuntimeSupervisor | None = None
+    validation_client: CredentialValidationClient | None = None
     try:
+        validation_client = validation_client_factory(settings)
         resolver = ActivationKeyResolver(
             environment_key=settings.activation_key,
             key_file_path=paths.activation_key_file,
         )
         service = ActivationService(
-            backend_client=client,
+            backend_client=backend_client,
             identity_repository=identity_repository,
             key_resolver=resolver,
             clock=clock,
         )
-        activation = await service.activate()
+        supervisor = AgentRuntimeSupervisor(
+            settings=settings,
+            identity_repository=identity_repository,
+            key_resolver=resolver,
+            activation_service=service,
+            validation_client=validation_client,
+            components=(),  # no operational components exist yet (T-62+)
+        )
+        await supervisor.startup()
 
-        # §12.1: load the cached configuration (normally empty this milestone, OI-2) — the offline
-        # startup structural guarantee. Nothing consumes it yet; it must not error when absent.
+        # §12.1: load the cached configuration (normally empty this milestone, OI-2).
         cached = config_cache_repository.load()
         _LOGGER.info(
             "agent_config_cache_loaded" if cached is not None else "agent_config_cache_absent"
@@ -146,29 +187,39 @@ async def _start(
             paths=paths,
             identity_repository=identity_repository,
             config_cache_repository=config_cache_repository,
-            activation=activation,
+            activation=supervisor.activation_result,
+            supervisor=supervisor,
         )
     except BaseException:
         _LOGGER.error("agent_startup_failed")
-        await client.aclose()
+        if supervisor is not None:
+            await supervisor.shutdown()
+        elif validation_client is not None:
+            await validation_client.aclose()
+        await backend_client.aclose()
         raise
 
     setattr(app.state, RUNTIME_STATE_ATTR, runtime)
     _LOGGER.info(
         "agent_startup_complete",
-        extra={"outcome": activation.outcome.value, "device_id": activation.device_id},
+        extra={"branch": supervisor.startup_branch.value if supervisor.startup_branch else None},
     )
-    return client
+    return _StartedRuntime(backend_client=backend_client, supervisor=supervisor)
 
 
-async def _shutdown(app: FastAPI, client: BackendActivationClient) -> None:
-    """Close the owned Backend client and clear the runtime reference (§12.4).
+async def _shutdown(app: FastAPI, started: _StartedRuntime) -> None:
+    """Shut the supervisor down, close the owned Backend client, and clear the runtime (§12.4).
 
-    Idempotent and never raises: closing an already-closed client is a no-op, and a cleanup error is
-    logged safely rather than propagated. Contacts no Backend and deletes no local state.
+    Idempotent and never raises: the supervisor's shutdown is idempotent, closing an already-closed
+    client is a no-op, and a cleanup error is logged safely rather than propagated. Contacts no
+    Backend and deletes no local state.
     """
     try:
-        await client.aclose()
+        await started.supervisor.shutdown()
+    except Exception:
+        _LOGGER.warning("agent_shutdown_supervisor_failed")
+    try:
+        await started.backend_client.aclose()
     except Exception:
         _LOGGER.warning("agent_shutdown_client_close_failed")
     setattr(app.state, RUNTIME_STATE_ATTR, None)
