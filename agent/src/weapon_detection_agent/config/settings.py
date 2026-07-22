@@ -96,6 +96,12 @@ class AgentSettings(BaseSettings):
     # Activation-request timeout in seconds (IP-02 §14). Must be positive.
     http_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # How often the Agent re-validates its stored credentials against the Backend while operational
+    # (IP-05 T-56, §6). Integer seconds, must be positive. The per-request timeout reuses
+    # http_timeout_seconds. This is a detect-only validation cadence, never an activation retry —
+    # activation stays one-shot (IP-02 §14).
+    credential_validation_interval_seconds: int = Field(default=30, gt=0)
+
     # Logging level name; consumed by the logging foundation (T-33).
     log_level: str = "INFO"
 

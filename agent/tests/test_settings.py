@@ -24,6 +24,7 @@ _WDA_VARS = (
     "WDA_ACTIVATION_KEY",
     "WDA_ROOT_PATH",
     "WDA_HTTP_TIMEOUT_SECONDS",
+    "WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS",
     "WDA_LOG_LEVEL",
 )
 
@@ -149,6 +150,7 @@ def test_optional_defaults_applied(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.root_path == Path("/opt/weapon-detection")
     assert settings.http_timeout_seconds == 10.0
+    assert settings.credential_validation_interval_seconds == 30
     assert settings.log_level == "INFO"
     assert settings.activation_key is None
 
@@ -159,12 +161,14 @@ def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
     monkeypatch.setenv("WDA_ROOT_PATH", "/tmp/wda-test-root")
     monkeypatch.setenv("WDA_HTTP_TIMEOUT_SECONDS", "3.5")
+    monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", "45")
     monkeypatch.setenv("WDA_LOG_LEVEL", "debug")
 
     settings = load_settings()
 
     assert settings.root_path == Path("/tmp/wda-test-root")
     assert settings.http_timeout_seconds == 3.5
+    assert settings.credential_validation_interval_seconds == 45
     # The level name is accepted case-insensitively and stored upper-cased.
     assert settings.log_level == "DEBUG"
 
@@ -183,6 +187,56 @@ def test_non_positive_timeout_fails(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ConfigurationError):
         load_settings()
+
+
+# --- Credential-validation interval (IP-05 T-56, §6) -------------------------------------------
+
+
+def test_credential_validation_interval_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", "15")
+
+    settings = load_settings()
+
+    assert settings.credential_validation_interval_seconds == 15
+    assert isinstance(settings.credential_validation_interval_seconds, int)
+
+
+def test_credential_validation_interval_constructor_override_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", "15")
+
+    settings = load_settings(credential_validation_interval_seconds=90)
+
+    assert settings.credential_validation_interval_seconds == 90
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-30"])
+def test_non_positive_credential_validation_interval_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", value)
+
+    with pytest.raises(ConfigurationError):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "12.5"])
+def test_non_integer_credential_validation_interval_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # An integer number of seconds is required; a non-integer (text, or a fractional value) is
+    # rejected with a clear configuration error naming the variable.
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS" in str(excinfo.value)
 
 
 # --- 11. Immutability --------------------------------------------------------------------------
