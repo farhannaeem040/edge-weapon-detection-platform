@@ -30,10 +30,17 @@ export interface Camera {
 }
 
 /**
- * The two states of a Device, spelled exactly as the Backend serializes
- * `DeviceActivationStatus` (its enum name, not an integer) — FS-02 §10.3.
+ * The states of a Device, spelled exactly as the Backend serializes `DeviceActivationStatus` (its
+ * enum name, not an integer — `DeviceSummaryDto` emits `ActivationStatus.ToString()`) — FS-02 §10.3.
+ *
+ * `ReactivationRequired` (IP-05, FS-02 §5.3 amended) is entered when an Admin regenerates the
+ * Activation Key of an already-`Activated` device: the Backend revokes the shared secret immediately
+ * and preserves the `DeviceId` (§4.1/§4.2). It is a **credential-revocation** state, not a
+ * connectivity state — the Dashboard must render it as "Reactivation required" and must **never**
+ * show it (or any device) as *Offline*, which stays reserved for a future heartbeat feature that this
+ * platform does not implement (IP-05 §13).
  */
-export type DeviceActivationStatus = 'Unactivated' | 'Activated';
+export type DeviceActivationStatus = 'Unactivated' | 'Activated' | 'ReactivationRequired';
 
 /** The Device summarised within a branch (`DeviceSummaryDto`). */
 export interface DeviceSummary {

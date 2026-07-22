@@ -3,7 +3,7 @@ import { HttpTestingController, provideHttpClientTesting } from '@angular/common
 import { TestBed } from '@angular/core/testing';
 
 import { environment } from '../../environments/environment';
-import { BranchService } from './branch.service';
+import { ActivationKeyRegenerationConflictError, BranchService } from './branch.service';
 import { Branch, CreateBranchRequest, CreatedBranch } from './branch.models';
 
 // Every value below is synthetic placeholder data. No real branch, address, contact detail, camera
@@ -343,6 +343,46 @@ describe('BranchService', () => {
 
       expect(key).toBeNull();
       expect(errored).toBeFalse();
+    });
+
+    it('raises the typed conflict error on a 409 with the regeneration-conflict errorCode', () => {
+      let key: string | null | undefined = undefined;
+      let error: unknown;
+      service.regenerateActivationKey(PLACEHOLDER_BRANCH_ID).subscribe({
+        next: (result) => (key = result),
+        error: (err: unknown) => (error = err),
+      });
+
+      // A lost concurrent-regeneration race (IP-05 §3): the Backend rolled back and committed no key.
+      httpTesting.expectOne(REGENERATE_URL).flush(
+        {
+          success: false,
+          message: 'A concurrent regeneration won the race.',
+          errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT',
+        },
+        { status: 409, statusText: 'Conflict' },
+      );
+
+      // Distinct from success (no key) and from the null-on-404 outcome: a typed error the view can
+      // branch on to show safe retry guidance.
+      expect(key).toBeUndefined();
+      expect(error).toBeInstanceOf(ActivationKeyRegenerationConflictError);
+    });
+
+    it('carries no key or secret on the conflict error', () => {
+      let error: unknown;
+      service.regenerateActivationKey(PLACEHOLDER_BRANCH_ID).subscribe({
+        error: (err: unknown) => (error = err),
+      });
+
+      httpTesting.expectOne(REGENERATE_URL).flush(
+        { success: false, errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT' },
+        { status: 409, statusText: 'Conflict' },
+      );
+
+      // The losing request received nothing that was committed; the error surfaces no key material.
+      expect(JSON.stringify(error)).not.toContain(PLACEHOLDER_REGENERATED_KEY);
+      expect((error as Error).message).not.toContain(PLACEHOLDER_REGENERATED_KEY);
     });
 
     it('errors when a 200 envelope carries no Activation Key', () => {

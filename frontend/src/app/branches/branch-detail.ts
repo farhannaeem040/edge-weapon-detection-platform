@@ -3,6 +3,7 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  computed,
   inject,
   signal,
 } from '@angular/core';
@@ -10,7 +11,7 @@ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 
 import { ActivationKeyDisplayComponent } from './activation-key-display';
 import { Branch } from './branch.models';
-import { BranchService } from './branch.service';
+import { ActivationKeyRegenerationConflictError, BranchService } from './branch.service';
 import { BranchDeleteConfirmComponent } from './branch-delete-confirm';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
@@ -182,7 +183,15 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 [status]="branch.device.activationStatus"
               />
 
-              @if (branch.device.activationStatus === 'Activated' && branch.device.deviceId) {
+              @if (
+                (branch.device.activationStatus === 'Activated' ||
+                  branch.device.activationStatus === 'ReactivationRequired') &&
+                branch.device.deviceId
+              ) {
+                <!-- The Device ID is shown once a Device has one. It survives a credential
+                     revocation (FS-02 §4.2): a ReactivationRequired Device keeps the same permanent
+                     Device ID, so it is still displayed here. Status is trusted, not deviceId's mere
+                     presence, so a self-contradictory payload never over-reports. -->
                 <p class="branch__device-id">Device ID: {{ branch.device.deviceId }}</p>
               } @else {
                 <!-- No placeholder, no blank field, no fabricated identifier: an unactivated Device has
@@ -205,18 +214,39 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 } @else if (confirming()) {
                   <div
                     class="branch__confirm"
+                    [class.branch__confirm--destructive]="regenerationIsDestructive()"
                     role="group"
                     aria-labelledby="regenerate-confirm-heading"
                   >
                     <h4 id="regenerate-confirm-heading">Regenerate this branch's Activation Key?</h4>
 
-                    <ul class="branch__confirm-effects">
-                      <li>The current Activation Key stops working immediately and cannot be restored.</li>
-                      <li>A new Activation Key is generated and shown to you once.</li>
-                      <li>The branch's public Device ID does not change.</li>
-                      <li>An already activated Device is not deactivated and keeps running.</li>
-                      <li>The new key is required for the next activation or reactivation.</li>
-                    </ul>
+                    @if (regenerationIsDestructive()) {
+                      <!-- Activated or ReactivationRequired: regeneration is a security-first credential
+                           reset (IP-05 §1). The warning states exactly what it does — revoke now, lock
+                           the running Jetson once it detects the revocation, require a manual
+                           reactivation, and preserve the Device ID — so the Admin confirms with full
+                           knowledge (FS-02 §5.3, AC-8). -->
+                      <p class="branch__confirm-warning" role="alert">
+                        This is a destructive credential reset.
+                      </p>
+                      <ul class="branch__confirm-effects">
+                        <li>The current device credential is revoked immediately and cannot be restored.</li>
+                        <li>The running Jetson will lock itself once it detects the revocation.</li>
+                        <li>The replacement Activation Key must be provisioned on the Jetson manually.</li>
+                        <li>The branch's public Device ID is preserved.</li>
+                        <li>The new Activation Key is shown to you once and cannot be retrieved again.</li>
+                      </ul>
+                    } @else {
+                      <!-- Unactivated: there is no live credential and no running Jetson to revoke, so
+                           this is the ordinary first-activation key-generation flow, with no
+                           destructive credential-revocation warning (IP-05 P1, FS-02 §5.3). -->
+                      <ul class="branch__confirm-effects">
+                        <li>This branch's Device has not been activated, so no running device is affected.</li>
+                        <li>The current unused Activation Key stops working immediately and is replaced.</li>
+                        <li>The branch's public Device ID is unaffected.</li>
+                        <li>The new Activation Key is shown to you once and cannot be retrieved again.</li>
+                      </ul>
+                    }
 
                     <div class="branch__confirm-actions">
                       <button
@@ -231,12 +261,20 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                       <!-- Disabled while in flight: a second click must not invalidate the key the
                            first one just minted, before the Admin has even seen it. -->
                       <button
-                        class="branch__confirm-regenerate btn btn--danger"
+                        class="branch__confirm-regenerate btn"
+                        [class.btn--danger]="regenerationIsDestructive()"
+                        [class.btn--primary]="!regenerationIsDestructive()"
                         type="button"
                         [disabled]="regenerating()"
                         (click)="regenerate()"
                       >
-                        {{ regenerating() ? 'Regenerating…' : 'Regenerate key' }}
+                        {{
+                          regenerating()
+                            ? 'Regenerating…'
+                            : regenerationIsDestructive()
+                              ? 'Regenerate key'
+                              : 'Generate new key'
+                        }}
                       </button>
                     </div>
                   </div>
@@ -245,7 +283,18 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                     Regenerate Activation Key
                   </button>
 
-                  @if (regenerateNotFound()) {
+                  @if (regenerateConflict()) {
+                    <!-- The Backend answered 409 ACTIVATION_KEY_REGENERATION_CONFLICT (IP-05 §3): a
+                         concurrent regeneration won the race and this request committed no key. No key
+                         is shown (there is none), and the message makes no claim about whether the
+                         competing request succeeded — the refreshed state above is the source of
+                         truth, and the Admin may simply try again if they still need a new key. -->
+                    <p class="branch__regenerate-status banner banner--warning" role="alert">
+                      Another regeneration for this branch was completed at the same time, so no key
+                      was issued to you. Review the branch's current state above and try again if you
+                      still need a new Activation Key.
+                    </p>
+                  } @else if (regenerateNotFound()) {
                     <p class="branch__regenerate-status banner banner--error" role="alert">
                       This branch's Device was not found. It may have been removed.
                     </p>
@@ -359,6 +408,18 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       margin: 0 0 var(--space-2);
     }
 
+    /* A destructive reset is bordered and headed in the danger colour so it does not read as the
+       same benign generate-a-new-key prompt an unactivated branch shows. */
+    .branch__confirm--destructive {
+      border-color: var(--color-danger, #ba1a1a);
+    }
+
+    .branch__confirm-warning {
+      margin: 0 0 var(--space-2);
+      font-weight: var(--weight-medium);
+      color: var(--color-danger, #ba1a1a);
+    }
+
     .branch__confirm-effects {
       margin: 0 0 var(--space-4);
       padding-left: 1.2rem;
@@ -452,6 +513,25 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   protected readonly regenerateFailed = signal(false);
   protected readonly regenerateNotFound = signal(false);
 
+  /**
+   * True when the Backend answered 409 ACTIVATION_KEY_REGENERATION_CONFLICT (IP-05 §3): a concurrent
+   * regeneration won the race and this request committed no key. Rendered as safe retry guidance,
+   * separate from the generic failure and the not-found states, and never alongside a key.
+   */
+  protected readonly regenerateConflict = signal(false);
+
+  /**
+   * Whether regenerating this branch's key is a destructive credential reset — true only when the
+   * Device is `Activated` or `ReactivationRequired`, i.e. there is a live (or last-issued) credential
+   * to revoke and a Jetson that must be reactivated (FS-02 §5.3, AC-8). An `Unactivated` Device has
+   * no live credential, so its regeneration is the benign first-activation flow with no destructive
+   * warning. Derived from the loaded branch's explicit `activationStatus`, never from `deviceId`.
+   */
+  protected readonly regenerationIsDestructive = computed(() => {
+    const status = this.branch()?.device.activationStatus;
+    return status === 'Activated' || status === 'ReactivationRequired';
+  });
+
   /** True once the Admin has asked to delete and before they confirm or cancel. */
   protected readonly confirmingDelete = signal(false);
 
@@ -514,6 +594,7 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
     // fresh confirmation would be reporting on something that is no longer happening.
     this.regenerateFailed.set(false);
     this.regenerateNotFound.set(false);
+    this.regenerateConflict.set(false);
     this.confirming.set(true);
   }
 
@@ -539,6 +620,7 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
     this.regenerating.set(true);
     this.regenerateFailed.set(false);
     this.regenerateNotFound.set(false);
+    this.regenerateConflict.set(false);
 
     // The branch id, which is what this endpoint's `{id}` means (FS-02 §1.3) — see
     // `BranchService.regenerateActivationKey`.
@@ -554,17 +636,55 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
         }
 
         // The confirmation is replaced by the disclosure. Navigation waits for the Admin
-        // (FS-02 §5.3 step 6).
+        // (FS-02 §5.3 step 6). The branch/device is re-read so the status badge reflects the new
+        // state — `ReactivationRequired` for a Device that had been Activated (FS-02 §4.1, IP-05 P1).
         this.confirming.set(false);
         this.regeneratedKey.set(activationKey);
+        this.reloadBranch();
       },
-      // Anything else — including a 401 the session-expiry interceptor has already acted on
-      // (T-25) — settles into the generic failure state, with no key displayed.
-      error: () => {
+      error: (error: unknown) => {
         this.regenerating.set(false);
         this.confirming.set(false);
+
+        if (error instanceof ActivationKeyRegenerationConflictError) {
+          // A lost concurrent-regeneration race (IP-05 §3): the Backend committed no key. Clear any
+          // stale key, show safe retry guidance, and re-read the branch so the view reflects whatever
+          // state the winning request left — without assuming it succeeded. No auto-retry.
+          this.regeneratedKey.set(null);
+          this.regenerateConflict.set(true);
+          this.reloadBranch();
+          return;
+        }
+
+        // Anything else — including a 401 the session-expiry interceptor has already acted on
+        // (T-25) — settles into the generic failure state, with no key displayed. The key is cleared
+        // explicitly so a stale disclosure from an earlier attempt can never survive a later failure.
+        this.regeneratedKey.set(null);
         this.regenerateFailed.set(true);
       },
+    });
+  }
+
+  /**
+   * Re-reads the branch after a regeneration so the status badge and Device ID reflect the new state
+   * (e.g. `Activated → ReactivationRequired`, FS-02 §4.1). It is best-effort: a failed refresh leaves
+   * the currently displayed branch and any key disclosure in place rather than tearing them down, and
+   * it never toggles the full-page loading state. This issues exactly one GET and no retry.
+   */
+  private reloadBranch(): void {
+    if (this.branchId === null) {
+      return;
+    }
+
+    this.branchService.get(this.branchId).subscribe({
+      next: (branch) => {
+        if (branch !== null) {
+          this.branch.set(branch);
+        }
+      },
+      // A failed refresh is not surfaced: the disclosed key must stay on screen, and the last known
+      // branch is a safer thing to show than an error that would discard it.
+      error: () => {},
     });
   }
 
@@ -572,10 +692,10 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
    * Ends the disclosure once the Admin says they have the key, discarding it and returning to the
    * ordinary branch view.
    *
-   * The branch is deliberately not re-read. Regeneration changes no field this view renders: the
-   * Device's `activationStatus` is untouched and its `DeviceId` is retained (FS-02 §5.3, AC-7), so a
-   * refetch would only re-render identical data. Nothing about leaving this state carries the key —
-   * there is no navigation here at all.
+   * No re-read happens here: the branch was already refreshed the moment the regeneration succeeded
+   * (see `regenerate`), so the status badge already shows the new state — `ReactivationRequired` for a
+   * Device that had been Activated (FS-02 §4.1, IP-05 P1). Leaving the disclosure only drops the key
+   * from memory; there is no navigation here, so nothing carries it anywhere.
    */
   protected completeRegeneration(): void {
     this.regeneratedKey.set(null);

@@ -379,6 +379,12 @@ textarea::placeholder {
   color: var(--color-on-error, #93000a);
 }
 
+.banner--warning {
+  background: var(--color-warning-bg);
+  border-color: #e6cf8a;
+  color: #6a4a00;
+}
+
 .banner--info {
   background: var(--color-surface-tint);
   border-color: var(--color-border);

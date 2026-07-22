@@ -473,8 +473,32 @@ describe('BranchDetailComponent', () => {
       fixture.detectChanges();
     }
 
-    function succeed(): void {
+    /**
+     * Answers a successful regeneration and the branch re-read the component issues on success (P1:
+     * the status badge must reflect the new state — `ReactivationRequired` for a Device that had been
+     * Activated). `branchAfter` is what that refresh returns; it defaults to the Unactivated
+     * placeholder, matching the default confirmation, whose Device stays Unactivated on regeneration.
+     */
+    function succeed(branchAfter: Branch = placeholderBranch()): void {
       flushRegeneration({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: branchAfter });
+      fixture.detectChanges();
+    }
+
+    /** The branch as it stands after regenerating an Activated Device: revoked, ReactivationRequired. */
+    function reactivationRequiredBranch(): Branch {
+      return placeholderBranch({
+        device: { activationStatus: 'ReactivationRequired', deviceId: PLACEHOLDER_DEVICE_ID },
+      });
+    }
+
+    /** The branch as loaded for an Activated Device (the destructive-regeneration starting point). */
+    function activatedBranch(): Branch {
+      return placeholderBranch({
+        device: { activationStatus: 'Activated', deviceId: PLACEHOLDER_DEVICE_ID },
+      });
     }
 
     it('renders the regeneration action on a loaded branch', () => {
@@ -517,15 +541,45 @@ describe('BranchDetailComponent', () => {
       // verify() asserts that selecting the action issued no request of its own.
     });
 
-    it('explains what regeneration does before the Admin confirms', () => {
+    it('shows a benign generation prompt for an unactivated Device, with no destructive warning', () => {
+      // Default branch is Unactivated: there is no live credential and no running Jetson, so this is
+      // the ordinary first-activation key-generation flow (IP-05 P1, FS-02 §5.3).
       openConfirmation();
 
       const rendered = text();
+      expect(rendered).toContain('has not been activated');
       expect(rendered).toContain('stops working immediately');
-      expect(rendered).toContain('A new Activation Key is generated');
-      expect(rendered).toContain('public Device ID does not change');
-      expect(rendered).toContain('is not deactivated');
-      expect(rendered).toContain('next activation or reactivation');
+      expect(rendered).toContain('Device ID is unaffected');
+      expect(rendered).toContain('shown to you once');
+      // None of the destructive credential-revocation language, and no Jetson-lock warning.
+      expect(rendered).not.toContain('revoked');
+      expect(rendered).not.toContain('lock');
+      expect(rendered).not.toContain('destructive');
+      expect(query('.branch__confirm--destructive')).toBeNull();
+    });
+
+    it('shows a destructive credential-revocation warning for an activated Device', () => {
+      openConfirmation(activatedBranch());
+
+      const rendered = text();
+      expect(rendered).toContain('destructive');
+      expect(rendered).toContain('revoked immediately');
+      expect(rendered).toContain('Jetson will lock');
+      expect(rendered).toContain('provisioned on the Jetson manually');
+      expect(rendered).toContain('Device ID is preserved');
+      expect(rendered).toContain('shown to you once');
+      expect(query('.branch__confirm--destructive')).not.toBeNull();
+    });
+
+    it('shows the destructive warning for a ReactivationRequired Device too', () => {
+      // Regenerating again while already ReactivationRequired is still a credential reset (§4.1), so
+      // the destructive warning applies exactly as for an Activated Device.
+      openConfirmation(reactivationRequiredBranch());
+
+      const rendered = text();
+      expect(rendered).toContain('revoked immediately');
+      expect(rendered).toContain('Jetson will lock');
+      expect(query('.branch__confirm--destructive')).not.toBeNull();
     });
 
     it('does not reveal whether the current key had been used', () => {
@@ -567,6 +621,13 @@ describe('BranchDetailComponent', () => {
       expect(request.request.method).toBe('POST');
       request.flush({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
       fixture.detectChanges();
+
+      // Exactly one regeneration POST; the success then triggers a single branch re-read (P1), which
+      // is a GET to a different URL — answered here so no request is left pending for verify().
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
+      fixture.detectChanges();
     });
 
     it('prevents a duplicate request while one is in flight', () => {
@@ -584,6 +645,12 @@ describe('BranchDetailComponent', () => {
       httpTesting
         .expectOne(REGENERATE_URL)
         .flush({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
+      fixture.detectChanges();
+
+      // The success re-reads the branch (P1); answer it so nothing is left pending.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
       fixture.detectChanges();
     });
 
@@ -631,16 +698,133 @@ describe('BranchDetailComponent', () => {
       expect(text()).toContain('shown once');
     });
 
-    it('does not navigate away or re-read the branch on success', () => {
-      openConfirmation();
+    it('re-reads the branch on success and keeps the disclosure on screen', () => {
+      // P1: a successful regeneration refreshes the branch/device state so the badge reflects the new
+      // status. The re-read happens behind the disclosure — the Admin stays on the branch with the key
+      // on screen, and there is no navigation. (The key itself is never re-fetched; the refresh is an
+      // ordinary branch read that returns no key.)
+      openConfirmation(activatedBranch());
       query('.branch__confirm-regenerate')?.click();
       fixture.detectChanges();
-      succeed();
+      succeed(reactivationRequiredBranch());
 
-      // The Admin stays on the branch, with the key on screen for as long as they need it. verify()
-      // asserts no further request — the key is never re-fetched, and nothing re-reads the branch
-      // out from under the disclosure.
+      expect(query('app-activation-key-display')).not.toBeNull();
+      expect(query('.activation-key__value')?.textContent?.trim()).toBe(PLACEHOLDER_REGENERATED_KEY);
       expect(text()).toContain('Alpha Branch');
+    });
+
+    it('shows "Reactivation required" after regenerating an activated Device', () => {
+      openConfirmation(activatedBranch());
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+      succeed(reactivationRequiredBranch());
+
+      // The badge, refreshed behind the disclosure, now reads the revocation state — never "Offline".
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Reactivation required',
+      );
+      expect(text()).not.toContain('Offline');
+
+      // Dismissing the disclosure leaves the refreshed status in place.
+      query('.activation-key__continue')?.click();
+      fixture.detectChanges();
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Reactivation required',
+      );
+    });
+
+    it('does not optimistically change the device status before the response', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      // In flight: the badge still reads the loaded status. The new state comes only from the
+      // Backend-confirmed re-read, never from a client guess.
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+      expect(query('app-activation-key-display')).toBeNull();
+
+      succeed(reactivationRequiredBranch());
+    });
+
+    it('shows safe retry guidance and no key on a 409 regeneration conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      // A lost concurrent-regeneration race (IP-05 §3): 409 with the conflict errorCode.
+      flushRegeneration(
+        {
+          success: false,
+          message: 'A concurrent regeneration won the race.',
+          errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT',
+        },
+        { status: 409, statusText: 'Conflict' },
+      );
+      // The component re-reads the branch to reflect whatever the winning request left.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: reactivationRequiredBranch() });
+      fixture.detectChanges();
+
+      expect(text()).toContain('no key was issued to you');
+      // No key is shown — the losing request received none.
+      expect(query('app-activation-key-display')).toBeNull();
+      expect(text()).not.toContain(PLACEHOLDER_REGENERATED_KEY);
+      // Not disguised as a generic failure or a not-found.
+      expect(text()).not.toContain('The Activation Key could not be regenerated.');
+      expect(text()).not.toContain("This branch's Device was not found.");
+    });
+
+    it('clears a previously shown key when a later attempt hits a 409 conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+      succeed(reactivationRequiredBranch());
+      expect(text()).toContain(PLACEHOLDER_REGENERATED_KEY);
+
+      // Complete, reopen, and try again — this time the Backend reports a conflict.
+      query('.activation-key__continue')?.click();
+      fixture.detectChanges();
+      query('.branch__regenerate')?.click();
+      fixture.detectChanges();
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      flushRegeneration(
+        { success: false, errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT' },
+        { status: 409, statusText: 'Conflict' },
+      );
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: reactivationRequiredBranch() });
+      fixture.detectChanges();
+
+      // The stale key from the earlier success is gone.
+      expect(query('app-activation-key-display')).toBeNull();
+      expect(text()).not.toContain(PLACEHOLDER_REGENERATED_KEY);
+      expect(text()).toContain('no key was issued to you');
+    });
+
+    it('does not automatically retry after a 409 conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      flushRegeneration(
+        { success: false, errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT' },
+        { status: 409, statusText: 'Conflict' },
+      );
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: activatedBranch() });
+      fixture.detectChanges();
+
+      // No second regeneration request is issued — recovery is the Admin's explicit action, never an
+      // automatic re-send. expectNone throws if one exists; the boolean records that it did not.
+      httpTesting.expectNone(REGENERATE_URL);
+      expect(text()).toContain('no key was issued to you');
     });
 
     it('requires an explicit copy action for the regenerated key', async () => {
@@ -870,6 +1054,11 @@ describe('BranchDetailComponent', () => {
           sharedSecret: 'PLACEHOLDER-SHARED-SECRET',
         },
       });
+      // The success re-reads the branch (P1); answer it so nothing is left pending.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
+      fixture.detectChanges();
 
       const rendered = text();
       expect(rendered).toContain(PLACEHOLDER_REGENERATED_KEY);
