@@ -4,7 +4,7 @@
 |-------|-------|
 | Plan ID | IP-05 |
 | Title | Device Reactivation Security — immediate shared-secret revocation, Agent revocation-detection, and operational lock |
-| Status | Draft — awaiting approval (amended 2026-07-21, Agent-lock expansion) |
+| Status | In progress — T-48–T-61 delivered (T-61 approved 2026-07-22); T-54/T-55 + T-62–T-69 remaining, consolidated into 7 execution phases (§11A, amended 2026-07-22) |
 | Realizes | FS-02 (amended); SRS FR-BRN-005 / NFR-SEC-002 / new FR-BRN-008 / NFR-SEC-005 (amended/added); ARCH-001 §14.1 / §16 / ADR-015 / new ADR-017 (amended/added) |
 | Governing Documents | SRS-001, ARCH-001, FS-02 (all amended for this change), Engineering Principles, Development Workflow |
 | Depends On | IP-01 (complete), IP-02 (T-31–T-40 complete; T-41 real-Jetson activation/restart/reboot evidence passed — see IP-02 §21/memory), IP-03/IP-04 (complete) |
@@ -207,6 +207,108 @@ For this milestone, tests use a **fake** operational component proving it: start
 | **T-68** | Real-Jetson **manual reactivation** via `set-activation-key.sh` → one `/activate`, same DeviceId, rotated secret, lock cleared, key file consumed after persistence; then normal restart + reboot stay Operational without re-activation |
 | **T-69** | Documentation + MAC evidence: FS-02/SRS/ARCH/ADR/IP-02/IP-05, root+agent+deployment READMEs; AC evidence table; no key/secret recorded |
 
+## 11A. Consolidated Execution Plan (amendment 2026-07-22 — T-61 approved)
+
+> **Status of §11 tasks.** T-48–T-61 are **delivered and committed** (`a8ad221` … `284e114`), with **T-61 approved 2026-07-22**. This amendment **consolidates the remaining tasks T-54–T-69** into seven execution phases to reduce commit fragmentation and to sequence the two deployment tiers safely. **No acceptance criterion is added, removed, weakened, or renumbered** — every AC-1…AC-29 clause in §12 is preserved verbatim and simply re-attributed to the consolidating phase. The original §11 task table is retained above as the authoritative task-of-record and traceability anchor; the phases below are the *execution grouping* over those tasks. The Angular tasks T-54/T-55 remain **not started**; the real-Jetson/deployment tasks T-64–T-69 and the IP-02 **T-41** deployment carry-over remain **not started**.
+
+### 11A.1 Phase definitions
+
+**Phase 1 — Angular reactivation UI (consolidates T-54 + T-55).** One implementation phase:
+- Angular models support `ReactivationRequired`;
+- badge displays "Reactivation required";
+- never display *Offline* for credential revocation;
+- destructive warning for regeneration of `Activated` or `ReactivationRequired` devices;
+- **no** destructive warning for `Unactivated` devices;
+- refresh branch/device state after successful regeneration;
+- display the plaintext Activation Key **once**;
+- handle `409 ACTIVATION_KEY_REGENERATION_CONFLICT` safely;
+- **never** display a key for a failed/conflicting request;
+- include focused Angular tests.
+- Commit (single): `feat(frontend): support device reactivation workflow`.
+
+**Phase 2 — Agent contract verification (consolidates T-62 + T-63; suites and reported results kept distinct).** One test-only phase covering both the **simulated-Backend** suite and the **real-Backend contract** suite, each reported separately:
+- first activation; normal restart; confirmed credential rejection; persisted `ReactivationRequired` lock; offline/indeterminate response does **not** lock; same `DeviceId` on reactivation; replacement secret persisted; `ActivatedAt` preserved; `LastActivatedAt` advanced; Activation Key file deleted **only after** persistence; exactly one activation request; no automatic retry; no key or secret in logs.
+- Commit (single, test-only): `test(agent): verify revocation and reactivation contracts`.
+
+**Phase 3 — Deployment order correction (sequencing rule; no commit of its own).** Although §11 numbers **T-64 before T-65**, execution uses this practical order — *do not deploy the new Agent before the updated Backend endpoint is available*:
+- **A. Central Docker first** (T-65): rebuild Backend and Angular images; run the SQL migration; verify the filtered unique index; verify existing persistent data remains intact; verify the credential-validation endpoint; verify regeneration and `ReactivationRequired` behaviour.
+- **B. Jetson second** (T-64 + T-41): deploy the updated Agent package; update the Agent environment configuration; restart the systemd service; verify the validation-interval setting; verify the installed code version.
+
+**Phase 4 — Jetson deployment and T-41 completion (consolidates T-64 + remaining IP-02 T-41 work).**
+- fix `install.sh` ownership and permission enforcement;
+- preserve system Python;
+- keep exactly one Uvicorn worker;
+- update the deployment README;
+- correct all stale Python/deadsnakes guidance;
+- include `WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS=30` in the deployment configuration/example;
+- update package files on the Jetson;
+- verify systemd startup; verify restart/reboot persistence;
+- retain the existing `DeviceId`; do **not** reset the Jetson identity database; do **not** delete the existing `DeviceIdentity` before the approved reactivation test.
+- The existing **T-41 deployment commit and evidence must not be lost or duplicated.**
+
+**Phase 5 — Connected revocation and recovery (consolidates T-66 + T-68).** One real-Jetson acceptance flow:
+- Jetson starts Operational; Agent validation monitor running; Admin regenerates the key; Backend immediately clears its protected secret and sets `ReactivationRequired`; connected Agent receives the confirmed `401 INVALID_DEVICE_CREDENTIALS`; Agent clears the local secret; Agent persists `ReactivationRequired`; monitor terminates; operational coordinator locks; operational components prevented/stopped; FastAPI/systemd process remains alive; operator manually provisions the new key via `set-activation-key.sh`; operator restarts the service; Agent performs **exactly one** activation request; returned `DeviceId` matches the existing `DeviceId`; new secret stored; `ActivatedAt` preserved; `LastActivatedAt` advances; key file deleted **only after** persistence; runtime becomes Operational; normal restart passes; Jetson reboot and automatic systemd startup pass; identity remains Operational after reboot.
+
+**Phase 6 — Offline/reconnect revocation (keeps T-67 separate).** A distinct real-Jetson scenario, reported separately from Phase 5:
+- Jetson starts Operational; disconnect from the Backend/Tailscale path; regenerate the Activation Key while disconnected; confirm Backend immediately becomes `ReactivationRequired`; confirm the disconnected Agent cannot yet know; confirm ordinary offline operation is **not** falsely locked; restore connectivity; confirm the next validated exchange returns the exact confirmed `401`; confirm the Agent then clears the secret and persists `ReactivationRequired`; confirm operational-lock enforcement; manually reactivate again if necessary to restore the final demonstration state.
+- **Do not claim instantaneous revocation while disconnected.**
+
+**Phase 7 — Final evidence and closure (consolidates T-69 + formal T-41 / IP-05 closure).**
+- update root README, Agent README, deployment README;
+- update IP-02 evidence; update IP-05 status and acceptance evidence;
+- record central Docker verification; record connected-revocation evidence; record offline/reconnect evidence; record manual-reactivation evidence; record restart/reboot evidence;
+- formally mark **T-41 complete**; formally mark **IP-05 complete**;
+- list all relevant commit hashes;
+- record that **no** credentials, keys, or secrets appear in evidence.
+
+### 11A.2 Original-task → phase mapping
+
+| Original task (§11) | Consolidated phase | Commit grouping |
+|---------------------|--------------------|-----------------|
+| T-54 Angular model + badge | **Phase 1** | `feat(frontend): support device reactivation workflow` |
+| T-55 Angular destructive warning + refresh + 409 | **Phase 1** | *(same commit)* |
+| T-62 Agent simulated-Backend tests | **Phase 2** | `test(agent): verify revocation and reactivation contracts` |
+| T-63 Agent real-Backend contract tests | **Phase 2** | *(same commit; results reported distinctly)* |
+| T-65 Central Docker rebuild + migration verify | **Phase 3-A** (executed first) → work in **Phase 4** context | deployment (no source commit unless fixes arise) |
+| T-64 systemd/deployment + `install.sh` fix (T-41 carry-over) | **Phase 3-B / Phase 4** | deployment commit (Jetson) |
+| IP-02 **T-41** remaining Jetson deployment work | **Phase 4** (+ closure in **Phase 7**) | existing T-41 commit/evidence preserved |
+| T-66 Real-Jetson connected revocation | **Phase 5** | evidence-only |
+| T-68 Real-Jetson manual reactivation + restart/reboot | **Phase 5** | evidence-only |
+| T-67 Real-Jetson offline-then-reconnect revocation | **Phase 6** (kept separate) | evidence-only |
+| T-69 Documentation + MAC evidence | **Phase 7** | docs/evidence commit(s) |
+
+### 11A.3 Binding controls for the consolidated phases
+
+- Do **not** merge Backend and Agent production implementation into one unreviewed change (already satisfied — those are delivered as separate commits `a8ad221`…`284e114`).
+- Do **not** combine central deployment and Jetson deployment into one irreversible command sequence (Phase 3 order is mandatory).
+- Keep simulated and real-Backend test results **separately visible** (Phase 2).
+- Keep connected and offline/reconnect Jetson scenarios **separately visible** (Phase 5 vs Phase 6).
+- Use **exact-path staging**; never `git add .`; do **not** push.
+- No production code is modified by this planning amendment.
+
+### 11A.4 Acceptance-criteria preservation
+
+All §12 acceptance criteria (AC-1 … AC-29) are **unchanged**. Their task attributions still hold; the phases above are supersets of those tasks. Cross-reference of the affected ACs to their consolidating phase:
+
+| AC (unchanged text) | Original task(s) | Now verified within |
+|---------------------|------------------|---------------------|
+| AC-8 destructive warning before regeneration | T-55 | Phase 1 |
+| AC-9 shows *Reactivation required* (not Activated/Offline) | T-52, T-54, T-55 | Phase 1 (UI) |
+| AC-10 old secret never re-authenticates | T-51, T-52, T-53, T-63 | Phase 2 (contract) |
+| AC-11 new key reactivates exactly once | T-53, T-63, T-68 | Phase 2, Phase 5 |
+| AC-12 reactivation retains DeviceId + ActivatedAt | T-53, T-58, T-62, T-63, T-68 | Phase 2, Phase 5 |
+| AC-13 rotates secret + advances LastActivatedAt | T-53, T-58, T-62 | Phase 2 |
+| AC-14 successful reactivation returns to Activated/Operational | T-53, T-61, T-63, T-68 | Phase 2, Phase 5 |
+| AC-20 restart/reboot after reactivation loads identity | T-62, T-68 | Phase 2, Phase 5 |
+| AC-22 replacement key never auto-sent; only via `set-activation-key.sh` | T-57, T-59, T-63, T-64 | Phase 2, Phase 4, Phase 5 |
+| AC-24 connected Agent detects within one interval + timeout | T-59, T-66 | Phase 5 |
+| AC-25 Agent persists `ReactivationRequired`; restart cannot clear lock | T-58, T-61, T-62, T-68 | Phase 2, Phase 5 |
+| AC-26 operational components stop / remain prevented while locked | T-60, T-62, T-66 | Phase 2, Phase 5 |
+| AC-27 transport failure does not falsely revoke | T-59, T-61, T-62 | Phase 2 |
+| AC-28 disconnected Agent detects after reconnection | T-59, T-67 | Phase 6 |
+| AC-29 manual reactivation retains DeviceId/rotates secret/clears lock; key file deleted only after persistence; no auto-retry | T-58, T-61, T-62, T-68 | Phase 2, Phase 5 |
+| AC-18 no key/secret in logs/exceptions/URLs/argv/files | all tasks, T-69 | all phases, Phase 7 |
+
 ## 12. Acceptance Criteria → Task Traceability
 
 | AC | Summary | Task(s) |
@@ -251,4 +353,4 @@ No heartbeat/Online-Offline; no DeepStream/detection/alerts/commands/siren/WebRT
 
 ---
 
-*IP-05 — amended 2026-07-21 (Agent-lock expansion). T-48 delivered (`a8ad221`); T-49–T-69 not started; awaiting approval before T-49.*
+*IP-05 — amended 2026-07-21 (Agent-lock expansion); amended 2026-07-22 (T-61 approved; remaining T-54/T-55 + T-62–T-69 consolidated into 7 execution phases, §11A — acceptance criteria unchanged). Delivered: T-48–T-61 (`a8ad221` … `284e114`). Remaining: Phase 1 (T-54/T-55) → Phase 7 (T-69 + T-41/IP-05 closure). Planning amendment only; no production code changed; not committed.*
