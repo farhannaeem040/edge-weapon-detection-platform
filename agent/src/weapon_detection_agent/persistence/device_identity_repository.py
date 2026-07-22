@@ -33,7 +33,12 @@ from weapon_detection_agent.persistence.errors import (
     IdentityAlreadyExistsError,
     InvalidIdentityStateError,
 )
-from weapon_detection_agent.persistence.models import DeviceIdentity, parse_iso_utc, to_iso_utc
+from weapon_detection_agent.persistence.models import (
+    DeviceIdentity,
+    OperationalState,
+    parse_iso_utc,
+    to_iso_utc,
+)
 
 _LOGGER = logging.getLogger("weapon_detection_agent.persistence.device_identity")
 
@@ -41,14 +46,28 @@ _LOGGER = logging.getLogger("weapon_detection_agent.persistence.device_identity"
 # or later unit-of-work may inject its own, which is the seam the rollback test uses (§16.1).
 ConnectionOpener = Callable[[], AbstractContextManager[sqlite3.Connection]]
 
-_SELECT = "SELECT DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt FROM DeviceIdentity"
+_SELECT = (
+    "SELECT DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, OperationalState "
+    "FROM DeviceIdentity"
+)
 _INSERT = (
     "INSERT INTO DeviceIdentity "
-    "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt) "
-    "VALUES (1, ?, ?, ?, ?)"
+    "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, "
+    "LastActivatedAt, OperationalState) "
+    "VALUES (1, ?, ?, ?, ?, ?)"
 )
+# Successful (re)activation: store the new secret, advance LastActivatedAt, back to Operational
+# — retaining DeviceId and ActivatedAt (IP-05 §7). Setting OperationalState clears a lock.
 _UPDATE_SECRET = (
-    "UPDATE DeviceIdentity SET ProtectedSharedSecret = ?, LastActivatedAt = ? "
+    "UPDATE DeviceIdentity "
+    "SET ProtectedSharedSecret = ?, LastActivatedAt = ?, OperationalState = 'Operational' "
+    "WHERE SingletonGuard = 1"
+)
+# Confirmed revocation: atomically clear the secret and set the lock, preserving DeviceId and both
+# timestamps (IP-05 §7). Both column changes commit together.
+_MARK_REACTIVATION_REQUIRED = (
+    "UPDATE DeviceIdentity "
+    "SET ProtectedSharedSecret = NULL, OperationalState = 'ReactivationRequired' "
     "WHERE SingletonGuard = 1"
 )
 
@@ -98,13 +117,32 @@ class DeviceIdentityRepository:
                 "stored device identity has an invalid timestamp"
             ) from exc
 
-        identity = DeviceIdentity(
-            device_id=row["DeviceId"],
-            shared_secret=SecretStr(row["ProtectedSharedSecret"]),
-            activated_at=activated_at,
-            last_activated_at=last_activated_at,
+        # The secret is NULL exactly when locked (ReactivationRequired). The CHECK keeps the
+        # state/secret pair consistent; a corrupt state value or an inconsistent pair surfaces as a
+        # safe InvalidIdentityStateError (its message names neither value).
+        protected_secret = row["ProtectedSharedSecret"]
+        shared_secret = SecretStr(protected_secret) if protected_secret is not None else None
+        try:
+            operational_state = OperationalState(row["OperationalState"])
+            identity = DeviceIdentity(
+                device_id=row["DeviceId"],
+                shared_secret=shared_secret,
+                activated_at=activated_at,
+                last_activated_at=last_activated_at,
+                operational_state=operational_state,
+            )
+        except ValueError as exc:
+            raise InvalidIdentityStateError(
+                "stored device identity is in an inconsistent state"
+            ) from exc
+
+        _LOGGER.info(
+            "device_identity_loaded",
+            extra={
+                "device_id": identity.device_id,
+                "operational_state": identity.operational_state.value,
+            },
         )
-        _LOGGER.info("device_identity_loaded", extra={"device_id": identity.device_id})
         return identity
 
     def store(self, identity: DeviceIdentity) -> None:
@@ -115,7 +153,9 @@ class DeviceIdentityRepository:
         """
         activated_at = to_iso_utc(identity.activated_at)
         last_activated_at = to_iso_utc(identity.last_activated_at)
-        secret = identity.shared_secret.get_secret_value()
+        # A first-activation identity is always Operational with a secret (the model invariant), so
+        # this is non-None; the guard keeps the type honest and the schema CHECK is the backstop.
+        secret = identity.shared_secret.get_secret_value() if identity.shared_secret else None
 
         with self._open() as connection:
             with transaction(connection):
@@ -125,7 +165,14 @@ class DeviceIdentityRepository:
                 if existing is not None:
                     raise IdentityAlreadyExistsError("a device identity is already stored")
                 connection.execute(
-                    _INSERT, (identity.device_id, secret, activated_at, last_activated_at)
+                    _INSERT,
+                    (
+                        identity.device_id,
+                        secret,
+                        activated_at,
+                        last_activated_at,
+                        identity.operational_state.value,
+                    ),
                 )
 
         _LOGGER.info("device_identity_saved", extra={"device_id": identity.device_id})
@@ -133,11 +180,15 @@ class DeviceIdentityRepository:
     def replace_shared_secret(
         self, *, shared_secret: SecretStr, last_activated_at: datetime
     ) -> None:
-        """Atomically replace the stored shared secret, retaining the Device ID (§10, ADR-015).
+        """Persist a successful (re)activation: store the new secret and return to Operational.
 
-        Updates only ``ProtectedSharedSecret`` and ``LastActivatedAt`` in a single transaction, so a
-        failure mid-write leaves the prior secret intact (never torn or empty). Raises
-        :class:`InvalidIdentityStateError` if there is no identity to update.
+        Atomically updates ``ProtectedSharedSecret``, ``LastActivatedAt``, and ``OperationalState``
+        (to ``Operational``) in one transaction, **retaining the Device ID and ``ActivatedAt``**
+        (§10, ADR-015; IP-05 §7). If the identity was locked (``ReactivationRequired``), this clears
+        the lock; if it was already Operational, the state is simply reaffirmed. A failure mid-write
+        rolls back, leaving the prior state — a null secret and the lock — intact (never torn
+        or half-applied). Raises :class:`InvalidIdentityStateError` if there is no identity.
+        This method never generates or changes the Device ID.
         """
         updated_at = to_iso_utc(last_activated_at)
         secret = shared_secret.get_secret_value()
@@ -149,3 +200,25 @@ class DeviceIdentityRepository:
                     raise InvalidIdentityStateError("no stored device identity to update")
 
         _LOGGER.info("device_identity_secret_replaced")
+
+    def mark_reactivation_required(self) -> None:
+        """Atomically clear the revoked secret and lock the identity into ``ReactivationRequired``.
+
+        The persistence half of a confirmed credential revocation (IP-05 §7): in one transaction it
+        sets ``ProtectedSharedSecret = NULL`` and ``OperationalState = 'ReactivationRequired'``,
+        **preserving the Device ID and both timestamps**. Idempotent — calling on an already-locked
+        identity leaves it locked with a null secret and unchanged fields. A failure mid-
+        write rolls back, so the row is never left with the secret cleared but state unchanged (or
+        vice versa). Raises :class:`InvalidIdentityStateError` if there is no identity to lock.
+
+        This method only persists local state. It makes no Backend call, reads no HTTP response,
+        schedules nothing, stops no operational component, deletes no key file, and attempts no
+        activation — those belong to later tasks. No secret or row content is logged.
+        """
+        with self._open() as connection:
+            with transaction(connection):
+                cursor = connection.execute(_MARK_REACTIVATION_REQUIRED)
+                if cursor.rowcount != 1:
+                    raise InvalidIdentityStateError("no stored device identity to lock")
+
+        _LOGGER.info("device_identity_reactivation_required")

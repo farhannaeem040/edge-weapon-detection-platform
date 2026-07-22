@@ -20,8 +20,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 
 from pydantic import SecretStr
+
+
+class OperationalState(str, Enum):
+    """The Agent's local operational state (IP-05 T-58, §4.3, §7).
+
+    This is a Jetson-local concept, deliberately distinct from the Backend's
+    ``DeviceActivationStatus`` — the Agent has no ``DeviceIdentity`` row before first activation,
+    so there is no local ``Unactivated`` state, and ``Offline`` is reserved for future connectivity.
+
+    * ``OPERATIONAL`` — the stored credentials are usable; operational components may run.
+    * ``REACTIVATION_REQUIRED`` — the credentials were revoked (a Backend key regeneration, detected
+      by a confirmed ``401 INVALID_DEVICE_CREDENTIALS``); the local secret is cleared and it is
+      locked until it manually reactivates.
+
+    A ``str`` enum so its member ``value`` is exactly the text persisted in the ``OperationalState``
+    column ("Operational" / "ReactivationRequired") — the same values the schema's CHECK enforces.
+    """
+
+    OPERATIONAL = "Operational"
+    REACTIVATION_REQUIRED = "ReactivationRequired"
 
 
 def to_iso_utc(value: datetime) -> str:
@@ -49,19 +70,49 @@ def parse_iso_utc(text: str) -> datetime:
 
 @dataclass(frozen=True)
 class DeviceIdentity:
-    """The Agent's persistent local identity (one ``DeviceIdentity`` row).
+    """The Agent's persistent local identity (one ``DeviceIdentity`` row, schema v2).
 
     ``device_id`` is a public identifier — it travels in a header on operational requests and is
     shown in the Dashboard (FS-02 §5.4), so it appears normally. ``shared_secret`` is a credential
     and is held as a ``SecretStr`` so it can never leak through a ``repr``, ``str``, log line, or
-    exception. ``activated_at`` is set at first activation and never changes; ``last_activated_at``
-    advances on each (re)activation.
+    exception; it is ``None`` exactly when the identity is locked (``REACTIVATION_REQUIRED``), where
+    the revoked secret has been cleared (IP-05 §7). ``activated_at`` is set at first activation and
+    never changes; ``last_activated_at`` advances on reactivation. ``operational_state`` is the
+    local lock state.
+
+    The state/secret invariant (mirroring the schema's CHECK, IP-05 §7) is enforced here too, so
+    application code cannot construct an inconsistent identity: ``OPERATIONAL`` requires a secret,
+    ``REACTIVATION_REQUIRED`` requires no secret. ``operational_state`` defaults to ``OPERATIONAL``
+    (the first-activation and ordinary case), so the reactivation writer sets it explicitly.
     """
 
     device_id: str
-    shared_secret: SecretStr
+    shared_secret: SecretStr | None
     activated_at: datetime
     last_activated_at: datetime
+    operational_state: OperationalState = OperationalState.OPERATIONAL
+
+    def __post_init__(self) -> None:
+        if self.operational_state is OperationalState.OPERATIONAL and self.shared_secret is None:
+            raise ValueError("an Operational device identity must have a shared secret")
+        if (
+            self.operational_state is OperationalState.REACTIVATION_REQUIRED
+            and self.shared_secret is not None
+        ):
+            raise ValueError("a ReactivationRequired device identity must not have a shared secret")
+
+    @property
+    def can_authenticate(self) -> bool:
+        """True only when the identity is Operational and a stored secret is present (IP-05 §2.1).
+
+        A local, non-cryptographic gate: it says the credentials are *usable*, not that a secret is
+        correct. A locked (``REACTIVATION_REQUIRED``) identity — even one that, through inconsistent
+        data, still carried a secret — is never authenticatable, because the state is checked first.
+        """
+        return (
+            self.operational_state is OperationalState.OPERATIONAL
+            and self.shared_secret is not None
+        )
 
 
 @dataclass(frozen=True)

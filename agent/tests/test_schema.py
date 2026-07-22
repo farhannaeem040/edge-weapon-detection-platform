@@ -63,15 +63,16 @@ def test_initialize_creates_the_three_tables(tmp_path: Path) -> None:
 
     version = initialize_database(paths.database_file)
 
-    assert version == 1
+    assert version == CURRENT_SCHEMA_VERSION
     with open_connection(paths.database_file) as connection:
         assert _table_names(connection) == set(APPLICATION_TABLES)
 
 
-# --- 13-16. Exact columns, types, primary keys, nullability ------------------------------------
+# --- 13-16. Exact columns, types, primary keys, nullability (v2) --------------------------------
 
 
-def test_device_identity_columns_match_ip02(tmp_path: Path) -> None:
+def test_device_identity_columns_match_v2(tmp_path: Path) -> None:
+    # IP-05 §7: v2 makes ProtectedSharedSecret nullable and adds OperationalState.
     paths = _provisioned_paths(tmp_path)
     initialize_database(paths.database_file)
 
@@ -84,10 +85,14 @@ def test_device_identity_columns_match_ip02(tmp_path: Path) -> None:
         "ProtectedSharedSecret",
         "ActivatedAt",
         "LastActivatedAt",
+        "OperationalState",
     ]
     assert columns["SingletonGuard"]["type"] == "INTEGER"
     assert columns["SingletonGuard"]["pk"] == 1
-    for text_col in ("DeviceId", "ProtectedSharedSecret", "ActivatedAt", "LastActivatedAt"):
+    # ProtectedSharedSecret is now nullable; every other TEXT column stays NOT NULL.
+    assert columns["ProtectedSharedSecret"]["type"] == "TEXT"
+    assert columns["ProtectedSharedSecret"]["notnull"] == 0
+    for text_col in ("DeviceId", "ActivatedAt", "LastActivatedAt", "OperationalState"):
         assert columns[text_col]["type"] == "TEXT"
         assert columns[text_col]["notnull"] == 1  # NOT NULL
 
@@ -128,12 +133,15 @@ def test_singleton_guard_rejects_second_row(tmp_path: Path, table: str) -> None:
     paths = _provisioned_paths(tmp_path)
     initialize_database(paths.database_file)
 
-    columns = (
-        "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt)"
-        if table == "DeviceIdentity"
-        else "(SingletonGuard, ConfigJson, UpdatedAt)"
-    )
-    body = "'dev', 'sec', 't', 't'" if table == "DeviceIdentity" else "'{}', 't'"
+    if table == "DeviceIdentity":
+        columns = (
+            "(SingletonGuard, DeviceId, ProtectedSharedSecret, "
+            "ActivatedAt, LastActivatedAt, OperationalState)"
+        )
+        body = "'dev', 'sec', 't', 't', 'Operational'"
+    else:
+        columns = "(SingletonGuard, ConfigJson, UpdatedAt)"
+        body = "'{}', 't'"
 
     with open_connection(paths.database_file) as connection:
         connection.execute(f"INSERT INTO {table} {columns} VALUES (1, {body})")
@@ -147,12 +155,15 @@ def test_singleton_guard_rejects_non_one_value(tmp_path: Path, table: str) -> No
     paths = _provisioned_paths(tmp_path)
     initialize_database(paths.database_file)
 
-    columns = (
-        "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt)"
-        if table == "DeviceIdentity"
-        else "(SingletonGuard, ConfigJson, UpdatedAt)"
-    )
-    body = "'dev', 'sec', 't', 't'" if table == "DeviceIdentity" else "'{}', 't'"
+    if table == "DeviceIdentity":
+        columns = (
+            "(SingletonGuard, DeviceId, ProtectedSharedSecret, "
+            "ActivatedAt, LastActivatedAt, OperationalState)"
+        )
+        body = "'dev', 'sec', 't', 't', 'Operational'"
+    else:
+        columns = "(SingletonGuard, ConfigJson, UpdatedAt)"
+        body = "'{}', 't'"
 
     with open_connection(paths.database_file) as connection:
         # CHECK (SingletonGuard = 1) rejects any other guard value.
@@ -172,17 +183,17 @@ def test_no_speculative_indexes_created(tmp_path: Path) -> None:
             assert indexes == []
 
 
-# --- 18. Version recorded as 1 -----------------------------------------------------------------
+# --- 18. Version recorded as the current version (2) -------------------------------------------
 
 
-def test_schema_version_recorded_as_one(tmp_path: Path) -> None:
+def test_schema_version_recorded_as_current(tmp_path: Path) -> None:
     paths = _provisioned_paths(tmp_path)
     initialize_database(paths.database_file)
 
     with open_connection(paths.database_file) as connection:
-        assert read_schema_version(connection) == 1
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
         rows = connection.execute("SELECT Version FROM SchemaVersion").fetchall()
-        assert len(rows) == 1 and rows[0][0] == 1
+        assert len(rows) == 1 and rows[0][0] == CURRENT_SCHEMA_VERSION
 
 
 # --- 19-20. Idempotency; existing rows survive -------------------------------------------------
@@ -191,9 +202,9 @@ def test_schema_version_recorded_as_one(tmp_path: Path) -> None:
 def test_initialization_is_idempotent(tmp_path: Path) -> None:
     paths = _provisioned_paths(tmp_path)
 
-    assert initialize_database(paths.database_file) == 1
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
     # A second run against the same database is a safe no-op returning the same version.
-    assert initialize_database(paths.database_file) == 1
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
 
     with open_connection(paths.database_file) as connection:
         assert _table_names(connection) == set(APPLICATION_TABLES)
@@ -209,12 +220,14 @@ def test_existing_rows_survive_reinitialization(tmp_path: Path) -> None:
     with open_connection(paths.database_file) as connection:
         connection.execute(
             "INSERT INTO DeviceIdentity "
-            "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt) "
-            "VALUES (1, 'device-xyz', ?, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, "
+            "OperationalState) "
+            "VALUES (1, 'device-xyz', ?, '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00', 'Operational')",
             (FAKE_SECRET_SENTINEL,),
         )
 
-    # Re-initialize; the row must be preserved untouched.
+    # Re-initialize; the row must be preserved untouched (v2 → no-op).
     initialize_database(paths.database_file)
 
     with open_connection(paths.database_file) as connection:
@@ -251,7 +264,10 @@ def test_newer_schema_version_is_rejected(tmp_path: Path) -> None:
             initialize_schema(connection)
 
         # Nothing was modified: the newer version is left exactly as found.
-        assert connection.execute("SELECT Version FROM SchemaVersion").fetchone()[0] == 2
+        assert (
+            connection.execute("SELECT Version FROM SchemaVersion").fetchone()[0]
+            == CURRENT_SCHEMA_VERSION + 1
+        )
 
 
 # --- 24. Invalid schema-version state rejected -------------------------------------------------
@@ -347,7 +363,10 @@ def test_initialization_performs_no_network_io(
 
     monkeypatch.setattr(socket, "socket", _forbidden_socket)
 
-    assert initialize_database(paths_db := _provisioned_paths(tmp_path).database_file) == 1
+    assert (
+        initialize_database(paths_db := _provisioned_paths(tmp_path).database_file)
+        == CURRENT_SCHEMA_VERSION
+    )
     assert paths_db.exists()
 
 
@@ -365,8 +384,9 @@ def test_errors_and_logs_never_expose_stored_values(
     with open_connection(paths.database_file) as connection:
         connection.execute(
             "INSERT INTO DeviceIdentity "
-            "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt) "
-            "VALUES (1, 'device-xyz', ?, 't', 't')",
+            "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, "
+            "OperationalState) "
+            "VALUES (1, 'device-xyz', ?, 't', 't', 'Operational')",
             (FAKE_SECRET_SENTINEL,),
         )
         # Force an invalid state whose error message must not echo any stored value.
@@ -378,3 +398,156 @@ def test_errors_and_logs_never_expose_stored_values(
     assert FAKE_SECRET_SENTINEL not in caplog.text
     # The initialization log carried only structural events, never a row value.
     assert "device-xyz" not in caplog.text
+
+
+# --- IP-05 T-58: v2 constraints, nullable secret, and the v1 → v2 migration ---------------------
+
+_MIG_ACTIVATED_AT = "2026-01-01T00:00:00+00:00"
+_MIG_LAST_ACTIVATED_AT = "2026-02-02T00:00:00+00:00"
+
+_V2_INSERT = (
+    "INSERT INTO DeviceIdentity "
+    "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, "
+    "OperationalState) VALUES (?, ?, ?, ?, ?, ?)"
+)
+
+
+def _build_v1_database_with_row(database_file: Path, *, device_id: str, secret: str) -> None:
+    """Create a genuine schema-version-1 database (NOT NULL secret, no OperationalState) with a row.
+
+    Used to exercise the real v1 → v2 migration. Applies the shipped v1 DDL directly rather than
+    the current initializer (which would migrate straight to v2).
+    """
+    with open_connection(database_file) as connection:
+        schema_module._apply_version_1(connection)
+        connection.execute(
+            "INSERT INTO DeviceIdentity "
+            "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (device_id, secret, _MIG_ACTIVATED_AT, _MIG_LAST_ACTIVATED_AT),
+        )
+
+
+def test_reactivation_required_row_with_null_secret_is_accepted(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        connection.execute(_V2_INSERT, (1, "dev", None, "t", "t", "ReactivationRequired"))
+        row = connection.execute(
+            "SELECT ProtectedSharedSecret, OperationalState FROM DeviceIdentity"
+        ).fetchone()
+        assert row["ProtectedSharedSecret"] is None
+        assert row["OperationalState"] == "ReactivationRequired"
+
+
+@pytest.mark.parametrize(
+    ("secret", "state"),
+    [
+        (None, "Operational"),  # Operational must have a secret
+        ("sec", "ReactivationRequired"),  # ReactivationRequired must not have a secret
+        ("sec", "Bogus"),  # OperationalState must be one of the two permitted values
+    ],
+)
+def test_schema_check_constraints_reject_invalid_combinations(
+    tmp_path: Path, secret: str | None, state: str
+) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(_V2_INSERT, (1, "dev", secret, "t", "t", state))
+
+
+def test_migration_from_v1_preserves_data_and_assigns_operational(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v1_database_with_row(database_file, device_id="device-mig", secret=FAKE_SECRET_SENTINEL)
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 1
+
+    # Opening the v1 database with the current initializer migrates it to v2.
+    assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 2
+        columns = _columns(connection, "DeviceIdentity")
+        assert "OperationalState" in columns
+        assert columns["ProtectedSharedSecret"]["notnull"] == 0  # now nullable
+
+        row = connection.execute(
+            "SELECT DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, "
+            "OperationalState FROM DeviceIdentity"
+        ).fetchone()
+        assert row["DeviceId"] == "device-mig"
+        assert row["ProtectedSharedSecret"] == FAKE_SECRET_SENTINEL  # secret preserved
+        assert row["ActivatedAt"] == _MIG_ACTIVATED_AT
+        assert row["LastActivatedAt"] == _MIG_LAST_ACTIVATED_AT
+        assert row["OperationalState"] == "Operational"  # migrated row is Operational
+
+
+def test_failed_v1_to_v2_migration_rolls_back_and_preserves_v1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v1_database_with_row(database_file, device_id="device-rb", secret=FAKE_SECRET_SENTINEL)
+
+    # Append a malformed final step so the rebuild fails after creating/copying/dropping/renaming;
+    # SQLite's transactional DDL must roll the entire rebuild back.
+    monkeypatch.setattr(
+        schema_module,
+        "_MIGRATION_V1_TO_V2_STATEMENTS",
+        (*schema_module._MIGRATION_V1_TO_V2_STATEMENTS, "THIS IS NOT VALID SQL ("),
+    )
+
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        # SchemaVersion unchanged, no partial v2 table, original v1 table + row + secret intact.
+        assert read_schema_version(connection) == 1
+        assert "DeviceIdentity_v2" not in _table_names(connection)
+        columns = _columns(connection, "DeviceIdentity")
+        assert "OperationalState" not in columns
+        assert columns["ProtectedSharedSecret"]["notnull"] == 1  # still the v1 NOT NULL shape
+
+        row = connection.execute(
+            "SELECT DeviceId, ProtectedSharedSecret FROM DeviceIdentity"
+        ).fetchone()
+        assert row["DeviceId"] == "device-rb"
+        assert row["ProtectedSharedSecret"] == FAKE_SECRET_SENTINEL
+
+    # The migration error carries no row content or secret.
+    assert FAKE_SECRET_SENTINEL not in str(excinfo.value)
+    assert "device-rb" not in str(excinfo.value)
+
+
+def test_reopening_v2_is_a_no_op_that_does_not_modify_data(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    initialize_database(database_file)  # fresh → v2
+
+    with open_connection(database_file) as connection:
+        connection.execute(
+            _V2_INSERT,
+            (
+                1,
+                "device-idem",
+                FAKE_SECRET_SENTINEL,
+                _MIG_ACTIVATED_AT,
+                _MIG_LAST_ACTIVATED_AT,
+                "Operational",
+            ),
+        )
+
+    # Re-initializing an already-v2 database changes nothing.
+    assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 2
+        row = connection.execute(
+            "SELECT DeviceId, ProtectedSharedSecret, OperationalState FROM DeviceIdentity"
+        ).fetchone()
+        assert row["DeviceId"] == "device-idem"
+        assert row["ProtectedSharedSecret"] == FAKE_SECRET_SENTINEL
+        assert row["OperationalState"] == "Operational"

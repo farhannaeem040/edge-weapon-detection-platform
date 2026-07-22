@@ -1,23 +1,31 @@
-"""SQLite schema definition and versioned initialization (IP-02 T-35, §7, §9, §10).
+"""SQLite schema definition and versioned initialization (IP-02 T-35, §7; IP-05 T-58).
 
-This module defines the version-1 schema (IP-02 §7 verbatim) and the single, idempotent initializer
-that brings a database up to :data:`CURRENT_SCHEMA_VERSION`. The approach is deliberately small
-(IP-02 D-6, Engineering Principle 9): one integer version guarded by a ``SchemaVersion`` table, DDL
-applied inside one transaction, and no third-party migration framework — one version and three
-tables do not justify a dependency.
+This module defines the schema and the single, idempotent initializer that brings a database up to
+:data:`CURRENT_SCHEMA_VERSION`. The approach is deliberately small (IP-02 D-6, Engineering Principle
+9): one integer version guarded by a ``SchemaVersion`` table, DDL applied in one transaction, and
+no third-party migration framework — a handful of tables and one migration do not justify a
+dependency.
 
-What this module does **not** do (later tasks own these):
+**Versions.** Version 1 (IP-02 §7) created ``SchemaVersion`` / ``DeviceIdentity`` / ``ConfigCache``,
+with ``DeviceIdentity.ProtectedSharedSecret`` ``NOT NULL``. Version 2 (IP-05 §7) makes that column
+**nullable** and adds an ``OperationalState`` column with CHECK constraints enforcing the local
+credential-state invariant (``Operational`` ⇒ a secret is present; ``ReactivationRequired`` ⇒ the
+secret is ``NULL``). Because SQLite cannot relax a ``NOT NULL`` in place, the upgrade is a table
+rebuild.
 
-* It never reads or writes a ``DeviceIdentity`` or ``ConfigCache`` *record* — only the schema. The
-  repositories are T-36.
-* It seeds **no** rows. Initializing a fresh database records the schema version and nothing else;
-  no fake device identity or config-cache row is inserted (IP-02 §8).
-* It performs no directory creation, activation, Backend contact, or startup wiring.
+Forward-only and idempotent, appending steps rather than editing shipped ones:
 
-Forward-only and idempotent: version-1 DDL uses ``CREATE TABLE IF NOT EXISTS`` and is only applied
-when the database has no recorded version, so re-running against a current database is a safe no-op
-that preserves every existing row. A future version 2 appends a new migration step; it never edits a
-shipped one.
+* A **fresh** database applies the version-1 DDL and then migrates 1 → 2, so it ends at the latest
+  version through the same migration path an existing database takes (a fresh database's rebuild
+  copies zero rows). The shipped version-1 DDL is never edited.
+* An existing **version-1** database is migrated 1 → 2.
+* An existing **version-2** database is a safe no-op — no rebuild, no data change.
+* A **newer** version raises :class:`UnsupportedSchemaVersionError` without modifying anything.
+
+What this module does **not** do: read or write a ``DeviceIdentity``/``ConfigCache`` *record* (the
+repositories are T-36), seed any row, create directories, contact the Backend, or wire into startup.
+No value, row, or secret is ever written to a log or an error — at most a version number or a table
+name, neither of which is sensitive.
 """
 
 from __future__ import annotations
@@ -36,11 +44,12 @@ _LOGGER = logging.getLogger("weapon_detection_agent.persistence.schema")
 
 # The schema version this build understands. A database recording exactly this value is current; a
 # higher value is unsupported (this build must not touch it); anything else is an invalid state.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
-# Version-1 DDL, verbatim from IP-02 §7. Exposed at module scope so the schema is defined in exactly
-# one place (and so a test can substitute a deliberately failing step to prove rollback, IP-02 §16).
-# Each statement is idempotent (IF NOT EXISTS); the ordered tuple is applied as one transaction.
+# Version-1 DDL, verbatim from IP-02 §7 — retained unedited as the shipped version-1 schema. Each
+# statement is idempotent (IF NOT EXISTS); the ordered tuple is applied as one transaction. Exposed
+# at module scope so the schema is defined in exactly one place (and so a test can substitute a
+# deliberately failing step to prove rollback, IP-02 §16).
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS SchemaVersion (
@@ -66,6 +75,53 @@ SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
 )
 
 
+def _device_identity_v2_ddl(table_name: str) -> str:
+    """Return the ``CREATE TABLE`` DDL for the version-2 ``DeviceIdentity`` shape (IP-05 §7).
+
+    Defined once and used both for the migration's replacement table and (indirectly) for a fresh
+    database. ``table_name`` is a fixed literal (``DeviceIdentity`` or ``DeviceIdentity_v2``),
+    never caller input. ``ProtectedSharedSecret`` is nullable; ``OperationalState`` is limited to
+    the two permitted values; a table-level CHECK ties them together so the database rejects an
+    ``Operational`` row without a secret or a ``ReactivationRequired`` row with one.
+    """
+    return f"""
+    CREATE TABLE {table_name} (
+        SingletonGuard        INTEGER PRIMARY KEY CHECK (SingletonGuard = 1),
+        DeviceId              TEXT    NOT NULL,
+        ProtectedSharedSecret TEXT    NULL,
+        ActivatedAt           TEXT    NOT NULL,  -- ISO-8601 UTC
+        LastActivatedAt       TEXT    NOT NULL,  -- ISO-8601 UTC; updated on each reactivation
+        OperationalState      TEXT    NOT NULL
+            CHECK (OperationalState IN ('Operational', 'ReactivationRequired')),
+        CHECK (
+            (OperationalState = 'Operational' AND ProtectedSharedSecret IS NOT NULL)
+            OR
+            (OperationalState = 'ReactivationRequired' AND ProtectedSharedSecret IS NULL)
+        )
+    )
+    """
+
+
+# The version-1 → version-2 migration, as one ordered sequence applied inside a single transaction
+# (IP-05 §7). It rebuilds DeviceIdentity to make the secret nullable and add OperationalState,
+# copying the existing row as 'Operational'. Exposed at module scope so a test can substitute a
+# deliberately failing step to prove the whole rebuild rolls back (SQLite DDL is transactional).
+_MIGRATION_V1_TO_V2_STATEMENTS: tuple[str, ...] = (
+    _device_identity_v2_ddl("DeviceIdentity_v2"),
+    """
+    INSERT INTO DeviceIdentity_v2
+        (SingletonGuard, DeviceId, ProtectedSharedSecret,
+         ActivatedAt, LastActivatedAt, OperationalState)
+    SELECT SingletonGuard, DeviceId, ProtectedSharedSecret,
+           ActivatedAt, LastActivatedAt, 'Operational'
+    FROM DeviceIdentity
+    """,
+    "DROP TABLE DeviceIdentity",
+    "ALTER TABLE DeviceIdentity_v2 RENAME TO DeviceIdentity",
+    "UPDATE SchemaVersion SET Version = 2",
+)
+
+
 class UnsupportedSchemaVersionError(DatabaseInitializationError):
     """The database records a schema version newer than this build supports.
 
@@ -84,8 +140,8 @@ def initialize_database(database_path: str | Path) -> int:
     """Open ``database_path``, initialize/verify its schema, and close the connection.
 
     A convenience over :func:`initialize_schema` for callers that just want the database ready; the
-    startup workflow (T-39) will use it. Returns the resulting schema version. Creating no directory
-    and seeding no row, it only ensures the schema metadata exists.
+    startup workflow uses it. Returns the schema version. Creating no directory and seeding
+    no row, it only ensures the schema metadata exists.
     """
     with open_connection(database_path) as connection:
         return initialize_schema(connection)
@@ -94,9 +150,10 @@ def initialize_database(database_path: str | Path) -> int:
 def initialize_schema(connection: sqlite3.Connection) -> int:
     """Bring ``connection``'s database to :data:`CURRENT_SCHEMA_VERSION`, idempotently.
 
-    * **Fresh database** (no ``SchemaVersion`` table): create all version-1 tables and record
-      version 1, atomically. Returns 1.
-    * **Already current** (version 1): do nothing destructive; preserve all data. Returns 1.
+    * **Fresh database** (no ``SchemaVersion`` table): create the version-1 tables, then migrate
+      1 → 2, atomically at each step. Returns 2.
+    * **Version 1**: migrate 1 → 2. Returns 2.
+    * **Already current** (version 2): do nothing destructive; preserve all data. Returns 2.
     * **Newer version**: raise :class:`UnsupportedSchemaVersionError` without modifying anything.
     * **Invalid version state**: raise :class:`InvalidSchemaStateError` without modifying anything.
 
@@ -110,10 +167,14 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
             extra={"target_version": CURRENT_SCHEMA_VERSION},
         )
         _apply_version_1(connection)
+        version = 1
+
+    if version == 1:
         _LOGGER.info(
-            "database_schema_initialized",
-            extra={"schema_version": CURRENT_SCHEMA_VERSION},
+            "database_schema_migration_started", extra={"from_version": 1, "to_version": 2}
         )
+        _migrate_v1_to_v2(connection)
+        _LOGGER.info("database_schema_migrated", extra={"schema_version": CURRENT_SCHEMA_VERSION})
         return CURRENT_SCHEMA_VERSION
 
     if version == CURRENT_SCHEMA_VERSION:
@@ -126,9 +187,8 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
             f"{CURRENT_SCHEMA_VERSION}; refusing to downgrade or modify it"
         )
 
-    # A recorded version below the current one would be handled by forward migration steps once they
-    # exist; none are defined for the version-1 milestone, so an in-range lower value cannot be
-    # brought forward and is treated as an invalid state rather than silently rewritten.
+    # A version below 1 cannot occur (read_schema_version rejects it); this remains as a defensive
+    # guard against any state with no known migration path.
     raise InvalidSchemaStateError(
         f"database schema version {version} has no known migration path to {CURRENT_SCHEMA_VERSION}"
     )
@@ -160,7 +220,7 @@ def read_schema_version(connection: sqlite3.Connection) -> int | None:
 
 
 def _apply_version_1(connection: sqlite3.Connection) -> None:
-    """Create the version-1 tables and record version 1 in one atomic transaction (IP-02 §7, §10).
+    """Create the version-1 tables and record version 1 in one atomic transaction (IP-02 §7).
 
     Any failure mid-way rolls the whole thing back, so the database is never left with only some
     tables or a version row without its tables.
@@ -168,9 +228,21 @@ def _apply_version_1(connection: sqlite3.Connection) -> None:
     with transaction(connection):
         for statement in SCHEMA_V1_STATEMENTS:
             connection.execute(statement)
-        connection.execute(
-            "INSERT INTO SchemaVersion (Version) VALUES (?)", (CURRENT_SCHEMA_VERSION,)
-        )
+        connection.execute("INSERT INTO SchemaVersion (Version) VALUES (?)", (1,))
+
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    """Upgrade a version-1 database to version 2 in one atomic transaction (IP-05 §7).
+
+    Rebuilds DeviceIdentity to make ``ProtectedSharedSecret`` nullable and add ``OperationalState``
+    (defaulting the migrated row to ``'Operational'``), preserving the ``DeviceId``, secret, and
+    timestamps. Any failure at any step rolls the whole rebuild back — SQLite DDL is transactional —
+    leaving original version-1 table, its row, its secret, and ``SchemaVersion = 1`` untouched, and
+    no partial replacement table behind. No row content or secret is ever logged.
+    """
+    with transaction(connection):
+        for statement in _MIGRATION_V1_TO_V2_STATEMENTS:
+            connection.execute(statement)
 
 
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
