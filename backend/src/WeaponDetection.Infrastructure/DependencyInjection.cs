@@ -62,6 +62,11 @@ public static class DependencyInjection
         services.AddScoped<IDeviceService, DeviceService>();
         services.AddScoped<IBranchService, BranchService>();
 
+        // The device-credential validation service (IP-05 T-51/T-52). Depends on the (scoped)
+        // DbContext for its read-only lookup and the (singleton) IDeviceSecretProtector to recover the
+        // stored secret for a constant-time comparison, so it is scoped.
+        services.AddScoped<IDeviceCredentialValidator, DeviceCredentialValidator>();
+
         return services;
     }
 }
