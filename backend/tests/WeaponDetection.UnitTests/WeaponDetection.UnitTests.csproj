@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\WeaponDetection.Api\WeaponDetection.Api.csproj" />
     <ProjectReference Include="..\..\src\WeaponDetection.Application\WeaponDetection.Application.csproj" />
     <ProjectReference Include="..\..\src\WeaponDetection.Domain\WeaponDetection.Domain.csproj" />
     <ProjectReference Include="..\..\src\WeaponDetection.Infrastructure\WeaponDetection.Infrastructure.csproj" />

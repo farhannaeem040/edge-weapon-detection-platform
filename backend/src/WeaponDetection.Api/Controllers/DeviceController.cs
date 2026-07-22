@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using WeaponDetection.Api.Contracts;
+using WeaponDetection.Application.Exceptions;
 using WeaponDetection.Application.Interfaces;
 
 namespace WeaponDetection.Api.Controllers;
@@ -59,7 +60,18 @@ public class DeviceController : ControllerBase
     public async Task<IActionResult> RegenerateActivationKey(
         Guid branchId, CancellationToken cancellationToken)
     {
-        var result = await _deviceService.RegenerateActivationKeyAsync(branchId, cancellationToken);
+        ActivationKeyRegenerationResult? result;
+        try
+        {
+            result = await _deviceService.RegenerateActivationKeyAsync(branchId, cancellationToken);
+        }
+        catch (ActivationKeyRegenerationConflictException)
+        {
+            return Conflict(ApiResponse.Fail(
+                "ACTIVATION_KEY_REGENERATION_CONFLICT",
+                "Another activation key regeneration request completed concurrently. Refresh the device and try again."));
+        }
+
         if (result is null)
         {
             return NotFound(ApiResponse.Fail("NOT_FOUND", "Device not found."));
