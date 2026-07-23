@@ -25,6 +25,13 @@ readonly CONFIG_DIR="${ROOT_DIR}/config"
 readonly DATABASE_DIR="${ROOT_DIR}/database"
 readonly LOGS_DIR="${ROOT_DIR}/logs"
 readonly KEY_FILE="${CONFIG_DIR}/activation-key"
+# DeepStream layout (IP-06 T-70, FS-04 §8) — generic, profile-based. install.sh provisions the
+# directories and syncs the committed config templates only; it never writes models/<profile>/
+# model.engine (that is deploy-engine.sh's job alone, and it is never run automatically here).
+readonly MODELS_DIR="${ROOT_DIR}/models"
+readonly DEEPSTREAM_CONFIG_DIR="${CONFIG_DIR}/deepstream"
+readonly DEEPSTREAM_PROFILES_DIR="${DEEPSTREAM_CONFIG_DIR}/profiles"
+readonly DEEPSTREAM_LOGS_DIR="${LOGS_DIR}/deepstream"
 readonly ENV_DIR="/etc/weapon-detection-agent"
 readonly ENV_FILE="${ENV_DIR}/agent.env"
 readonly UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -39,6 +46,7 @@ readonly SCRIPT_DIR
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd -P)"
 readonly SRC_AGENT_DIR="${REPO_ROOT}/agent"
 readonly SRC_JETSON_DIR="${SCRIPT_DIR}"
+readonly SRC_DEEPSTREAM_DIR="${SCRIPT_DIR}/deepstream"
 
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARNING: %s\n' "$*" >&2; }
@@ -51,7 +59,7 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ "$(uname -s)" == "Linux" ]] || die "this installer targets Linux (the Jetson); got $(uname -s)"
 command -v systemctl >/dev/null 2>&1 || die "systemctl not found — systemd is required (ARCH-CON-002)"
 
-# --- 3/4. Ensure a compatible Python (>=3.10); install Python 3.11 via deadsnakes if missing ------
+# --- 3/4. Ensure a compatible Python (>=3.10); build CPython 3.11 from source if none is found ----
 find_compatible_python() {
     local cand
     for cand in python3.13 python3.12 python3.11 python3.10; do
@@ -162,6 +170,27 @@ install -d -m 0700 "${DATABASE_DIR}"
 install -d -m 0750 "${LOGS_DIR}"
 log "provisioned ${ROOT_DIR} layout (root 0750, config 0700, database 0700, logs 0750)"
 
+# --- 6a. DeepStream layout (IP-06 T-70, FS-04 §8) — parent directories only; deploy-engine.sh
+# creates a specific models/<profile>/ subdirectory, never install.sh.
+install -d -m 0750 "${MODELS_DIR}"
+install -d -m 0750 "${DEEPSTREAM_CONFIG_DIR}"
+install -d -m 0750 "${DEEPSTREAM_PROFILES_DIR}"
+install -d -m 0750 "${DEEPSTREAM_LOGS_DIR}"
+log "provisioned DeepStream layout (models/, config/deepstream/, logs/deepstream/, all 0750)"
+
+# Sync the committed, profile-agnostic application config and every committed profile's
+# infer-config.txt/labels.txt/manifest.env. Never touches models/<profile>/model.engine (not synced
+# from here — only deploy-engine.sh writes an engine, and it is never invoked automatically).
+if [[ -d "${SRC_DEEPSTREAM_DIR}" ]]; then
+    rsync -a --exclude='*.engine' --exclude='*.onnx' --exclude='*.mp4' --exclude='*.mkv' \
+        "${SRC_DEEPSTREAM_DIR}/deepstream-app.txt" "${DEEPSTREAM_CONFIG_DIR}/deepstream-app.txt"
+    rsync -a --exclude='*.engine' --exclude='*.onnx' --exclude='*.mp4' --exclude='*.mkv' \
+        "${SRC_DEEPSTREAM_DIR}/profiles/" "${DEEPSTREAM_PROFILES_DIR}/"
+    log "synced DeepStream config templates to ${DEEPSTREAM_CONFIG_DIR}"
+else
+    warn "no ${SRC_DEEPSTREAM_DIR} found; skipping DeepStream config sync"
+fi
+
 # --- 8. Copy Agent source to the installation directory ------------------------------------------
 [[ -f "${SRC_AGENT_DIR}/pyproject.toml" ]] || die "Agent source not found at ${SRC_AGENT_DIR} (expected pyproject.toml)"
 install -d -m 0755 "${APP_DIR}"
@@ -214,6 +243,7 @@ chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${ROOT_DIR}"
 chmod 0750 "${ROOT_DIR}"
 chmod 0700 "${CONFIG_DIR}" "${DATABASE_DIR}"
 chmod 0750 "${LOGS_DIR}"
+chmod 0750 "${MODELS_DIR}" "${DEEPSTREAM_CONFIG_DIR}" "${DEEPSTREAM_PROFILES_DIR}" "${DEEPSTREAM_LOGS_DIR}"
 # Preserve a 0600 activation-key file if one is staged for a pending first activation.
 [[ -e "${KEY_FILE}" ]] && chmod 0600 "${KEY_FILE}" && chown "${SERVICE_USER}:${SERVICE_GROUP}" "${KEY_FILE}"
 # Re-assert the env file's mode/ownership on every run (self-healing), even though its CONTENT is

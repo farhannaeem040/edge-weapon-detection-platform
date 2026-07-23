@@ -24,3 +24,20 @@ mcp.json
 *.db-journal
 *.db-wal
 *.db-shm
+
+# DeepStream model/media artifacts (IP-06, FS-04 §8.1). These are deployment artifacts, not source:
+# TensorRT engines are large and device/runtime-specific, ONNX exports are large model assets, and
+# MP4/MKV are test videos and DeepStream output recordings. Only small text configs, labels, and
+# manifests (deployment/jetson/deepstream/) are committed.
+*.engine
+*.onnx
+*.mp4
+*.mkv
+
+# A profile manifest is small metadata (checksums, dimensions, labels) — not a secret — and must
+# stay tracked even though its filename ends in ".env" like the real secret env files above.
+!deployment/jetson/deepstream/**/manifest.env
+
+# The local, untracked reference copy of the manually-proven DeepStream experiment. Never committed
+# — see deployment/jetson/deepstream/ for the small, managed, committed equivalents.
+/sampleFilesFoeDeepstream/

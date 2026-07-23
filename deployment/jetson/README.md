@@ -21,6 +21,7 @@ alerting, heartbeat, health endpoint, command API, siren, WebRTC, or configurati
 | `update.sh` | Update code + venv, preserving all data |
 | `uninstall.sh` | Remove service/app; preserves data unless `--purge` |
 | `deploy.ps1` | Windows one-command deploy over SSH |
+| `deepstream/` | DeepStream process supervision (IP-06) — generic, profile-based model deployment (`deploy-engine.sh`), verification (`verify-deepstream.sh`), and config templates. See `deepstream/README.md`. |
 
 ## Prerequisites
 
@@ -106,10 +107,22 @@ WDA_ROOT_PATH=/opt/weapon-detection
 WDA_HTTP_TIMEOUT_SECONDS=10
 WDA_LOG_LEVEL=INFO
 WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS=30
+
+# DeepStream process supervision (IP-06) — defaults shown; only override if the layout differs.
+# WDA_DEEPSTREAM_ENABLED defaults to false: DeepStream never launches until explicitly enabled here.
+WDA_DEEPSTREAM_ENABLED=false
+WDA_DEEPSTREAM_EXECUTABLE_PATH=/usr/bin/deepstream-app
+WDA_DEEPSTREAM_CONFIG_PATH=/opt/weapon-detection/config/deepstream/deepstream-app.txt
+WDA_DEEPSTREAM_WORKING_DIRECTORY=/opt/weapon-detection
+WDA_DEEPSTREAM_STOP_TIMEOUT_SECONDS=10
+WDA_DEEPSTREAM_RESTART_POLICY=none
+WDA_DEEPSTREAM_LOG_PATH=/opt/weapon-detection/logs/deepstream/deepstream.log
+WDA_DEEPSTREAM_MODEL_PROFILE=yolov4-fp16
 ```
 
 **Never** put `WDA_ACTIVATION_KEY` or any secret here — the env file lands in the process
-environment/journald. The Activation Key is provisioned separately (below).
+environment/journald. The Activation Key is provisioned separately (below). See
+`deepstream/README.md` for deploying a profile's engine and switching the active profile.
 
 ## Activation Key provisioning
 
