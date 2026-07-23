@@ -1,0 +1,67 @@
+# Weapon Detection Jetson Agent — systemd unit (IP-02 T-41, §17).
+#
+# systemd manages ONLY the Agent, never DeepStream (ARCH-CON-002, ADR-006). This unit runs the
+# already-delivered FastAPI Agent as an unprivileged service, under exactly one Uvicorn worker
+# (ADR-010), bound to loopback only (the Agent exposes no operational endpoints — OI-3), and never
+# carries a secret (the Activation Key is provisioned out-of-band; see set-activation-key.sh).
+#
+# Installed to /etc/systemd/system/weapon-detection-agent.service by install.sh.
+
+[Unit]
+Description=Weapon Detection Jetson Agent
+Documentation=file:/opt/weapon-detection/agent/deployment/jetson/README.md
+# Start after the network is up and Tailscale is running. The first-boot activation call needs the
+# Backend reachable over Tailscale; subsequent restarts start from local state and do not require it.
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=weapon-detection
+Group=weapon-detection
+WorkingDirectory=/opt/weapon-detection
+
+# Non-secret bootstrap configuration only (WDA_BACKEND_BASE_URL, WDA_ROOT_PATH, timeout, log level).
+# systemd reads this as root before dropping privileges, so it stays root-owned 0600. It MUST NOT
+# contain WDA_ACTIVATION_KEY or any secret (§8) — the key lives in the 0600 config/activation-key
+# file owned by the service user.
+EnvironmentFile=/etc/weapon-detection-agent/agent.env
+
+# Exactly one Uvicorn worker (ADR-010, MAC-10); loopback bind; no --reload. The interpreter is the
+# installed virtual environment's Python (CPython 3.11 built from source on this JetPack 5 /
+# Ubuntu 20.04 aarch64 device, since system Python is 3.8 — a recorded environment decision; see README).
+ExecStart=/opt/weapon-detection/venv/bin/python -m uvicorn weapon_detection_agent.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+# Restart on failure is what makes ADR-007's future Restart-Agent command work (the command itself is
+# not implemented here). A clean exit (0) is not restarted.
+Restart=on-failure
+RestartSec=5
+
+# Clean shutdown: the lifespan handles SIGTERM, closing SQLite and the HTTP client. Give it a bounded
+# window before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Restrictive file-creation mask so any file the Agent writes (logs, the SQLite DB) is owner-only.
+UMask=0077
+
+# Logs go to the journal (journalctl -u weapon-detection-agent). The Agent also writes a structured
+# JSON log to /opt/weapon-detection/logs/agent.log.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weapon-detection-agent
+
+# --- Conservative hardening (OI-1) ---------------------------------------------------------------
+# Only hardening that will NOT break a future NVIDIA/DeepStream/camera/subprocess milestone is
+# applied. Device access (/dev), private namespaces that would hide the GPU/cameras, and syscall
+# filters are DELIBERATELY NOT set here — the Agent-bootstrap/DeepStream feature (OI-1) owns that
+# decision. The Agent writes only under /opt/weapon-detection.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/weapon-detection
+# Deliberately NOT set (would break future device/DeepStream access): PrivateDevices, PrivateTmp,
+# ProtectKernelModules, RestrictNamespaces, SystemCallFilter, DeviceAllow.
+
+[Install]
+WantedBy=multi-user.target
