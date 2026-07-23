@@ -73,9 +73,9 @@ a deliberate, manual operator action — the Agent never decides this for itself
 
 ## Local-video validation procedure (Phase 1)
 
-1. Stage a test video at the path `deepstream-app.txt`'s `[source0] uri=` references (default:
-   `/opt/weapon-detection/test-media/test_video.mp4` — create that directory and copy a video in;
-   never commit the video itself).
+1. Stage a test video with `deploy-sample-video.sh` (installs it at
+   `/opt/weapon-detection/samples/deepstream/input.mp4`, the path `deepstream-app.txt`'s
+   `[source0] uri=` references — never commit the video itself).
 2. Run static checks: `sudo .../deepstream/verify-deepstream.sh`.
 3. Run a real bounded launch: `sudo .../deepstream/verify-deepstream.sh --run --timeout=60`.
 4. Confirm the Agent itself supervises it correctly: start the real Agent (`systemctl start

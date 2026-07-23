@@ -13,30 +13,23 @@ gpu-id=0
 [source0]
 enable=1
 type=3
-# Phase 1 (IP-06): a local video file, staged manually by the operator before running the T-76/T-77
-# validation. Phase 2 changes only this line to an RTSP uri= — no Agent code change.
-uri=file:///opt/weapon-detection/test-media/test_video.mp4
+# Phase 1 (IP-06): a local video file, staged via deploy-sample-video.sh before running the T-77
+# validation (never committed — see .gitignore). Phase 2 changes only this line to an RTSP uri= —
+# no Agent code change.
+uri=file:///opt/weapon-detection/samples/deepstream/input.mp4
 num-sources=1
 gpu-id=0
 cudadec-memtype=0
 
+# A non-persistent sink (fakesink) — deliberate for the Agent-managed lifecycle test: with
+# [tests] file-loop=1 below, a file/encode sink here would grow without bound and could fill the
+# Jetson's disk over an unattended run. The manually generated output_final.mkv/output_v4.mp4 from
+# the original manual proof (FS-04 §6) remain the evidence that inference itself is correct; this
+# config only needs to prove the Agent starts/stops/supervises the process correctly.
 [sink0]
 enable=1
-type=2
+type=1
 sync=0
-source-id=0
-gpu-id=0
-nvbuf-memory-type=0
-
-[sink1]
-enable=1
-type=3
-container=1
-codec=1
-enc-type=0
-sync=0
-bitrate=4000000
-output-file=/opt/weapon-detection/logs/deepstream/output.mp4
 source-id=0
 
 [osd]
@@ -86,4 +79,7 @@ enable-batch-process=1
 display-tracking-id=1
 
 [tests]
-file-loop=0
+# Loop the local video indefinitely for the Agent-managed lifecycle test (start/stop/restart
+# verification needs DeepStream to still be running when the Agent acts, not to have already hit
+# end-of-stream and exited on its own).
+file-loop=1
