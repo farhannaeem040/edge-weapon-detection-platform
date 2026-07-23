@@ -26,6 +26,14 @@ _WDA_VARS = (
     "WDA_HTTP_TIMEOUT_SECONDS",
     "WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS",
     "WDA_LOG_LEVEL",
+    "WDA_DEEPSTREAM_ENABLED",
+    "WDA_DEEPSTREAM_EXECUTABLE_PATH",
+    "WDA_DEEPSTREAM_CONFIG_PATH",
+    "WDA_DEEPSTREAM_WORKING_DIRECTORY",
+    "WDA_DEEPSTREAM_STOP_TIMEOUT_SECONDS",
+    "WDA_DEEPSTREAM_RESTART_POLICY",
+    "WDA_DEEPSTREAM_LOG_PATH",
+    "WDA_DEEPSTREAM_MODEL_PROFILE",
 )
 
 VALID_URL = "http://localhost:5230"
@@ -153,6 +161,18 @@ def test_optional_defaults_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.credential_validation_interval_seconds == 30
     assert settings.log_level == "INFO"
     assert settings.activation_key is None
+    assert settings.deepstream_enabled is False
+    assert settings.deepstream_executable_path == Path("/usr/bin/deepstream-app")
+    assert settings.deepstream_config_path == Path(
+        "/opt/weapon-detection/config/deepstream/deepstream-app.txt"
+    )
+    assert settings.deepstream_working_directory == Path("/opt/weapon-detection")
+    assert settings.deepstream_stop_timeout_seconds == 10.0
+    assert settings.deepstream_restart_policy == "none"
+    assert settings.deepstream_log_path == Path(
+        "/opt/weapon-detection/logs/deepstream/deepstream.log"
+    )
+    assert settings.deepstream_model_profile == "yolov4-fp16"
 
 
 def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,6 +183,13 @@ def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("WDA_HTTP_TIMEOUT_SECONDS", "3.5")
     monkeypatch.setenv("WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS", "45")
     monkeypatch.setenv("WDA_LOG_LEVEL", "debug")
+    monkeypatch.setenv("WDA_DEEPSTREAM_ENABLED", "true")
+    monkeypatch.setenv("WDA_DEEPSTREAM_EXECUTABLE_PATH", "/usr/local/bin/deepstream-app")
+    monkeypatch.setenv("WDA_DEEPSTREAM_CONFIG_PATH", "/tmp/wda-test-root/deepstream-app.txt")
+    monkeypatch.setenv("WDA_DEEPSTREAM_WORKING_DIRECTORY", "/tmp/wda-test-root")
+    monkeypatch.setenv("WDA_DEEPSTREAM_STOP_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("WDA_DEEPSTREAM_LOG_PATH", "/tmp/wda-test-root/deepstream.log")
+    monkeypatch.setenv("WDA_DEEPSTREAM_MODEL_PROFILE", "some-other-profile")
 
     settings = load_settings()
 
@@ -171,6 +198,13 @@ def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.credential_validation_interval_seconds == 45
     # The level name is accepted case-insensitively and stored upper-cased.
     assert settings.log_level == "DEBUG"
+    assert settings.deepstream_enabled is True
+    assert settings.deepstream_executable_path == Path("/usr/local/bin/deepstream-app")
+    assert settings.deepstream_config_path == Path("/tmp/wda-test-root/deepstream-app.txt")
+    assert settings.deepstream_working_directory == Path("/tmp/wda-test-root")
+    assert settings.deepstream_stop_timeout_seconds == 5.0
+    assert settings.deepstream_log_path == Path("/tmp/wda-test-root/deepstream.log")
+    assert settings.deepstream_model_profile == "some-other-profile"
 
 
 def test_invalid_log_level_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,3 +350,107 @@ def test_validation_error_does_not_expose_secret_or_values(
     assert "SUPERSECRETVALUE" not in message
     assert "rejected-host" not in message
     assert "WDA_BACKEND_BASE_URL" in message
+
+
+# --- 15. DeepStream settings (IP-06 T-71) --------------------------------------------------------
+
+
+def test_deepstream_enabled_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+
+    assert load_settings().deepstream_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("true", True), ("false", False), ("1", True), ("0", False)]
+)
+def test_deepstream_enabled_from_environment(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_ENABLED", value)
+
+    assert load_settings().deepstream_enabled is expected
+
+
+def test_deepstream_enabled_constructor_override_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_ENABLED", "false")
+
+    assert load_settings(deepstream_enabled=True).deepstream_enabled is True
+
+
+def test_deepstream_restart_policy_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_RESTART_POLICY", "none")
+
+    assert load_settings().deepstream_restart_policy == "none"
+
+
+@pytest.mark.parametrize("value", ["always", "on-failure", "", "None", "NONE"])
+def test_invalid_deepstream_restart_policy_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # Phase 1 accepts exactly "none" (case-sensitive) — the closed set IP-06 T-71 specifies.
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_RESTART_POLICY", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DEEPSTREAM_RESTART_POLICY" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["yolov4-fp16", "resnet18-int8", "a", "profile-2"])
+def test_valid_deepstream_model_profile_names_are_accepted(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_MODEL_PROFILE", value)
+
+    assert load_settings().deepstream_model_profile == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "YOLOv4-FP16",  # uppercase
+        "-yolov4",  # leading hyphen
+        "../etc",  # path traversal
+        "yolov4/fp16",  # path separator
+        "yolov4 fp16",  # whitespace
+        "",  # empty
+        "profile;rm -rf",  # shell metacharacter
+    ],
+)
+def test_unsafe_deepstream_model_profile_names_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_MODEL_PROFILE", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DEEPSTREAM_MODEL_PROFILE" in str(excinfo.value)
+
+
+def test_non_positive_deepstream_stop_timeout_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_STOP_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(ConfigurationError):
+        load_settings()
+
+
+def test_deepstream_settings_constructor_override_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DEEPSTREAM_MODEL_PROFILE", "env-profile")
+
+    settings = load_settings(deepstream_model_profile="constructor-profile")
+
+    assert settings.deepstream_model_profile == "constructor-profile"
