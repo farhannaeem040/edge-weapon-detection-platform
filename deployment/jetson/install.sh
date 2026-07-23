@@ -163,9 +163,14 @@ else
         --comment "Weapon Detection Agent" "${SERVICE_USER}"
     log "created system user ${SERVICE_USER} (no login shell, no password)"
 fi
-# NOTE: the service user is deliberately NOT added to 'video'/'render' here. This milestone's Agent
-# uses no camera or GPU (DeepStream is OI-1/excluded). The future DeepStream milestone adds that
-# membership when device access is actually justified (§6, least privilege).
+# DeepStream (IP-06) needs GPU/NVMM device access: /dev/nvmap, /dev/nvhost-* are root:video 0660 on
+# this Jetson (confirmed against the interactive user's own working group membership) — without
+# 'video', deepstream-app fails immediately with "NvRmMemInitNvmap failed: Permission denied" /
+# "cuInit failed". 'render' is added alongside it for the same class of GPU access on other device
+# node layouts. Idempotent and safe to re-run; a no-op once membership already exists. This
+# supersedes the earlier "deliberately not added" decision from before DeepStream was in scope.
+usermod -aG video,render "${SERVICE_USER}"
+log "ensured ${SERVICE_USER} is a member of video,render (required for DeepStream GPU device access)"
 
 # --- 6. Directory layout with ADR-008 modes (§8) -------------------------------------------------
 install -d -m 0750 "${ROOT_DIR}"
