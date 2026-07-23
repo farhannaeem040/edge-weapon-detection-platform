@@ -22,14 +22,16 @@ components, close the owned validation client), then closes the owned Backend cl
 runtime reference. It contacts no Backend and deletes no local state (§12.4).
 
 Dependencies are injected through :func:`create_lifespan` (a settings loader, a clock, a Backend
-client factory, and a validation client factory) so tests substitute fakes without a real Backend,
-network, or ``/opt``. This module adds no HTTP route and starts no DeepStream/detection component.
+client factory, a validation client factory, and an operational-components factory) so tests
+substitute fakes without a real Backend, network, or ``/opt``. This module adds no HTTP route.
+``components_factory`` defaults to an empty tuple (IP-05 T-62+); IP-06 T-74 adds DeepStream
+supervision only through main.py's explicit override, never through this module's own default.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +48,7 @@ from weapon_detection_agent.logging.configuration import configure_logging
 from weapon_detection_agent.persistence.config_cache_repository import ConfigCacheRepository
 from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
 from weapon_detection_agent.persistence.schema import initialize_database
+from weapon_detection_agent.runtime.operational_components import OperationalComponent
 from weapon_detection_agent.runtime.state import RUNTIME_STATE_ATTR, AgentRuntime
 from weapon_detection_agent.runtime.supervisor import AgentRuntimeSupervisor
 from weapon_detection_agent.validation.client import CredentialValidationClient
@@ -56,6 +59,7 @@ SettingsLoader = Callable[[], AgentSettings]
 Clock = Callable[[], datetime]
 BackendClientFactory = Callable[[AgentSettings], BackendActivationClient]
 ValidationClientFactory = Callable[[AgentSettings], CredentialValidationClient]
+ComponentsFactory = Callable[[AgentSettings], Sequence[OperationalComponent]]
 
 
 def default_clock() -> datetime:
@@ -81,6 +85,20 @@ def default_validation_client_factory(settings: AgentSettings) -> CredentialVali
     )
 
 
+def default_components_factory(settings: AgentSettings) -> Sequence[OperationalComponent]:
+    """No operational components by default (IP-05 T-62+ default; unchanged by IP-06 T-74).
+
+    This is the default every existing simulated-integration and real-Backend-contract test already
+    exercises (they construct ``create_app()``/``create_lifespan()`` with no components override).
+    IP-06 adds DeepStream supervision only through an explicit override
+    (``weapon_detection_agent.deepstream.process_manager.default_deepstream_components_factory``)
+    that the real production entrypoint (``main.py``) passes in — this default stays ``()`` so no
+    existing test's behavior changes as a side effect of that feature.
+    """
+    del settings  # unused — the empty default takes no settings-dependent action
+    return ()
+
+
 @dataclass
 class _StartedRuntime:
     """The owned resources returned by :func:`_start` so :func:`_shutdown` can dispose of them."""
@@ -95,12 +113,14 @@ def create_lifespan(
     clock: Clock = default_clock,
     backend_client_factory: BackendClientFactory = default_backend_client_factory,
     validation_client_factory: ValidationClientFactory = default_validation_client_factory,
+    components_factory: ComponentsFactory = default_components_factory,
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     """Build the FastAPI lifespan context manager with injectable dependencies.
 
     The defaults are the real components; tests pass a settings loader, a fixed clock, a fake
     Backend client factory, and a fake validation client factory to exercise every branch without a
-    real Backend, network, or ``/opt`` root.
+    real Backend, network, or ``/opt`` root. ``components_factory`` defaults to ``()`` (IP-06
+    T-74) — only the real production entrypoint overrides it to add DeepStream supervision.
     """
 
     @asynccontextmanager
@@ -111,6 +131,7 @@ def create_lifespan(
             clock=clock,
             backend_client_factory=backend_client_factory,
             validation_client_factory=validation_client_factory,
+            components_factory=components_factory,
         )
         try:
             yield
@@ -127,6 +148,7 @@ async def _start(
     clock: Clock,
     backend_client_factory: BackendClientFactory,
     validation_client_factory: ValidationClientFactory,
+    components_factory: ComponentsFactory = default_components_factory,
 ) -> _StartedRuntime:
     """Run the foundation steps, drive the supervisor's startup, and publish the runtime.
 
@@ -172,7 +194,7 @@ async def _start(
             key_resolver=resolver,
             activation_service=service,
             validation_client=validation_client,
-            components=(),  # no operational components exist yet (T-62+)
+            components=tuple(components_factory(settings)),  # () by default (IP-06 T-74)
         )
         await supervisor.startup()
 

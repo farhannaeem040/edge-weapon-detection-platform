@@ -20,6 +20,7 @@ configuration failure (IP-02 §6, ARCH-001 §15.6).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -37,6 +38,19 @@ ALLOWED_URL_SCHEMES = ("http", "https")
 # same set and normalizer via `normalize_log_level` so there is exactly one definition of a valid
 # level across the settings model and the logging configuration (IP-02 §10).
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
+
+# The restart policies WDA_DEEPSTREAM_RESTART_POLICY accepts. Deliberately a closed set of one
+# value for Phase 1 (IP-06 T-71) — auto-restart-on-crash is a later-phase decision; an unexpected
+# DeepStream exit is detected and logged (T-73) but never auto-restarted, so a real failure loop is
+# never masked.
+VALID_DEEPSTREAM_RESTART_POLICIES = frozenset({"none"})
+
+# The safe-name pattern shared by WDA_DEEPSTREAM_MODEL_PROFILE and deploy-engine.sh's own
+# profile-name validation (IP-06 T-70/T-71) — lowercase alphanumeric, optionally hyphenated, never
+# starting with a hyphen. This is a naming convention only: DeepStreamProcessManager never reads
+# this field (T-72's
+# genericness requirement) — it exists for observability and future phases only.
+_PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def normalize_log_level(value: str) -> str:
@@ -105,6 +119,51 @@ class AgentSettings(BaseSettings):
     # Logging level name; consumed by the logging foundation (T-33).
     log_level: str = "INFO"
 
+    # --- DeepStream process supervision (IP-06 T-71). DeepStreamProcessManager reads only six of
+    # these (never deepstream_enabled or deepstream_model_profile — see each field's own comment).
+    # None of these fields — including the executable and config paths — are checked for existence
+    # here; settings loading performs no filesystem I/O (same rule as root_path above).
+
+    # The rollout kill switch for this feature. Defaults to False (disabled): a fresh deployment
+    # never launches DeepStream until an operator deliberately opts in, even on the real Jetson.
+    # Read only by main.py's composition wiring, never by DeepStreamProcessManager itself — when
+    # False, no DeepStreamProcessManager is even constructed, so no component is registered with the
+    # supervisor at all (a disabled feature is the same as if it did not exist, not merely "off").
+    deepstream_enabled: bool = False
+
+    # The deepstream-app binary. Absolute path, existence checked only when DeepStreamProcessManager
+    # actually starts it (T-73) — not here, so a CI/dev machine without DeepStream installed can
+    # still construct valid settings.
+    deepstream_executable_path: Path = Path("/usr/bin/deepstream-app")
+
+    # The single, profile-agnostic DeepStream application config DeepStreamProcessManager launches
+    # with `-c <this path>`. Which model actually runs is decided entirely by this file's own
+    # content (assembled at deployment time by deploy-engine.sh/install.sh) — never by Agent code.
+    deepstream_config_path: Path = Path(
+        "/opt/weapon-detection/config/deepstream/deepstream-app.txt"
+    )
+
+    # The explicit `cwd=` passed to the DeepStream subprocess — never inherited from the Agent's own
+    # ambient working directory.
+    deepstream_working_directory: Path = Path("/opt/weapon-detection")
+
+    # Graceful-stop budget in seconds: SIGTERM, then wait up to this long before SIGKILL (T-72).
+    # Kept shorter than the systemd unit's own TimeoutStopSec=20 so the Agent's own stop completes
+    # with margin inside systemd's budget.
+    deepstream_stop_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    # Closed to "none" for Phase 1 (see VALID_DEEPSTREAM_RESTART_POLICIES above).
+    deepstream_restart_policy: str = "none"
+
+    # Where DeepStream's own stdout/stderr are captured (T-73) — a distinct file from the Agent's
+    # own structured JSON log; DeepStream's output format is foreign and kept separate on purpose.
+    deepstream_log_path: Path = Path("/opt/weapon-detection/logs/deepstream/deepstream.log")
+
+    # Which model profile is nominally active (IP-06 T-71 amendment). Observability/future-phase use
+    # only (e.g. a later metadata-extraction phase needing a profile's labels file) — deliberately
+    # never read by DeepStreamProcessManager, which only ever sees deepstream_config_path.
+    deepstream_model_profile: str = "yolov4-fp16"
+
     @field_validator("backend_base_url")
     @classmethod
     def _validate_backend_base_url(cls, value: str) -> str:
@@ -132,6 +191,31 @@ class AgentSettings(BaseSettings):
     def _validate_log_level(cls, value: str) -> str:
         """Accept a standard logging level name, case-insensitively, stored upper-cased."""
         return normalize_log_level(value)
+
+    @field_validator("deepstream_restart_policy")
+    @classmethod
+    def _validate_deepstream_restart_policy(cls, value: str) -> str:
+        """Restrict the restart policy to the closed Phase-1 set (IP-06 T-71)."""
+        if value not in VALID_DEEPSTREAM_RESTART_POLICIES:
+            allowed = ", ".join(sorted(VALID_DEEPSTREAM_RESTART_POLICIES))
+            raise ValueError(f"must be one of {allowed}")
+        return value
+
+    @field_validator("deepstream_model_profile")
+    @classmethod
+    def _validate_deepstream_model_profile(cls, value: str) -> str:
+        """Restrict the profile name to a safe, filesystem-path-safe pattern (IP-06 T-70/T-71).
+
+        The same pattern deploy-engine.sh enforces before building a filesystem path from a
+        profile name. This field is never used to build a path in the Agent itself
+        (DeepStreamProcessManager never reads it), but the same discipline is applied here so the
+        value can never become unsafe if a future phase does start deriving a path from it.
+        """
+        if not _PROFILE_NAME_PATTERN.match(value):
+            raise ValueError(
+                "must be lowercase alphanumeric, optionally hyphenated (e.g. 'yolov4-fp16')"
+            )
+        return value
 
 
 def load_settings(**overrides: object) -> AgentSettings:

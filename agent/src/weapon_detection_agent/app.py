@@ -24,11 +24,13 @@ from weapon_detection_agent.config.settings import load_settings
 from weapon_detection_agent.runtime.startup import (
     BackendClientFactory,
     Clock,
+    ComponentsFactory,
     SettingsLoader,
     ValidationClientFactory,
     create_lifespan,
     default_backend_client_factory,
     default_clock,
+    default_components_factory,
     default_validation_client_factory,
 )
 
@@ -44,11 +46,14 @@ def create_app(
     clock: Clock = default_clock,
     backend_client_factory: BackendClientFactory = default_backend_client_factory,
     validation_client_factory: ValidationClientFactory = default_validation_client_factory,
+    components_factory: ComponentsFactory = default_components_factory,
 ) -> FastAPI:
     """Create a FastAPI application wired to the startup lifespan (IP-02 T-39; IP-05 T-61).
 
     Each call returns an independent application instance. No startup work runs until the lifespan
-    is entered by an ASGI server (or a ``TestClient`` context manager).
+    is entered by an ASGI server (or a ``TestClient`` context manager). ``components_factory``
+    defaults to no operational components (unchanged default, IP-06 T-74) — the real production
+    entrypoint (``main.py``) passes an explicit override to add DeepStream supervision.
     """
     return FastAPI(
         title="Weapon Detection Agent",
@@ -59,5 +64,6 @@ def create_app(
             clock=clock,
             backend_client_factory=backend_client_factory,
             validation_client_factory=validation_client_factory,
+            components_factory=components_factory,
         ),
     )

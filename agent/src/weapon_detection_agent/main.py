@@ -7,8 +7,8 @@ enters the lifespan, **not** at import. Importing this module therefore does no 
 socket, configures no logging, and performs no activation; it only builds the ``FastAPI`` object.
 
 **Single Uvicorn worker (ADR-010).** The Agent owns process-local singleton responsibilities (device
-identity, and later DeepStream supervision), so it must run under exactly **one** worker. The
-provided :func:`run` helper pins ``workers=1``; the documented launch command does the same:
+identity, and DeepStream process supervision — IP-06), so it must run under exactly **one** worker.
+The provided :func:`run` helper pins ``workers=1``; the documented launch command does the same:
 
     uvicorn weapon_detection_agent.main:app --host 0.0.0.0 --port 8000 --workers 1
 
@@ -17,9 +17,14 @@ neither infers nor depends on any Uvicorn CLI internals, and never calls ``uvico
 """
 
 from weapon_detection_agent.app import create_app
+from weapon_detection_agent.deepstream.process_manager import (
+    default_deepstream_components_factory,
+)
 
 # The control-plane application object Uvicorn serves. Constructing it runs no startup work.
-app = create_app()
+# This is the one place DeepStream supervision (IP-06 T-74) is wired in — create_app()'s own default
+# stays empty so every other caller (tests included) is unaffected by this feature's existence.
+app = create_app(components_factory=default_deepstream_components_factory)
 
 
 def run() -> None:
