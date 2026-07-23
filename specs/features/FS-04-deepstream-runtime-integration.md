@@ -164,7 +164,7 @@ New paths under the existing `/opt/weapon-detection/` root (ADR-008 mode convent
 
 For the initial deployment, `<profile>` = **`yolov4-fp16`**:
 
-- engine destination: `/opt/weapon-detection/models/yolov4-fp16/model.engine` (source: `yolov4_fp16.engine`, SHA-256 `2298d1a3d85ef9ff9d630593a01d70532df3c3b484c9aa2c9a4cc2f78081bff`)
+- engine destination: `/opt/weapon-detection/models/yolov4-fp16/model.engine` (source: `yolov4_fp16.engine`, SHA-256 `2298d1a3d85ef9ff9d630593a01d70532df3c3b484c9aa2c9a4cc2f78081bff8`)
 - inference config: `/opt/weapon-detection/config/deepstream/profiles/yolov4-fp16/infer-config.txt`
 - labels: `/opt/weapon-detection/config/deepstream/profiles/yolov4-fp16/labels.txt`
 - validated values carried forward unchanged: input `3;640;640`, two classes, FP16 (`network-mode=2`), `output-blob-names=BatchedNMS`, `parse-bbox-func-name=NvDsInferParseCustomBatchedNMSTLT`, DeepStream 6.2, TensorRT 8.5.2 (§6).
@@ -209,7 +209,7 @@ Each profile's manifest is a flat `KEY=VALUE` file (parseable by shell without a
 
 ```ini
 PROFILE_NAME=yolov4-fp16
-ENGINE_SHA256=2298d1a3d85ef9ff9d630593a01d70532df3c3b484c9aa2c9a4cc2f78081bff
+ENGINE_SHA256=2298d1a3d85ef9ff9d630593a01d70532df3c3b484c9aa2c9a4cc2f78081bff8
 ENGINE_PRECISION=FP16
 INPUT_DIMENSIONS=3;640;640
 CLASS_COUNT=2
