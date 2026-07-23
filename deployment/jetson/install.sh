@@ -32,6 +32,10 @@ readonly MODELS_DIR="${ROOT_DIR}/models"
 readonly DEEPSTREAM_CONFIG_DIR="${CONFIG_DIR}/deepstream"
 readonly DEEPSTREAM_PROFILES_DIR="${DEEPSTREAM_CONFIG_DIR}/profiles"
 readonly DEEPSTREAM_LOGS_DIR="${LOGS_DIR}/deepstream"
+# Local test-video staging (T-77 local-video lifecycle verification). Never populated by install.sh
+# itself — only deploy-sample-video.sh writes input.mp4 here, and it is never run automatically.
+readonly SAMPLES_DIR="${ROOT_DIR}/samples"
+readonly DEEPSTREAM_SAMPLES_DIR="${SAMPLES_DIR}/deepstream"
 readonly ENV_DIR="/etc/weapon-detection-agent"
 readonly ENV_FILE="${ENV_DIR}/agent.env"
 readonly UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -176,7 +180,9 @@ install -d -m 0750 "${MODELS_DIR}"
 install -d -m 0750 "${DEEPSTREAM_CONFIG_DIR}"
 install -d -m 0750 "${DEEPSTREAM_PROFILES_DIR}"
 install -d -m 0750 "${DEEPSTREAM_LOGS_DIR}"
-log "provisioned DeepStream layout (models/, config/deepstream/, logs/deepstream/, all 0750)"
+install -d -m 0750 "${SAMPLES_DIR}"
+install -d -m 0750 "${DEEPSTREAM_SAMPLES_DIR}"
+log "provisioned DeepStream layout (models/, config/deepstream/, logs/deepstream/, samples/deepstream/, all 0750)"
 
 # Sync the committed, profile-agnostic application config and every committed profile's
 # infer-config.txt/labels.txt/manifest.env. Never touches models/<profile>/model.engine (not synced
@@ -243,7 +249,7 @@ chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${ROOT_DIR}"
 chmod 0750 "${ROOT_DIR}"
 chmod 0700 "${CONFIG_DIR}" "${DATABASE_DIR}"
 chmod 0750 "${LOGS_DIR}"
-chmod 0750 "${MODELS_DIR}" "${DEEPSTREAM_CONFIG_DIR}" "${DEEPSTREAM_PROFILES_DIR}" "${DEEPSTREAM_LOGS_DIR}"
+chmod 0750 "${MODELS_DIR}" "${DEEPSTREAM_CONFIG_DIR}" "${DEEPSTREAM_PROFILES_DIR}" "${DEEPSTREAM_LOGS_DIR}" "${SAMPLES_DIR}" "${DEEPSTREAM_SAMPLES_DIR}"
 # Preserve a 0600 activation-key file if one is staged for a pending first activation.
 [[ -e "${KEY_FILE}" ]] && chmod 0600 "${KEY_FILE}" && chown "${SERVICE_USER}:${SERVICE_GROUP}" "${KEY_FILE}"
 # Re-assert the env file's mode/ownership on every run (self-healing), even though its CONTENT is

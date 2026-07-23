@@ -19,13 +19,27 @@ separate from credential/Operational state gating.
 |------|---------|
 | `deepstream-app.txt` | The single, profile-agnostic DeepStream application config the Agent always launches. Its `[primary-gie] config-file=` line is the one line that names the active profile. |
 | `deploy-engine.sh` | Installs a validated `.engine` file as a named profile's `model.engine`, after verifying it against that profile's manifest. |
+| `deploy-sample-video.sh` | Stages a local test video (for local-video lifecycle verification, T-77) as `samples/deepstream/input.mp4`. Never committed — see `.gitignore`. |
 | `verify-deepstream.sh` | Opt-in verification (static checks always; `--run` also does a real bounded launch). |
 | `profiles/<profile>/infer-config.txt` | The profile's `[property]` inference config — every model-specific value (dimensions, precision, parser, class count) lives here, never in Agent code. |
 | `profiles/<profile>/labels.txt` | The profile's class labels. |
 | `profiles/<profile>/manifest.env` | The profile's manifest — checksum and every fact needed to verify the engine before it is trusted (FS-04 §8.3). |
 
 Installed by `install.sh` into `/opt/weapon-detection/config/deepstream/` (config/labels/manifests
-only). `models/<profile>/model.engine` is installed **only** by `deploy-engine.sh`, run manually.
+only). `models/<profile>/model.engine` is installed **only** by `deploy-engine.sh`, and the local
+test video at `samples/deepstream/input.mp4` **only** by `deploy-sample-video.sh` — both run
+manually, never automatically by `install.sh`.
+
+## Staging the local test video
+
+```bash
+sudo /opt/weapon-detection/agent/deployment/jetson/deepstream/deploy-sample-video.sh \
+    --source /path/to/staged/test_video.mp4
+```
+
+Refuses a non-regular-file source (symlink/directory/device), refuses to overwrite an existing
+`input.mp4` without `--force`, installs atomically, sets `0640 weapon-detection:weapon-detection`,
+and never prints the video's contents.
 
 ## Deploying a model profile's engine
 
