@@ -1,9 +1,9 @@
-"""SQLite schema definition and versioned initialization (IP-02 T-35, §7; IP-05 T-58).
+"""SQLite schema definition and versioned initialization (IP-02 T-35, §7; IP-05 T-58; IP-07 T-85).
 
 This module defines the schema and the single, idempotent initializer that brings a database up to
 :data:`CURRENT_SCHEMA_VERSION`. The approach is deliberately small (IP-02 D-6, Engineering Principle
 9): one integer version guarded by a ``SchemaVersion`` table, DDL applied in one transaction, and
-no third-party migration framework — a handful of tables and one migration do not justify a
+no third-party migration framework — a handful of tables and a few migrations do not justify a
 dependency.
 
 **Versions.** Version 1 (IP-02 §7) created ``SchemaVersion`` / ``DeviceIdentity`` / ``ConfigCache``,
@@ -11,21 +11,24 @@ with ``DeviceIdentity.ProtectedSharedSecret`` ``NOT NULL``. Version 2 (IP-05 §7
 **nullable** and adds an ``OperationalState`` column with CHECK constraints enforcing the local
 credential-state invariant (``Operational`` ⇒ a secret is present; ``ReactivationRequired`` ⇒ the
 secret is ``NULL``). Because SQLite cannot relax a ``NOT NULL`` in place, the upgrade is a table
-rebuild.
+rebuild. Version 3 (FS-05 §7, IP-07 T-85) adds a new, purely additive ``DetectionEvent`` table (no
+existing table is touched) plus one index supporting the future backend-delivery step's
+pending-event query (``DeliveryStatus``, ``CreatedAtUtc``).
 
 Forward-only and idempotent, appending steps rather than editing shipped ones:
 
-* A **fresh** database applies the version-1 DDL and then migrates 1 → 2, so it ends at the latest
-  version through the same migration path an existing database takes (a fresh database's rebuild
-  copies zero rows). The shipped version-1 DDL is never edited.
-* An existing **version-1** database is migrated 1 → 2.
-* An existing **version-2** database is a safe no-op — no rebuild, no data change.
+* A **fresh** database applies the version-1 DDL and then migrates 1 → 2 → 3, so it ends at the
+  latest version through the same migration path an existing database takes (a fresh database's
+  rebuild copies zero rows). The shipped version-1 DDL is never edited.
+* An existing **version-1** database is migrated 1 → 2 → 3.
+* An existing **version-2** database is migrated 2 → 3.
+* An existing **version-3** database is a safe no-op — no rebuild, no data change.
 * A **newer** version raises :class:`UnsupportedSchemaVersionError` without modifying anything.
 
-What this module does **not** do: read or write a ``DeviceIdentity``/``ConfigCache`` *record* (the
-repositories are T-36), seed any row, create directories, contact the Backend, or wire into startup.
-No value, row, or secret is ever written to a log or an error — at most a version number or a table
-name, neither of which is sensitive.
+What this module does **not** do: read or write a ``DeviceIdentity``/``ConfigCache``/
+``DetectionEvent`` *record* (the repositories are T-36/T-85), seed any row, create directories,
+contact the Backend, or wire into startup. No value, row, or secret is ever written to a log or an
+error — at most a version number or a table name, neither of which is sensitive.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ _LOGGER = logging.getLogger("weapon_detection_agent.persistence.schema")
 
 # The schema version this build understands. A database recording exactly this value is current; a
 # higher value is unsupported (this build must not touch it); anything else is an invalid state.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # Version-1 DDL, verbatim from IP-02 §7 — retained unedited as the shipped version-1 schema. Each
 # statement is idempotent (IF NOT EXISTS); the ordered tuple is applied as one transaction. Exposed
@@ -122,6 +125,68 @@ _MIGRATION_V1_TO_V2_STATEMENTS: tuple[str, ...] = (
 )
 
 
+# Version-3 DDL (FS-05 §7, IP-07 T-85): a new, purely additive `DetectionEvent` table — no existing
+# table is rebuilt or altered. `EventId` is the primary key (Agent-generated UUID text), so no
+# separate uniqueness index is needed. Every other required field is `NOT NULL`. `DeliveryStatus`
+# permits the minimum two-state lifecycle the architecture already implies (approved T-85
+# amendment):
+#
+#   pending    Persisted locally and not yet acknowledged by the central backend. Every event T-85
+#              inserts starts here (this task's repository writes no other value). A temporary
+#              transport failure leaves an event `pending` for a future retry — there is
+#              deliberately no `failed` state without the future delivery specification (item 4 of
+#              the amendment).
+#   delivered  Successfully accepted by the central backend. No code in this task ever writes this
+#              value — reaching it is exclusively the future outbox/backend-delivery feature's job
+#              (no status-update method, retry worker, attempt counter, or failed-at timestamp is
+#              added here).
+#
+# A wider set (`sending`, `failed`, ...) is deliberately deferred to that feature's own migration,
+# following the same additive-migration discipline the v1 -> v2 rebuild already used — this shipped
+# statement is never edited again to add a state, only widened by a future v3 -> v4 migration if
+# needed. The index on (`DeliveryStatus`, `CreatedAtUtc`) is the one concrete future query this
+# schema anticipates: the backend-delivery step will need to scan pending events in creation order.
+# No other index is added (Engineering Principle 9 — no speculative indexes).
+_DETECTION_EVENT_V3_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS DetectionEvent (
+        EventId        TEXT    PRIMARY KEY,
+        DeviceId       TEXT    NOT NULL,
+        CameraId       TEXT    NOT NULL,
+        SourceId       INTEGER NOT NULL,
+        ClassId        INTEGER NOT NULL,
+        ClassName      TEXT    NOT NULL,
+        Confidence     REAL    NOT NULL,
+        FrameNumber    INTEGER NOT NULL,
+        DetectedAtUtc  TEXT    NOT NULL,  -- ISO-8601 UTC
+        FrameWidth     INTEGER NOT NULL,
+        FrameHeight    INTEGER NOT NULL,
+        BboxLeft       REAL    NOT NULL,
+        BboxTop        REAL    NOT NULL,
+        BboxWidth      REAL    NOT NULL,
+        BboxHeight     REAL    NOT NULL,
+        DeliveryStatus TEXT    NOT NULL DEFAULT 'pending'
+            CHECK (DeliveryStatus IN ('pending', 'delivered')),
+        CreatedAtUtc   TEXT    NOT NULL  -- ISO-8601 UTC
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_detection_event_delivery_status_created_at_utc
+        ON DetectionEvent (DeliveryStatus, CreatedAtUtc)
+    """,
+)
+
+
+# The version-2 -> version-3 migration (FS-05 §7, IP-07 T-85), applied inside a single transaction.
+# Purely additive: it creates the new table/index and nothing else, so
+# `DeviceIdentity`/`ConfigCache` rows are never touched. Exposed at module scope so a test can
+# substitute a deliberately failing step to prove the whole migration rolls back.
+_MIGRATION_V2_TO_V3_STATEMENTS: tuple[str, ...] = (
+    *_DETECTION_EVENT_V3_STATEMENTS,
+    "UPDATE SchemaVersion SET Version = 3",
+)
+
+
 class UnsupportedSchemaVersionError(DatabaseInitializationError):
     """The database records a schema version newer than this build supports.
 
@@ -151,15 +216,17 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
     """Bring ``connection``'s database to :data:`CURRENT_SCHEMA_VERSION`, idempotently.
 
     * **Fresh database** (no ``SchemaVersion`` table): create the version-1 tables, then migrate
-      1 → 2, atomically at each step. Returns 2.
-    * **Version 1**: migrate 1 → 2. Returns 2.
-    * **Already current** (version 2): do nothing destructive; preserve all data. Returns 2.
+      1 → 2 → 3, atomically at each step. Returns 3.
+    * **Version 1**: migrate 1 → 2 → 3. Returns 3.
+    * **Version 2**: migrate 2 → 3. Returns 3.
+    * **Already current** (version 3): do nothing destructive; preserve all data. Returns 3.
     * **Newer version**: raise :class:`UnsupportedSchemaVersionError` without modifying anything.
     * **Invalid version state**: raise :class:`InvalidSchemaStateError` without modifying anything.
 
     Returns the schema version now in effect.
     """
     version = read_schema_version(connection)
+    migrated = False
 
     if version is None:
         _LOGGER.info(
@@ -174,11 +241,24 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
             "database_schema_migration_started", extra={"from_version": 1, "to_version": 2}
         )
         _migrate_v1_to_v2(connection)
-        _LOGGER.info("database_schema_migrated", extra={"schema_version": CURRENT_SCHEMA_VERSION})
-        return CURRENT_SCHEMA_VERSION
+        version = 2
+        migrated = True
+
+    if version == 2:
+        _LOGGER.info(
+            "database_schema_migration_started", extra={"from_version": 2, "to_version": 3}
+        )
+        _migrate_v2_to_v3(connection)
+        version = 3
+        migrated = True
 
     if version == CURRENT_SCHEMA_VERSION:
-        _LOGGER.info("database_schema_already_current", extra={"schema_version": version})
+        if migrated:
+            _LOGGER.info(
+                "database_schema_migrated", extra={"schema_version": CURRENT_SCHEMA_VERSION}
+            )
+        else:
+            _LOGGER.info("database_schema_already_current", extra={"schema_version": version})
         return version
 
     if version > CURRENT_SCHEMA_VERSION:
@@ -242,6 +322,18 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     """
     with transaction(connection):
         for statement in _MIGRATION_V1_TO_V2_STATEMENTS:
+            connection.execute(statement)
+
+
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    """Upgrade a version-2 database to version 3 in one atomic transaction (FS-05 §7, IP-07 T-85).
+
+    Adds the `DetectionEvent` table and its one justified index; `DeviceIdentity` and `ConfigCache`
+    are never rebuilt, altered, or touched. A failure at any step rolls the whole migration back,
+    leaving the database at version 2 with no partial `DetectionEvent` table or index behind.
+    """
+    with transaction(connection):
+        for statement in _MIGRATION_V2_TO_V3_STATEMENTS:
             connection.execute(statement)
 
 

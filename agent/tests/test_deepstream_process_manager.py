@@ -25,6 +25,7 @@ from test_agent_runtime_supervisor import (  # noqa: E402 - shared test doubles,
     _build,
     _identity,
 )
+from weapon_detection_agent.config.paths import resolve_paths
 from weapon_detection_agent.config.settings import load_settings
 from weapon_detection_agent.deepstream import process_manager as process_manager_module
 from weapon_detection_agent.deepstream.errors import DeepStreamAlreadyRunningError
@@ -32,6 +33,7 @@ from weapon_detection_agent.deepstream.process_manager import (
     DeepStreamProcessManager,
     default_deepstream_components_factory,
 )
+from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
 from weapon_detection_agent.persistence.models import OperationalState
 from weapon_detection_agent.runtime.startup import default_components_factory
 from weapon_detection_agent.runtime.supervisor import StartupBranch
@@ -400,10 +402,12 @@ def test_default_deepstream_components_factory_builds_one_manager_when_enabled()
     assert manager.name == "deepstream"
 
 
-def test_default_components_factory_stays_empty() -> None:
+def test_default_components_factory_stays_empty(tmp_path: Path) -> None:
     settings = load_settings(backend_base_url="http://backend.local:5230")
+    paths = resolve_paths(tmp_path / "weapon-detection").provision()
+    identity_repository = DeviceIdentityRepository(paths.database_file)
 
-    assert default_components_factory(settings) == ()
+    assert default_components_factory(settings, paths, identity_repository) == ()
 
 
 # --- 12-15. Coordinator/supervisor integration (real DeepStreamProcessManager, fake subprocess) --

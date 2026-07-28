@@ -173,7 +173,7 @@ def test_load_creates_no_unrelated_files_or_directories(tmp_path: Path) -> None:
 
     ConfigCacheRepository(paths.database_file).load()
 
-    assert sorted(c.name for c in paths.root.iterdir()) == ["config", "database", "logs"]
+    assert sorted(c.name for c in paths.root.iterdir()) == ["config", "database", "logs", "runtime"]
     assert [c.name for c in paths.database_dir.iterdir()] == ["agent.db"]
 
 

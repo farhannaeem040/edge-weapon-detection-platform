@@ -208,6 +208,7 @@ def test_first_activation_persists_identity_and_provisions_layout(tmp_path: Path
             "config",
             "database",
             "logs",
+            "runtime",
         ]
         stored = runtime.identity_repository.load()
         assert stored is not None

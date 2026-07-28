@@ -1,0 +1,35 @@
+# DeepStream Bridge — pinned, dependency-only manifest (IP-07 T-89, FS-05 §4.6).
+#
+# Installed with:
+#     venv/bin/pip install --no-deps -r requirements.lock
+# (deploy-bridge.sh runs exactly this; --no-deps is deliberate — every dependency this venv needs
+# is listed explicitly below, nothing is left to a resolver to discover.)
+#
+# NEVER add to this file:
+#   - the deepstream_bridge application package itself (the venv holds dependencies only; the app
+#     is made importable purely via run.sh's process-local PYTHONPATH, FS-05 §4.6);
+#   - any weapon_detection_agent / Agent dependency (FastAPI, pydantic, httpx, ...) — the Bridge and
+#     the Agent are separate applications with separate environments (FS-05 §4.6 binding rule 1);
+#   - an unpinned or "latest" reference of anything.
+#
+# gi / PyGObject / GStreamer bindings are NOT listed here — they come from the system's
+# python3-gi package via the venv's own `--system-site-packages` flag (deploy-bridge.sh), which is
+# why the venv must always be created with that flag and never plain `python3.8 -m venv`.
+#
+# Both entries below carry a --hash so `pip install --require-hashes` (deploy-bridge.sh's default
+# posture) refuses to install anything that doesn't match byte-for-byte.
+
+# pyds 1.1.6 — the deepstream_python_apps release built against DeepStream SDK 6.2 / Ubuntu 20.04 /
+# Python 3.8 aarch64, the exact combination the target Jetson runs (confirmed IP-07 T-80; see
+# deployment/jetson/deepstream/README.md "Installing pyds" — v1.1.8+ targets DS 6.3 and will not
+# load against this device's DS 6.2 native libraries). Not published on PyPI; installed directly
+# from its GitHub release asset URL. Hash verified against the exact asset (sha256sum, 2026-07-26).
+pyds @ https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.1.6/pyds-1.1.6-py3-none-linux_aarch64.whl --hash=sha256:2eedea66b5973725dd358b7d097261fc5663445891b392ee41a002ba6b715270
+
+# pgi 0.0.11.2 — pyds's one transitive runtime dependency, confirmed still required: `import pyds`
+# fails inside a clean venv without it (PyGObject itself is the system python3-gi package, already
+# satisfied via --system-site-packages, never reinstalled here). Sdist only — no aarch64 wheel is
+# published, so this compiles a small C extension at install time (build-essential/python3.8-dev
+# are already present on the target image per the venv-build verification, T-80/T-89). Hash
+# verified against the exact PyPI sdist (sha256sum, 2026-07-26).
+pgi==0.0.11.2 --hash=sha256:5b011ff4d81f83eed4380b0c72876be9b5572c4ed97e2b784dce477183c934f5

@@ -32,7 +32,7 @@ requires_posix_modes = pytest.mark.skipif(
     reason="POSIX permission modes are not enforceable on this platform (IP-02 §17)",
 )
 
-APPLICATION_TABLES = ("SchemaVersion", "DeviceIdentity", "ConfigCache")
+APPLICATION_TABLES = ("SchemaVersion", "DeviceIdentity", "ConfigCache", "DetectionEvent")
 
 # A recognisable fake secret used to prove no stored value ever reaches an error message or a log.
 # Not a real credential (IP-02 §10 forbids committing real ones); a sentinel string only.
@@ -176,11 +176,22 @@ def test_no_speculative_indexes_created(tmp_path: Path) -> None:
     initialize_database(paths.database_file)
 
     with open_connection(paths.database_file) as connection:
-        for table in APPLICATION_TABLES:
+        for table in ("SchemaVersion", "DeviceIdentity", "ConfigCache"):
             indexes = connection.execute(f"PRAGMA index_list({table})").fetchall()
             # IP-02 §7 defines no explicit indexes; INTEGER PRIMARY KEY is a rowid alias, not an
-            # index. So no user index should exist on any table.
+            # index. So no user index should exist on any of these tables.
             assert indexes == []
+        # DetectionEvent gets exactly the one FS-05 §7-justified index (pending-event lookup) and no
+        # other. EventId's TEXT PRIMARY KEY is a real index in SQLite (unlike an INTEGER rowid
+        # alias), so it appears here too.
+        detection_event_indexes = {
+            row["name"]
+            for row in connection.execute("PRAGMA index_list(DetectionEvent)").fetchall()
+        }
+        assert detection_event_indexes == {
+            "idx_detection_event_delivery_status_created_at_utc",
+            "sqlite_autoindex_DetectionEvent_1",
+        }
 
 
 # --- 18. Version recorded as the current version (2) -------------------------------------------
@@ -333,9 +344,14 @@ def test_initialization_creates_only_the_database_file(tmp_path: Path) -> None:
     initialize_database(paths.database_file)
 
     # The managed layout is unchanged apart from agent.db appearing in database/.
-    assert sorted(child.name for child in paths.root.iterdir()) == ["config", "database", "logs"]
+    assert sorted(child.name for child in paths.root.iterdir()) == [
+        "config",
+        "database",
+        "logs",
+        "runtime",
+    ]
     assert [child.name for child in paths.database_dir.iterdir()] == ["agent.db"]
-    for deferred in ("snapshots", "recordings", "models", "pipeline", "runtime"):
+    for deferred in ("snapshots", "recordings", "models", "pipeline"):
         assert not (paths.root / deferred).exists()
 
 
@@ -467,11 +483,12 @@ def test_migration_from_v1_preserves_data_and_assigns_operational(tmp_path: Path
     with open_connection(database_file) as connection:
         assert read_schema_version(connection) == 1
 
-    # Opening the v1 database with the current initializer migrates it to v2.
+    # Opening the v1 database with the current initializer cascades it through v2 to v3.
     assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
 
     with open_connection(database_file) as connection:
-        assert read_schema_version(connection) == 2
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
+        assert "DetectionEvent" in _table_names(connection)
         columns = _columns(connection, "DeviceIdentity")
         assert "OperationalState" in columns
         assert columns["ProtectedSharedSecret"]["notnull"] == 0  # now nullable
@@ -523,9 +540,9 @@ def test_failed_v1_to_v2_migration_rolls_back_and_preserves_v1(
     assert "device-rb" not in str(excinfo.value)
 
 
-def test_reopening_v2_is_a_no_op_that_does_not_modify_data(tmp_path: Path) -> None:
+def test_reopening_current_version_is_a_no_op_that_does_not_modify_data(tmp_path: Path) -> None:
     database_file = _provisioned_paths(tmp_path).database_file
-    initialize_database(database_file)  # fresh → v2
+    initialize_database(database_file)  # fresh → current version (3)
 
     with open_connection(database_file) as connection:
         connection.execute(
@@ -540,14 +557,261 @@ def test_reopening_v2_is_a_no_op_that_does_not_modify_data(tmp_path: Path) -> No
             ),
         )
 
-    # Re-initializing an already-v2 database changes nothing.
+    # Re-initializing an already-current database changes nothing.
     assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
 
     with open_connection(database_file) as connection:
-        assert read_schema_version(connection) == 2
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
         row = connection.execute(
             "SELECT DeviceId, ProtectedSharedSecret, OperationalState FROM DeviceIdentity"
         ).fetchone()
         assert row["DeviceId"] == "device-idem"
         assert row["ProtectedSharedSecret"] == FAKE_SECRET_SENTINEL
         assert row["OperationalState"] == "Operational"
+
+
+# --- IP-07 T-85: v2 -> v3 migration and the DetectionEvent table -------------------------------
+
+
+def _build_v2_database_with_rows(
+    database_file: Path, *, device_id: str, secret: str, config_json: str
+) -> None:
+    """Create a genuine schema-version-2 database with a DeviceIdentity and a ConfigCache row.
+
+    Applies the shipped v1 DDL, migrates 1 -> 2, then seeds both singleton rows directly — used to
+    exercise the real v2 -> v3 migration in isolation, mirroring
+    :func:`_build_v1_database_with_row`'s role for the v1 -> v2 migration.
+    """
+    with open_connection(database_file) as connection:
+        schema_module._apply_version_1(connection)
+        schema_module._migrate_v1_to_v2(connection)
+        connection.execute(
+            _V2_INSERT,
+            (1, device_id, secret, _MIG_ACTIVATED_AT, _MIG_LAST_ACTIVATED_AT, "Operational"),
+        )
+        connection.execute(
+            "INSERT INTO ConfigCache (SingletonGuard, ConfigJson, UpdatedAt) VALUES (1, ?, ?)",
+            (config_json, _MIG_ACTIVATED_AT),
+        )
+
+
+_DETECTION_EVENT_COLUMNS = [
+    "EventId",
+    "DeviceId",
+    "CameraId",
+    "SourceId",
+    "ClassId",
+    "ClassName",
+    "Confidence",
+    "FrameNumber",
+    "DetectedAtUtc",
+    "FrameWidth",
+    "FrameHeight",
+    "BboxLeft",
+    "BboxTop",
+    "BboxWidth",
+    "BboxHeight",
+    "DeliveryStatus",
+    "CreatedAtUtc",
+]
+
+
+def test_fresh_database_creates_detection_event_table(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(paths.database_file) as connection:
+        assert "DetectionEvent" in _table_names(connection)
+
+
+def test_detection_event_columns_and_types(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        columns = _columns(connection, "DetectionEvent")
+
+    assert list(columns) == _DETECTION_EVENT_COLUMNS
+    assert columns["EventId"]["type"] == "TEXT"
+    assert columns["EventId"]["pk"] == 1
+    for int_col in ("SourceId", "ClassId", "FrameNumber", "FrameWidth", "FrameHeight"):
+        assert columns[int_col]["type"] == "INTEGER"
+        assert columns[int_col]["notnull"] == 1
+    for real_col in ("Confidence", "BboxLeft", "BboxTop", "BboxWidth", "BboxHeight"):
+        assert columns[real_col]["type"] == "REAL"
+        assert columns[real_col]["notnull"] == 1
+    for text_col in (
+        "DeviceId",
+        "CameraId",
+        "ClassName",
+        "DetectedAtUtc",
+        "DeliveryStatus",
+        "CreatedAtUtc",
+    ):
+        assert columns[text_col]["type"] == "TEXT"
+        assert columns[text_col]["notnull"] == 1
+
+
+def test_detection_event_delivery_status_defaults_to_pending(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, CreatedAtUtc) "
+            "VALUES ('evt-1', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+            "0, 0, 10, 10, 't')"
+        )
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-1'"
+        ).fetchone()
+
+    assert row["DeliveryStatus"] == "pending"
+
+
+def test_detection_event_accepts_delivered_status(tmp_path: Path) -> None:
+    # 'delivered' is the terminal state a future backend-delivery feature will write; T-85 itself
+    # never writes it (the repository always writes 'pending'), but the schema must permit it so
+    # that feature needs no further table-rebuild migration (approved T-85 amendment).
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, DeliveryStatus, CreatedAtUtc) "
+            "VALUES ('evt-2', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+            "0, 0, 10, 10, 'delivered', 't')"
+        )
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-2'"
+        ).fetchone()
+
+    assert row["DeliveryStatus"] == "delivered"
+
+
+@pytest.mark.parametrize("bogus_status", ("unknown", "sending", "failed", "", "Pending"))
+def test_detection_event_rejects_values_outside_the_permitted_lifecycle(
+    tmp_path: Path, bogus_status: str
+) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO DetectionEvent "
+                "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+                "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+                "BboxWidth, BboxHeight, DeliveryStatus, CreatedAtUtc) "
+                "VALUES ('evt-bogus', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+                "0, 0, 10, 10, ?, 't')",
+                (bogus_status,),
+            )
+
+
+def test_detection_event_rejects_duplicate_event_id(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+    insert = (
+        "INSERT INTO DetectionEvent "
+        "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+        "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+        "BboxWidth, BboxHeight, CreatedAtUtc) "
+        "VALUES ('evt-dup', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, 0, 0, 10, 10, 't')"
+    )
+
+    with open_connection(paths.database_file) as connection:
+        connection.execute(insert)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert)
+
+
+def test_migration_from_v2_preserves_device_identity_and_config_cache(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v2_database_with_rows(
+        database_file,
+        device_id="device-v2mig",
+        secret=FAKE_SECRET_SENTINEL,
+        config_json='{"marker": "ZZZ-config-must-survive-ZZZ"}',
+    )
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 2
+
+    assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 3
+        assert "DetectionEvent" in _table_names(connection)
+
+        identity_row = connection.execute(
+            "SELECT DeviceId, ProtectedSharedSecret FROM DeviceIdentity"
+        ).fetchone()
+        assert identity_row["DeviceId"] == "device-v2mig"
+        assert identity_row["ProtectedSharedSecret"] == FAKE_SECRET_SENTINEL
+
+        config_row = connection.execute("SELECT ConfigJson FROM ConfigCache").fetchone()
+        assert config_row["ConfigJson"] == '{"marker": "ZZZ-config-must-survive-ZZZ"}'
+
+        (event_count,) = connection.execute("SELECT COUNT(*) FROM DetectionEvent").fetchone()
+        assert event_count == 0
+
+
+def test_failed_v2_to_v3_migration_rolls_back_and_preserves_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v2_database_with_rows(
+        database_file,
+        device_id="device-v3rb",
+        secret=FAKE_SECRET_SENTINEL,
+        config_json="{}",
+    )
+
+    # Append a malformed final step so the migration fails after the table/index are created;
+    # SQLite's transactional DDL must roll the entire migration back.
+    monkeypatch.setattr(
+        schema_module,
+        "_MIGRATION_V2_TO_V3_STATEMENTS",
+        (*schema_module._MIGRATION_V2_TO_V3_STATEMENTS, "THIS IS NOT VALID SQL ("),
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        # SchemaVersion unchanged, no partial DetectionEvent table, original data intact.
+        assert read_schema_version(connection) == 2
+        assert "DetectionEvent" not in _table_names(connection)
+        row = connection.execute("SELECT DeviceId FROM DeviceIdentity").fetchone()
+        assert row["DeviceId"] == "device-v3rb"
+
+
+def test_reinitializing_v3_database_does_not_touch_detection_events(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+    initialize_database(paths.database_file)
+
+    with open_connection(paths.database_file) as connection:
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, CreatedAtUtc) "
+            "VALUES ('evt-keep', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+            "0, 0, 10, 10, 't')"
+        )
+
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(paths.database_file) as connection:
+        row = connection.execute(
+            "SELECT EventId FROM DetectionEvent WHERE EventId = 'evt-keep'"
+        ).fetchone()
+    assert row is not None

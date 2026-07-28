@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The environment-variable prefix for every Agent setting (IP-02 §6).
@@ -44,6 +44,11 @@ VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 # DeepStream exit is detected and logged (T-73) but never auto-restarted, so a real failure loop is
 # never masked.
 VALID_DEEPSTREAM_RESTART_POLICIES = frozenset({"none"})
+
+# The reference DeepStream binary's default path — named here as a module-level constant (IP-07
+# T-90) so the incompatible-configuration preflight below and the field default are provably the
+# same value, never two independently-typed literals that could drift apart.
+DEFAULT_DEEPSTREAM_EXECUTABLE_PATH = Path("/usr/bin/deepstream-app")
 
 # The safe-name pattern shared by WDA_DEEPSTREAM_MODEL_PROFILE and deploy-engine.sh's own
 # profile-name validation (IP-06 T-70/T-71) — lowercase alphanumeric, optionally hyphenated, never
@@ -134,7 +139,7 @@ class AgentSettings(BaseSettings):
     # The deepstream-app binary. Absolute path, existence checked only when DeepStreamProcessManager
     # actually starts it (T-73) — not here, so a CI/dev machine without DeepStream installed can
     # still construct valid settings.
-    deepstream_executable_path: Path = Path("/usr/bin/deepstream-app")
+    deepstream_executable_path: Path = DEFAULT_DEEPSTREAM_EXECUTABLE_PATH
 
     # The single, profile-agnostic DeepStream application config DeepStreamProcessManager launches
     # with `-c <this path>`. Which model actually runs is decided entirely by this file's own
@@ -163,6 +168,37 @@ class AgentSettings(BaseSettings):
     # only (e.g. a later metadata-extraction phase needing a profile's labels file) — deliberately
     # never read by DeepStreamProcessManager, which only ever sees deepstream_config_path.
     deepstream_model_profile: str = "yolov4-fp16"
+
+    # --- Detection event bridge (IP-07 T-81, FS-05 §9). DetectionIngestHandler reads all six of
+    # these; none are read by DeepStreamProcessManager or the pyds pipeline child (which receives
+    # its own copy of the socket path via its deployment wrapper script, not via AgentSettings —
+    # that process has no Agent configuration at all, FS-05 §4.3).
+
+    # The rollout kill switch for this feature, mirroring deepstream_enabled exactly. Defaults to
+    # False: a fresh or freshly-updated deployment starts no Unix-socket listener and constructs no
+    # DetectionIngestHandler until an operator deliberately opts in.
+    detection_events_enabled: bool = False
+
+    # Detections below this confidence are rejected (not "suppressed" — a distinct diagnostic
+    # reason, FS-05 §5/§8). Bounded to the valid probability range.
+    detection_min_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
+
+    # The cooldown window (FS-05 §6) for the in-memory duplicate-suppression key
+    # (device id, camera id, class name), measured on a monotonic clock. Must be positive.
+    detection_cooldown_seconds: float = Field(default=5.0, gt=0)
+
+    # The bounded capacity of DetectionIngestHandler's internal queue decoupling socket reads from
+    # SQLite writes (T-86). A full queue drops the newest message rather than blocking or growing
+    # unbounded. Must be positive.
+    detection_queue_capacity: int = Field(default=1000, gt=0)
+
+    # The single configured camera identity attached to every accepted event (FS-05 §5) — never
+    # trusted from the wire payload. Must not be blank.
+    detection_camera_id: str = "camera1"
+
+    # The Unix domain socket DetectionIngestHandler listens on and the pyds pipeline child writes
+    # to (ADR-005). Lives under the runtime/ directory this feature is the first writer for (T-82).
+    detection_socket_path: Path = Path("/opt/weapon-detection/runtime/detection.sock")
 
     @field_validator("backend_base_url")
     @classmethod
@@ -216,6 +252,67 @@ class AgentSettings(BaseSettings):
                 "must be lowercase alphanumeric, optionally hyphenated (e.g. 'yolov4-fp16')"
             )
         return value
+
+    @field_validator("detection_camera_id")
+    @classmethod
+    def _validate_detection_camera_id(cls, value: str) -> str:
+        """Reject a blank camera id (IP-07 T-81, FS-05 §9) — required whenever the field is set,
+        not only when detection events are enabled, so a later flip of the kill switch cannot be
+        undermined by an already-invalid stored/inherited value."""
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_detection_events_require_a_compatible_pipeline(self) -> AgentSettings:
+        """Cross-field incompatible-configuration preflight (IP-07 T-90, FS-05 §4.3/§4.6
+        requirement 6).
+
+        Two settings-combination rules, both pure boolean/path comparisons — no filesystem I/O,
+        preserving this module's "settings loading performs no filesystem I/O" invariant
+        (`root_path`/`deepstream_executable_path`'s own field comments). Whether the *file* at
+        `deepstream_executable_path` actually exists, is executable, or is really Bridge-compatible
+        is a separate, I/O-performing concern the production cutover preflight command owns
+        (`deployment/jetson/deepstream/bridge/preflight-cutover.sh`) — never this model.
+
+        1. `detection_events_enabled=True` requires `deepstream_enabled=True` — a detection pipeline
+           with no DeepStream process supervised underneath it can never receive anything; this is
+           always wrong, not merely inefficient.
+        2. `detection_events_enabled=True` together with `deepstream_executable_path` left at its
+           literal default (`DEFAULT_DEEPSTREAM_EXECUTABLE_PATH`, the reference `deepstream-app`
+           binary) is rejected — that binary implements none of the T-86 Unix-socket detection
+           protocol, so `DetectionIngestHandler` would start and listen forever with no possible
+           sender, silently. **Deliberately an explicit-value comparison, not filename-pattern
+           guesswork** (task item 2: "prefer an explicit configuration rule") — any executable path
+           other than the one literal default is accepted, matching FS-05 §4.3's own posture that
+           the Bridge's `run.sh` is simply "whatever `WDA_DEEPSTREAM_EXECUTABLE_PATH` is repointed
+           at," never a name this model needs to recognize.
+
+        Both checks are skipped entirely when `detection_events_enabled` is `False` (the default) —
+        a disabled feature is never inconsistent with anything, exactly like every other kill-switch
+        in this file.
+        """
+        if not self.detection_events_enabled:
+            return self
+
+        problems: list[str] = []
+        if not self.deepstream_enabled:
+            problems.append(
+                "WDA_DETECTION_EVENTS_ENABLED=true requires WDA_DEEPSTREAM_ENABLED=true "
+                "(a detection pipeline needs a supervised DeepStream/Bridge process to read from)"
+            )
+        if self.deepstream_executable_path == DEFAULT_DEEPSTREAM_EXECUTABLE_PATH:
+            problems.append(
+                "WDA_DETECTION_EVENTS_ENABLED=true requires WDA_DEEPSTREAM_EXECUTABLE_PATH to be "
+                "repointed away from the reference binary default "
+                f"({DEFAULT_DEEPSTREAM_EXECUTABLE_PATH}) at a Bridge-compatible launcher "
+                "(e.g. .../deepstream-bridge/run.sh) — the "
+                "reference binary cannot publish the detection-event Unix-socket protocol"
+            )
+
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
 
 
 def load_settings(**overrides: object) -> AgentSettings:

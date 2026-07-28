@@ -10,7 +10,14 @@
 # unit; then daemon-reload + enable. It does NOT start an unactivated Agent, and never prints a
 # secret.
 #
+# DeepStream config (deepstream-app.txt, each profile's infer-config.txt/labels.txt/manifest.env)
+# is operator-managed once deployed: install.sh installs the repo's template only on first deploy
+# (destination absent) and otherwise leaves an existing, customized config untouched. Pass
+# --replace-deepstream-config to explicitly opt into overwriting it — a timestamped backup is
+# always taken first (IP-07 T-91 incident follow-up, §12.4).
+#
 # Run as root (via sudo). Safe to re-run.
+# Usage: sudo bash install.sh [--replace-deepstream-config]
 
 set -Eeuo pipefail
 
@@ -36,6 +43,10 @@ readonly DEEPSTREAM_LOGS_DIR="${LOGS_DIR}/deepstream"
 # itself — only deploy-sample-video.sh writes input.mp4 here, and it is never run automatically.
 readonly SAMPLES_DIR="${ROOT_DIR}/samples"
 readonly DEEPSTREAM_SAMPLES_DIR="${SAMPLES_DIR}/deepstream"
+# DeepStream Bridge deployment scaffolding (IP-07 T-89, FS-05 §4.6) — SOURCE staging only. This
+# installer never builds/touches venv/ (that is deploy-bridge.sh's job, run manually) and never
+# switches WDA_DEEPSTREAM_EXECUTABLE_PATH — the Bridge is staged but not activated by install.sh.
+readonly BRIDGE_DEST_DIR="${ROOT_DIR}/deepstream-bridge"
 readonly ENV_DIR="/etc/weapon-detection-agent"
 readonly ENV_FILE="${ENV_DIR}/agent.env"
 readonly UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -51,10 +62,33 @@ readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd -P)"
 readonly SRC_AGENT_DIR="${REPO_ROOT}/agent"
 readonly SRC_JETSON_DIR="${SCRIPT_DIR}"
 readonly SRC_DEEPSTREAM_DIR="${SCRIPT_DIR}/deepstream"
+readonly SRC_BRIDGE_DIR="${SRC_DEEPSTREAM_DIR}/bridge"
 
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARNING: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# --- 0. Parse arguments ---------------------------------------------------------------------------
+# --replace-deepstream-config (IP-07 T-91 incident follow-up, §12.4): deepstream-app.txt and each
+# profile's infer-config.txt/labels.txt/manifest.env are OPERATOR-MANAGED once deployed once — an
+# operator hand-tunes the real camera URL, RTSP reconnect/latency settings, tracker sizing, and
+# encoder properties for the specific device. A prior unconditional `rsync -a` here silently
+# replaced a live, customized deepstream-app.txt with the repo's generic template mid-deployment,
+# breaking production RTSP. Default behaviour is now preserve-existing; this flag is the only way
+# to opt back into replacing an already-deployed config, and it always backs the old one up first.
+REPLACE_DEEPSTREAM_CONFIG=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --replace-deepstream-config) REPLACE_DEEPSTREAM_CONFIG=1; shift ;;
+        -h|--help)
+            grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            echo "Usage: sudo bash install.sh [--replace-deepstream-config]"
+            exit 0
+            ;;
+        *) die "unknown argument: $1 (supported: --replace-deepstream-config)" ;;
+    esac
+done
+readonly REPLACE_DEEPSTREAM_CONFIG
 
 # --- 1. Require root -----------------------------------------------------------------------------
 [[ "${EUID}" -eq 0 ]] || die "must run as root (use: sudo bash install.sh)"
@@ -189,17 +223,32 @@ install -d -m 0750 "${SAMPLES_DIR}"
 install -d -m 0750 "${DEEPSTREAM_SAMPLES_DIR}"
 log "provisioned DeepStream layout (models/, config/deepstream/, logs/deepstream/, samples/deepstream/, all 0750)"
 
-# Sync the committed, profile-agnostic application config and every committed profile's
-# infer-config.txt/labels.txt/manifest.env. Never touches models/<profile>/model.engine (not synced
-# from here — only deploy-engine.sh writes an engine, and it is never invoked automatically).
+# Install the committed, profile-agnostic application config template and every committed
+# profile's infer-config.txt/labels.txt/manifest.env template — but ONLY on first deploy (the
+# destination not existing yet) or when the operator explicitly opts in with
+# --replace-deepstream-config. Delegates to stage-deepstream-config.sh (the single source of
+# truth for this logic — also exercised directly, without root, by its own idempotency tests) so
+# this exact preserve-by-default behaviour is tested, not only reviewed.
 if [[ -d "${SRC_DEEPSTREAM_DIR}" ]]; then
-    rsync -a --exclude='*.engine' --exclude='*.onnx' --exclude='*.mp4' --exclude='*.mkv' \
-        "${SRC_DEEPSTREAM_DIR}/deepstream-app.txt" "${DEEPSTREAM_CONFIG_DIR}/deepstream-app.txt"
-    rsync -a --exclude='*.engine' --exclude='*.onnx' --exclude='*.mp4' --exclude='*.mkv' \
-        "${SRC_DEEPSTREAM_DIR}/profiles/" "${DEEPSTREAM_PROFILES_DIR}/"
-    log "synced DeepStream config templates to ${DEEPSTREAM_CONFIG_DIR}"
+    replace_flag=()
+    [[ "${REPLACE_DEEPSTREAM_CONFIG}" -eq 1 ]] && replace_flag=(--replace)
+    "${SCRIPT_DIR}/stage-deepstream-config.sh" \
+        "${SRC_DEEPSTREAM_DIR}" "${DEEPSTREAM_CONFIG_DIR}" "${DEEPSTREAM_PROFILES_DIR}" "${replace_flag[@]}"
 else
     warn "no ${SRC_DEEPSTREAM_DIR} found; skipping DeepStream config sync"
+fi
+
+# --- 7b. Stage DeepStream Bridge SOURCE ONLY (IP-07 T-89, FS-05 §4.6) -----------------------------
+# Delegates to stage-bridge-source.sh (the single source of truth for this staging logic — also
+# exercised directly, without root, by the Bridge's own idempotency tests) so this exact behaviour
+# is tested rather than only reviewed. deploy-bridge.sh is never invoked here (operator-run only),
+# and WDA_DEEPSTREAM_EXECUTABLE_PATH is never touched by this installer — staging the Bridge's
+# source is not the same as activating it.
+if [[ -d "${SRC_BRIDGE_DIR}" ]]; then
+    "${SRC_BRIDGE_DIR}/stage-bridge-source.sh" \
+        "${SRC_BRIDGE_DIR}" "${BRIDGE_DEST_DIR}" "${SERVICE_USER}" "${SERVICE_GROUP}"
+else
+    warn "no ${SRC_BRIDGE_DIR} found; skipping DeepStream Bridge staging"
 fi
 
 # --- 8. Copy Agent source to the installation directory ------------------------------------------
@@ -223,7 +272,23 @@ rsync -a --delete \
 # exist (e.g. ${APP_DIR}/deployment/jetson/set-activation-key.sh).
 install -d -m 0755 "${APP_DIR}/deployment/jetson"
 rsync -a --exclude='__pycache__/' "${SRC_JETSON_DIR}/" "${APP_DIR}/deployment/jetson/"
+chmod 0755 "${APP_DIR}/deployment/jetson/deepstream/fix-rtsp-multicast-route.sh"
 log "installed Agent source to ${APP_DIR}"
+
+# DeepStream's built-in RTSP sink (sink type=4) sends its RTP relay to multicast
+# 224.224.255.255, but the RTSP server's client-facing pipeline never joins that group —
+# without a route delivering that multicast destination back into this host, every RTSP
+# client's DESCRIBE hangs until gst-rtsp-server returns 503 Service Unavailable. Installed as
+# a boot-time systemd unit because 'ip route add' does not survive a reboot. This is a host
+# network prerequisite for DeepStream's RTSP output only — systemd still manages exclusively
+# the Agent process (ARCH-CON-002/ADR-006); DeepStream itself remains an Agent-supervised
+# child process, untouched by this unit.
+install -m 0644 "${SRC_DEEPSTREAM_DIR}/deepstream-rtsp-route.service" \
+    "/etc/systemd/system/deepstream-rtsp-route.service"
+systemctl daemon-reload
+systemctl enable --now deepstream-rtsp-route.service >/dev/null 2>&1 \
+    || warn "could not enable deepstream-rtsp-route.service"
+log "installed and started deepstream-rtsp-route.service (RTSP multicast loopback route)"
 
 # --- 9/10. Create/update the venv and install the Agent runtime package ---------------------------
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then

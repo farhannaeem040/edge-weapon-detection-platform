@@ -3,6 +3,10 @@
 [Oo]bj/
 *.user
 
+# Python build artifacts
+__pycache__/
+*.pyc
+
 # Angular / Node (added when frontend is scaffolded)
 node_modules/
 dist/

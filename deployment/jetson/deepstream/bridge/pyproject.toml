@@ -1,0 +1,21 @@
+[project]
+name = "deepstream-bridge"
+version = "0.1.0"
+description = "Standalone DeepStream metadata bridge (IP-07 T-88) — never installed into agent/, never imported by it."
+requires-python = ">=3.8"
+
+# No runtime dependencies are declared here on purpose: pyds/pgi/gi are provided by the Jetson's
+# system GStreamer install and the Bridge's own venv (deploy-bridge.sh, T-89), never by this
+# pyproject/pip. This file exists for the Bridge's own offline test tooling (pytest), not to make
+# `deepstream_bridge` pip-installable (FS-05 §4.6: the venv holds dependencies only).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

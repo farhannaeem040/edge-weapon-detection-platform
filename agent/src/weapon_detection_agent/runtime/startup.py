@@ -24,8 +24,12 @@ runtime reference. It contacts no Backend and deletes no local state (§12.4).
 Dependencies are injected through :func:`create_lifespan` (a settings loader, a clock, a Backend
 client factory, a validation client factory, and an operational-components factory) so tests
 substitute fakes without a real Backend, network, or ``/opt``. This module adds no HTTP route.
-``components_factory`` defaults to an empty tuple (IP-05 T-62+); IP-06 T-74 adds DeepStream
-supervision only through main.py's explicit override, never through this module's own default.
+``components_factory`` defaults to an empty tuple (IP-05 T-62+); IP-06 T-74 / IP-07 T-87 add
+DeepStream supervision and detection-event ingestion only through main.py's explicit override, never
+through this module's own default. It is called with the already-resolved ``AgentPaths`` and the
+already-constructed :class:`~weapon_detection_agent.persistence.device_identity_repository.
+DeviceIdentityRepository` (IP-07 T-87) so a detection-ingest factory can read the persisted device
+identity and the runtime socket/database paths without duplicating either resolution.
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from pydantic import SecretStr
 from weapon_detection_agent.activation.backend_client import BackendActivationClient
 from weapon_detection_agent.activation.key_resolver import ActivationKeyResolver
 from weapon_detection_agent.activation.service import ActivationService
-from weapon_detection_agent.config.paths import resolve_paths
+from weapon_detection_agent.config.paths import AgentPaths, resolve_paths
 from weapon_detection_agent.config.settings import AgentSettings, load_settings
 from weapon_detection_agent.logging.configuration import configure_logging
 from weapon_detection_agent.persistence.config_cache_repository import ConfigCacheRepository
@@ -59,7 +63,9 @@ SettingsLoader = Callable[[], AgentSettings]
 Clock = Callable[[], datetime]
 BackendClientFactory = Callable[[AgentSettings], BackendActivationClient]
 ValidationClientFactory = Callable[[AgentSettings], CredentialValidationClient]
-ComponentsFactory = Callable[[AgentSettings], Sequence[OperationalComponent]]
+ComponentsFactory = Callable[
+    [AgentSettings, AgentPaths, DeviceIdentityRepository], Sequence[OperationalComponent]
+]
 
 
 def default_clock() -> datetime:
@@ -85,17 +91,22 @@ def default_validation_client_factory(settings: AgentSettings) -> CredentialVali
     )
 
 
-def default_components_factory(settings: AgentSettings) -> Sequence[OperationalComponent]:
-    """No operational components by default (IP-05 T-62+ default; unchanged by IP-06 T-74).
+def default_components_factory(
+    settings: AgentSettings, paths: AgentPaths, identity_repository: DeviceIdentityRepository
+) -> Sequence[OperationalComponent]:
+    """No operational components by default (IP-05 T-62+ default; unchanged by IP-06 T-74/IP-07
+    T-87).
 
     This is the default every existing simulated-integration and real-Backend-contract test already
     exercises (they construct ``create_app()``/``create_lifespan()`` with no components override).
-    IP-06 adds DeepStream supervision only through an explicit override
-    (``weapon_detection_agent.deepstream.process_manager.default_deepstream_components_factory``)
-    that the real production entrypoint (``main.py``) passes in — this default stays ``()`` so no
-    existing test's behavior changes as a side effect of that feature.
+    IP-06/IP-07 add DeepStream supervision and detection-event ingestion only through an explicit
+    override (``main.py``'s own composed factory) that the real production entrypoint passes in —
+    this default stays ``()`` so no existing test's behavior changes as a side effect of either
+    feature. Takes ``paths``/``identity_repository`` only to match :data:`ComponentsFactory`'s
+    signature (IP-07 T-87 widened it so a detection-ingest factory can read the persisted device
+    identity and the resolved filesystem layout); neither is used here.
     """
-    del settings  # unused — the empty default takes no settings-dependent action
+    del settings, paths, identity_repository  # unused — the empty default takes no action
     return ()
 
 
@@ -194,7 +205,8 @@ async def _start(
             key_resolver=resolver,
             activation_service=service,
             validation_client=validation_client,
-            components=tuple(components_factory(settings)),  # () by default (IP-06 T-74)
+            # () by default (IP-06 T-74 / IP-07 T-87)
+            components=tuple(components_factory(settings, paths, identity_repository)),
         )
         await supervisor.startup()
 

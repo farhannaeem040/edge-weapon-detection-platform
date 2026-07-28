@@ -31,3 +31,18 @@ class InvalidIdentityStateError(RepositoryError):
 class InvalidConfigCacheStateError(RepositoryError):
     """The stored configuration cache is in a state that should not occur — more than one row, or an
     unparseable stored timestamp."""
+
+
+class DetectionEventAlreadyExistsError(RepositoryError):
+    """A detection event insert used an ``event_id`` that already has a stored row.
+
+    The repository never overwrites an already-persisted detection event (IP-07 T-85) — a duplicate
+    is a defensive, expected-to-be-unreachable condition (the cooldown tracker should prevent it in
+    practice), surfaced clearly rather than silently replacing a real security event.
+    """
+
+
+class InvalidDetectionEventStateError(RepositoryError):
+    """A stored detection event row is in a state that should not occur — an unparseable stored
+    timestamp or an invalid ``event_id`` — so it cannot be reconstructed as a trustworthy
+    :class:`~weapon_detection_agent.detection.models.DetectionEvent`."""
