@@ -84,6 +84,7 @@ def test_fully_valid_configuration_passes_with_exit_0(
         WDA_DEEPSTREAM_ENABLED="true",
         WDA_DETECTION_EVENTS_ENABLED="true",
         WDA_DEEPSTREAM_EXECUTABLE_PATH=BRIDGE_RUN_SH,
+        WDA_DEEPSTREAM_MODEL_PROFILE="yolov4-fp16",
     )
 
     assert run([]) == EXIT_OK

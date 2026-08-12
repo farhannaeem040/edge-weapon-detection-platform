@@ -40,6 +40,11 @@ _WDA_VARS = (
     "WDA_DETECTION_QUEUE_CAPACITY",
     "WDA_DETECTION_CAMERA_ID",
     "WDA_DETECTION_SOCKET_PATH",
+    "WDA_DETECTION_SYNC_ENABLED",
+    "WDA_DETECTION_SYNC_INTERVAL_SECONDS",
+    "WDA_DETECTION_SYNC_BATCH_SIZE",
+    "WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS",
+    "WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS",
 )
 
 VALID_URL = "http://localhost:5230"
@@ -178,13 +183,18 @@ def test_optional_defaults_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.deepstream_log_path == Path(
         "/opt/weapon-detection/logs/deepstream/deepstream.log"
     )
-    assert settings.deepstream_model_profile == "yolov4-fp16"
+    assert settings.deepstream_model_profile == "yolo26-fp16"
     assert settings.detection_events_enabled is False
     assert settings.detection_min_confidence == 0.50
     assert settings.detection_cooldown_seconds == 5.0
     assert settings.detection_queue_capacity == 1000
     assert settings.detection_camera_id == "camera1"
     assert settings.detection_socket_path == Path("/opt/weapon-detection/runtime/detection.sock")
+    assert settings.detection_sync_enabled is False
+    assert settings.detection_sync_interval_seconds == 1.0
+    assert settings.detection_sync_batch_size == 25
+    assert settings.detection_sync_initial_backoff_seconds == 1.0
+    assert settings.detection_sync_max_backoff_seconds == 60.0
 
 
 def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,6 +218,11 @@ def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("WDA_DETECTION_QUEUE_CAPACITY", "500")
     monkeypatch.setenv("WDA_DETECTION_CAMERA_ID", "camera2")
     monkeypatch.setenv("WDA_DETECTION_SOCKET_PATH", "/tmp/wda-test-root/detection.sock")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_ENABLED", "true")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INTERVAL_SECONDS", "2.5")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_BATCH_SIZE", "50")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS", "3.0")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS", "90.0")
 
     settings = load_settings()
 
@@ -229,6 +244,11 @@ def test_optional_values_override_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.detection_queue_capacity == 500
     assert settings.detection_camera_id == "camera2"
     assert settings.detection_socket_path == Path("/tmp/wda-test-root/detection.sock")
+    assert settings.detection_sync_enabled is True
+    assert settings.detection_sync_interval_seconds == 2.5
+    assert settings.detection_sync_batch_size == 50
+    assert settings.detection_sync_initial_backoff_seconds == 3.0
+    assert settings.detection_sync_max_backoff_seconds == 90.0
 
 
 def test_invalid_log_level_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -594,3 +614,123 @@ def test_detection_settings_constructor_override_takes_precedence(
     settings = load_settings(detection_camera_id="constructor-camera")
 
     assert settings.detection_camera_id == "constructor-camera"
+
+
+# --- 16. Detection event Backend sync settings (IP-08 T-107, FS-06 §10) ------------------------
+
+
+def test_detection_sync_enabled_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+
+    assert load_settings().detection_sync_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("true", True), ("false", False), ("1", True), ("0", False)]
+)
+def test_detection_sync_enabled_from_environment(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_ENABLED", value)
+
+    assert load_settings().detection_sync_enabled is expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-0.5"])
+def test_non_positive_detection_sync_interval_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INTERVAL_SECONDS", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DETECTION_SYNC_INTERVAL_SECONDS" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "101", "1000"])
+def test_detection_sync_batch_size_outside_1_to_100_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_BATCH_SIZE", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DETECTION_SYNC_BATCH_SIZE" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["1", "100", "25"])
+def test_detection_sync_batch_size_within_1_to_100_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_BATCH_SIZE", value)
+
+    assert load_settings().detection_sync_batch_size == int(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-3.5"])
+def test_non_positive_detection_sync_initial_backoff_fails(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS", value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS" in str(excinfo.value)
+
+
+def test_max_backoff_below_initial_backoff_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS", "10")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS", "5")
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        load_settings()
+
+    assert "WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS" in str(excinfo.value)
+    assert "WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS" in str(excinfo.value)
+
+
+def test_max_backoff_equal_to_initial_backoff_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS", "5")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS", "5")
+
+    settings = load_settings()
+
+    assert settings.detection_sync_initial_backoff_seconds == 5.0
+    assert settings.detection_sync_max_backoff_seconds == 5.0
+
+
+def test_detection_sync_settings_constructor_override_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_BATCH_SIZE", "10")
+
+    settings = load_settings(detection_sync_batch_size=99)
+
+    assert settings.detection_sync_batch_size == 99
+
+
+def test_detection_sync_backoff_bounds_checked_even_when_sync_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cross-field backoff check is unconditional (mirrors _validate_detection_camera_id's own
+    # posture), so an already-invalid stored/inherited value cannot be masked by the kill switch.
+    monkeypatch.setenv("WDA_BACKEND_BASE_URL", VALID_URL)
+    monkeypatch.setenv("WDA_DETECTION_SYNC_ENABLED", "false")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS", "10")
+    monkeypatch.setenv("WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS", "1")
+
+    with pytest.raises(ConfigurationError):
+        load_settings()

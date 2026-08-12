@@ -33,9 +33,12 @@ function placeholderBranch(overrides: Partial<Branch> = {}): Branch {
     cameras: [
       {
         cameraId: '22222222-2222-2222-2222-222222222222',
+        cameraKey: 'cam-key-14',
         name: 'Front Entrance',
         rtspUrl: REDACTED_RTSP_URL,
         enabled: true,
+        sourceOrder: 0,
+        outputPath: 'cameras/00000000-0000-0000-0000-000000000000',
       },
     ],
     device: { activationStatus: 'Unactivated' },
@@ -116,6 +119,73 @@ describe('BranchDetailComponent', () => {
     expect(element().querySelector('.branch__contact')?.textContent).toContain(
       'placeholder@example.invalid',
     );
+  });
+
+  describe('camera stream URL (manual-review round 2, Correction 1)', () => {
+    it('labels the camera name and stream URL explicitly', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(text()).toContain('Camera name:');
+      // FS-11 §11 relabel: a camera now has two URLs, so the input one is named explicitly.
+      expect(text()).toContain('Input stream URL:');
+      expect(text()).toContain(REDACTED_RTSP_URL);
+    });
+
+    it('never renders the stream URL as a clickable/navigable link', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(element().querySelector('.branch__camera-url a')).toBeNull();
+    });
+
+    it('labels the camera status explicitly', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(text()).toContain('Status:');
+      expect(text()).toContain('Enabled');
+    });
+
+    it('offers an independent copy action for each camera, never automatic clipboard writes', () => {
+      load({
+        success: true,
+        data: placeholderBranch({
+          cameras: [
+            {
+              cameraId: '22222222-2222-2222-2222-222222222222',
+              cameraKey: 'cam-key-15',
+              name: 'Camera One',
+              rtspUrl: 'rtsp://my-server-ip:8554/camera1',
+              enabled: true,
+              sourceOrder: 1,
+              outputPath: 'cameras/00000000-0000-0000-0000-000000000001',
+            },
+            {
+              cameraId: '55555555-5555-5555-5555-555555555555',
+              cameraKey: 'cam-key-16',
+              name: 'Camera Two',
+              rtspUrl: 'rtsp://my-server-ip:8554/camera2',
+              enabled: true,
+              sourceOrder: 2,
+              outputPath: 'cameras/00000000-0000-0000-0000-000000000002',
+            },
+          ],
+        }),
+      });
+
+      const copyButtons = element().querySelectorAll(
+        '.branch__camera-copy',
+      ) as NodeListOf<HTMLButtonElement>;
+      expect(copyButtons.length).toBe(2);
+      expect(copyButtons[0].tagName).toBe('BUTTON');
+      expect(copyButtons[1].tagName).toBe('BUTTON');
+    });
+
+    it('wraps long URLs safely rather than overflowing the card', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const urlElement = element().querySelector('.branch__camera-url') as HTMLElement | null;
+      const styles = urlElement ? getComputedStyle(urlElement) : null;
+      expect(styles?.overflowWrap).toBe('anywhere');
+    });
   });
 
   describe('edit action (T-45)', () => {
@@ -235,15 +305,21 @@ describe('BranchDetailComponent', () => {
         cameras: [
           {
             cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-17',
             name: 'Front Entrance',
             rtspUrl: REDACTED_RTSP_URL,
             enabled: true,
+            sourceOrder: 3,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000003',
           },
           {
             cameraId: '55555555-5555-5555-5555-555555555555',
+            cameraKey: 'cam-key-18',
             name: 'Rear Exit',
             rtspUrl: 'rtsp://camera.example.invalid:554/stream2',
             enabled: false,
+            sourceOrder: 4,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000004',
           },
         ],
       }),
@@ -262,9 +338,12 @@ describe('BranchDetailComponent', () => {
         cameras: [
           {
             cameraId: '55555555-5555-5555-5555-555555555555',
+            cameraKey: 'cam-key-19',
             name: 'Rear Exit',
             rtspUrl: 'rtsp://camera.example.invalid:554/stream2',
             enabled: false,
+            sourceOrder: 5,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000005',
           },
         ],
       }),
@@ -282,10 +361,12 @@ describe('BranchDetailComponent', () => {
   it('renders the Backend-provided RTSP value verbatim and redacts nothing itself', () => {
     load({ success: true, data: placeholderBranch() });
 
-    // The Backend already redacted the credential span; the view displays exactly what arrived.
-    expect(element().querySelector('.branch__camera-url')?.textContent?.trim()).toBe(
-      REDACTED_RTSP_URL,
-    );
+    // The Backend already redacted the credential span; the view displays exactly what arrived,
+    // alongside the "Camera stream URL:" label — never re-redacted or altered.
+    const normalized = (element().querySelector('.branch__camera-url')?.textContent ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    expect(normalized).toBe(`Input stream URL: ${REDACTED_RTSP_URL}`);
   });
 
   it('never renders a credential-bearing RTSP URL, because the Backend never sends one', () => {
@@ -1140,5 +1221,126 @@ describe('BranchDetailComponent', () => {
     ]) {
       expect(rendered).not.toContain(forbidden);
     }
+  });
+
+  // --- FS-11 §11: annotated per-camera output discovery -----------------------------------------
+
+  it('shows the annotated output URL separately from the input stream URL', () => {
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-20',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/22222222-2222-2222-2222-222222222222',
+            outputStreamUrl:
+              'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222',
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://100.98.226.80:8554',
+        },
+      }),
+    });
+
+    // Both URLs are present, each under its own explicit label — they must never be confused.
+    expect(text()).toContain('Input stream URL:');
+    expect(text()).toContain(REDACTED_RTSP_URL);
+    expect(text()).toContain('Annotated output URL:');
+    expect(text()).toContain(
+      'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222',
+    );
+    // The legacy shared mount must never be assumed.
+    expect(text()).not.toContain('ds-test');
+  });
+
+  it('renders one annotated output entry per camera', () => {
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+            cameraKey: 'cam-key-21',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+            outputStreamUrl: 'rtsp://host.example.invalid:8554/cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          },
+          {
+            cameraId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            cameraKey: 'cam-key-22',
+            name: 'Rear Entrance',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 1,
+            outputPath: 'cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            outputStreamUrl: 'rtsp://host.example.invalid:8554/cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://host.example.invalid:8554',
+        },
+      }),
+    });
+
+    const outputs = Array.from(element().querySelectorAll('.branch__camera-output'));
+    expect(outputs.length).toBe(2);
+    expect(text()).toContain('cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(text()).toContain('cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+  });
+
+  it('shows a configuration message instead of a URL when no output base is configured', () => {
+    load({ success: true, data: placeholderBranch() }); // fixture omits outputStreamUrl
+
+    expect(text()).toContain('Output base URL not configured');
+    // Nothing may be fabricated from the request host.
+    expect(text()).not.toContain('rtsp://localhost');
+    expect(element().querySelector('.branch__camera-copy-output')).toBeNull();
+  });
+
+  it('copies the annotated output URL, not the input URL', () => {
+    const outputUrl = 'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222';
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-23',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/22222222-2222-2222-2222-222222222222',
+            outputStreamUrl: outputUrl,
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://100.98.226.80:8554',
+        },
+      }),
+    });
+
+    const written: string[] = [];
+    spyOn(navigator.clipboard, 'writeText').and.callFake((value: string) => {
+      written.push(value);
+      return Promise.resolve();
+    });
+
+    const copyOutput = element().querySelector<HTMLButtonElement>('.branch__camera-copy-output');
+    copyOutput?.click();
+
+    expect(written).toEqual([outputUrl]);
   });
 });

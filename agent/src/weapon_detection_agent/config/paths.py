@@ -48,6 +48,10 @@ CONFIG_DIR_MODE = 0o700
 DATABASE_DIR_MODE = 0o700
 LOGS_DIR_MODE = 0o750
 RUNTIME_DIR_MODE = 0o700
+# 0750 (FS-08 §5) — snapshots/ is the spool for captured evidence JPEGs (IP-10 T-140), less
+# sensitive than the credential-bearing config/database/runtime directories (no secret lives here)
+# but still not world-readable.
+SNAPSHOTS_DIR_MODE = 0o750
 
 # Well-known file names within the layout. Their *paths* are resolved here as the single source of
 # the layout; their *contents* are written by later tasks (see the module docstring).
@@ -58,9 +62,9 @@ DETECTION_SOCKET_FILENAME = "detection.sock"
 
 # ADR-008 directories this milestone must NOT create, because nothing writes to them yet. Named
 # explicitly so the test that asserts their absence reads against one authoritative list. `runtime/`
-# was removed from this list by IP-07 T-82 — the detection event bridge is its first writer.
+# was removed from this list by IP-07 T-82 (the detection event bridge is its first writer);
+# `snapshots` was removed by IP-10 T-140 (evidence capture is its first writer, FS-08 §5).
 DEFERRED_DIRECTORIES: tuple[str, ...] = (
-    "snapshots",
     "recordings",
     "models",
     "pipeline",
@@ -110,6 +114,12 @@ class AgentPaths:
         return self.root / "runtime"
 
     @property
+    def snapshots_dir(self) -> Path:
+        """The ``snapshots/`` directory (mode ``0750``) — the evidence-capture spool (IP-10 T-140,
+        FS-08 §5). First writer: :class:`DetectionIngestHandler`'s snapshot-capture path."""
+        return self.root / "snapshots"
+
+    @property
     def detection_socket_file(self) -> Path:
         """Path of the detection event Unix domain socket (``runtime/detection.sock``). Not created
         here — bound by ``DetectionIngestHandler.start()`` (IP-07 T-86)."""
@@ -143,6 +153,7 @@ class AgentPaths:
             (self.database_dir, DATABASE_DIR_MODE),
             (self.logs_dir, LOGS_DIR_MODE),
             (self.runtime_dir, RUNTIME_DIR_MODE),
+            (self.snapshots_dir, SNAPSHOTS_DIR_MODE),
         )
 
     def provision(self) -> AgentPaths:

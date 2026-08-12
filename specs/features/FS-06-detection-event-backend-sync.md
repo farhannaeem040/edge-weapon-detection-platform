@@ -4,7 +4,7 @@
 |-------|-------|
 | Feature ID | FS-06 |
 | Title | Detection Event Backend Synchronization — reliable, idempotent outbox delivery of Jetson `DetectionEvent` rows to the ASP.NET Core Backend and SQL Server `Alert` table |
-| Status | Draft — awaiting approval; no code written yet |
+| Status | Complete — deployed and enabled in production. One real production detection traced end-to-end (EventId `9297b455…`, ~2.5s latency, `DetectedAtUtc` preserved, `Status=New`, `SnapshotReference=null`). 253 Alerts created over a 15-minute soak, zero duplicates, zero rejections, zero restarts. Historical backlog (4,785 rows) archived and confirmed never sent. |
 | Related SRS Requirements | FR-SYN-002–004 (store-while-disconnected, sync-on-reconnect, server preserves original timestamp), NFR-REL-002 (no detection event lost during an outage) |
 | Related Architecture Sections | §13.4 (Event Idempotency — `(DeviceId, EventId)` unique constraint), §14.1 API table (`POST /api/v1/sync/events`, Agent, `X-Device-Id` + `X-Device-Secret` — frozen, not re-decided here), §10.2 (Backend Sync Client component), §23 (Error Handling — retry/backoff detail is FS-level, not architectural) |
 | Related ADRs | ADR-012 (Event Idempotency — binding, not re-decided here); ADR-002 amended (device auth headers, binding) |

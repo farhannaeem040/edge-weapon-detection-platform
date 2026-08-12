@@ -48,12 +48,28 @@ public class BranchService : IBranchService
         var branch = new Branch(request.Name, request.Address, request.ContactDetails);
 
         var cameras = new List<Camera>(request.Cameras.Count);
-        foreach (var cameraRequest in request.Cameras)
+
+        // FS-12 §3: keys must be unique within the Branch. Checked here as well as by the database's
+        // unique index so a duplicate inside a single request produces a precise named error rather
+        // than an opaque DbUpdateException after a wasted round trip.
+        var seenCameraKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var sourceOrder = 0; sourceOrder < request.Cameras.Count; sourceOrder++)
         {
+            var cameraRequest = request.Cameras[sourceOrder];
             if (cameraRequest is null)
             {
                 throw new ArgumentException(
                     "A camera configuration must not be null.", nameof(request));
+            }
+
+            var cameraKey = ValidateCameraKey(cameraRequest.CameraKey);
+
+            if (!seenCameraKeys.Add(cameraKey))
+            {
+                throw new ConfigurationValidationException(
+                    ConfigurationErrorCodes.CameraKeyAlreadyExists,
+                    "Each camera key must be unique within the branch.");
             }
 
             // RTSP URL *format* is validated here, at the Application layer, not in the Domain
@@ -61,13 +77,27 @@ public class BranchService : IBranchService
             // left to the constructor so a single blank-value message is produced in one place.
             EnsureValidRtspUrl(cameraRequest.RtspUrl);
 
-            cameras.Add(new Camera(branch.BranchId, cameraRequest.Name, cameraRequest.RtspUrl));
+            // FS-11 §2: SourceOrder is auto-assigned from the camera's position in the creation
+            // request — there is no approved admin reordering workflow yet, so request order is the
+            // one deterministic signal available at creation time.
+            cameras.Add(new Camera(
+                branch.BranchId,
+                cameraRequest.Name,
+                cameraRequest.RtspUrl,
+                cameraKey,
+                sourceOrder: sourceOrder));
         }
 
         // Pure, database-free: builds the unactivated Device and its Unconsumed Activation Key, and
         // returns the plaintext key to disclose once. Nothing is persisted until the transaction
         // below.
         var provisioning = _deviceService.ProvisionForBranch(branch.BranchId);
+
+        // FS-12 §4: the reserved Device is the network host for every Camera output of this Branch,
+        // so its address is configured as part of the same creation transaction. Validated *before*
+        // the transaction opens, so a malformed host costs no database work and leaves no partial
+        // rows (FS-12 §9 item 11).
+        ApplyNetworkConfiguration(provisioning.Device, request.JetsonHost, request.RtspOutputPort);
 
         // One transaction spanning Branch + Cameras + Device + Activation Key, so a failure partway
         // through leaves no partial rows (FS-02 §5.1, AC-1). The atomicity is enforced by SQL
@@ -231,21 +261,79 @@ public class BranchService : IBranchService
             {
                 branch.UpdateDetails(request.Name, request.Address, request.ContactDetails);
 
+                // FS-11 §2: a newly-added camera's SourceOrder must not collide with any camera
+                // already stored for this branch. Existing cameras keep the SourceOrder they were
+                // created with (an edit never touches it); a new one gets the next value after the
+                // highest currently stored, so it can never collide with the update loop's own
+                // additions either.
+                var nextSourceOrder = storedCameras.Count == 0
+                    ? 0
+                    : storedCameras.Max(c => c.SourceOrder) + 1;
+
+                // FS-12 §3: every key that will exist after this update must stay unique within the
+                // Branch. Seeded with the keys of cameras the request keeps, so a newly-added camera
+                // cannot claim one that is already in use.
+                var liveCameraKeys = new HashSet<string>(
+                    storedCameras
+                        .Where(c => requestedIds.Contains(c.CameraId))
+                        .Select(c => c.CameraKey),
+                    StringComparer.Ordinal);
+
                 foreach (var mutation in request.Cameras)
                 {
                     if (mutation.CameraId is null)
                     {
-                        // Add: a brand-new camera identity (FS-03 §5.2).
+                        // Add: a brand-new camera identity (FS-03 §5.2). FS-12 §3 — a new Camera must
+                        // carry an explicit administrator-entered key; one is never generated for it.
+                        var newCameraKey = ValidateCameraKey(mutation.CameraKey);
+
+                        if (!liveCameraKeys.Add(newCameraKey))
+                        {
+                            throw new ConfigurationValidationException(
+                                ConfigurationErrorCodes.CameraKeyAlreadyExists,
+                                "Each camera key must be unique within the branch.");
+                        }
+
                         _dbContext.Cameras.Add(
-                            new Camera(branch.BranchId, mutation.Name, mutation.RtspUrl));
+                            new Camera(
+                                branch.BranchId,
+                                mutation.Name,
+                                mutation.RtspUrl,
+                                newCameraKey,
+                                sourceOrder: nextSourceOrder));
+                        nextSourceOrder++;
                     }
                     else
                     {
                         // Update in place: the existing CameraId is preserved (FS-03 §5.3).
-                        storedById[mutation.CameraId.Value]
-                            .UpdateConfiguration(mutation.Name, mutation.RtspUrl);
+                        var stored = storedById[mutation.CameraId.Value];
+
+                        // FS-12 §2: the key is immutable after creation. Omitting it is fine (an
+                        // edit-only client need not echo it back); sending a *different* one is a
+                        // request to move a live RTSP mount, which is rejected outright rather than
+                        // silently ignored — a caller that believes it renamed the key must be told
+                        // it did not.
+                        if (mutation.CameraKey is not null
+                            && !string.Equals(
+                                mutation.CameraKey.Trim(), stored.CameraKey, StringComparison.Ordinal))
+                        {
+                            throw new ConfigurationValidationException(
+                                ConfigurationErrorCodes.CameraKeyImmutable,
+                                "A camera key cannot be changed after the camera is created.");
+                        }
+
+                        stored.UpdateConfiguration(mutation.Name, mutation.RtspUrl);
                     }
                 }
+            }
+            catch (ConfigurationValidationException)
+            {
+                // FS-12 §3.1: these carry a named error code the administrator needs to see, so they
+                // are rethrown for the controller to map rather than being collapsed into the
+                // generic Invalid outcome by the catch below (which they would otherwise match, as
+                // ConfigurationValidationException derives from ArgumentException).
+                await transaction.RollbackAsync(cancellationToken);
+                throw;
             }
             catch (ArgumentException)
             {
@@ -365,8 +453,101 @@ public class BranchService : IBranchService
             branch.Name,
             branch.Address,
             branch.ContactDetails,
-            cameras.Select(c => new CameraView(c.CameraId, c.Name, c.RtspUrl, c.Enabled)).ToList(),
-            new DeviceSummaryView(device.DeviceId, device.ActivationStatus, device.LastKnownAddress));
+            cameras.Select(c => MapCamera(c, device)).ToList(),
+            new DeviceSummaryView(
+                device.DeviceId,
+                device.ActivationStatus,
+                device.LastKnownAddress,
+                device.JetsonHost,
+                device.RtspOutputPort,
+                device.ComposeAnnotatedOutputBase()));
+
+    // FS-11 §11: the annotated-output path is derived from the Camera's immutable id, and the full
+    // client URL is composed against the owning Device's base — null when that base is unset, so a
+    // client is told "not configured" rather than shown an address the Backend guessed.
+    private static CameraView MapCamera(Camera camera, Device device)
+    {
+        // FS-12 §2.1: derived from the administrator-defined CameraKey rather than the CameraId, so
+        // the public mount reads `cameras/front-entrance`. The Camera's own immutable CameraId is
+        // still returned above — the key changed what the *stream* is called, not what the Camera is.
+        var outputPath = Camera.DeriveOutputPath(camera.CameraKey);
+        return new CameraView(
+            camera.CameraId,
+            camera.CameraKey,
+            camera.Name,
+            camera.RtspUrl,
+            camera.Enabled,
+            camera.SourceOrder,
+            outputPath,
+            device.ComposeAnnotatedOutputUrl(outputPath));
+    }
+
+    // FS-12 §3.1 — validates an administrator-supplied CameraKey and maps each distinct failure to
+    // its own named error code. The Domain entity enforces the same rules (so no code path can
+    // persist an invalid key), but it throws a single ArgumentException; this classifies the failure
+    // so the administrator is told whether the key was blank, malformed, or reserved.
+    private static string ValidateCameraKey(string? cameraKey)
+    {
+        if (string.IsNullOrWhiteSpace(cameraKey))
+        {
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.CameraKeyRequired, "A camera key is required.");
+        }
+
+        var trimmed = cameraKey.Trim();
+
+        if (Camera.IsReservedCameraKey(trimmed))
+        {
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.CameraKeyReserved,
+                "That camera key is reserved and cannot be used.");
+        }
+
+        try
+        {
+            return Camera.RequireCameraKey(trimmed);
+        }
+        catch (ArgumentException)
+        {
+            // The value is deliberately not echoed back into the message.
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.CameraKeyInvalid,
+                "A camera key must be 3-64 characters of lowercase letters, digits and hyphens, "
+                    + "starting and ending with a letter or digit.");
+        }
+    }
+
+    // FS-12 §4 — applies the Jetson network configuration, classifying each failure. Like
+    // ValidateCameraKey this does not duplicate the rules; the Device entity owns them, and this
+    // only decides which named code the administrator sees.
+    private static void ApplyNetworkConfiguration(Device device, string? jetsonHost, int? rtspOutputPort)
+    {
+        if (string.IsNullOrWhiteSpace(jetsonHost))
+        {
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.JetsonHostRequired,
+                "A Jetson host (IP address or hostname) is required.");
+        }
+
+        if (rtspOutputPort is < 1 or > 65535)
+        {
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.RtspOutputPortInvalid,
+                "The RTSP output port must be between 1 and 65535.");
+        }
+
+        try
+        {
+            device.SetNetworkConfiguration(jetsonHost, rtspOutputPort);
+        }
+        catch (ArgumentException)
+        {
+            throw new ConfigurationValidationException(
+                ConfigurationErrorCodes.JetsonHostInvalid,
+                "The Jetson host must be a bare IP address or hostname, without a scheme, port, "
+                    + "path, query, fragment or credentials.");
+        }
+    }
 
     // A valid RTSP URL is an absolute URI using the rtsp scheme (FS-02 §12). The value is never
     // echoed into the exception message: an RTSP URL may embed credentials

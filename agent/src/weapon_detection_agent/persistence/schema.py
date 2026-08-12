@@ -13,16 +13,31 @@ credential-state invariant (``Operational`` ⇒ a secret is present; ``Reactivat
 secret is ``NULL``). Because SQLite cannot relax a ``NOT NULL`` in place, the upgrade is a table
 rebuild. Version 3 (FS-05 §7, IP-07 T-85) adds a new, purely additive ``DetectionEvent`` table (no
 existing table is touched) plus one index supporting the future backend-delivery step's
-pending-event query (``DeliveryStatus``, ``CreatedAtUtc``).
+pending-event query (``DeliveryStatus``, ``CreatedAtUtc``). Version 4 (FS-06 §7.2, IP-08 T-103) adds
+``DetectionEvent.DeliveredAtUtc`` and widens the ``DeliveryStatus`` CHECK to permit ``'delivered'``
+— the outbox-delivery feature's own required column/constraint change, via the same table-rebuild
+technique version 2 already established.
+
+Version 5 (FS-08 §6, IP-10 T-141) adds a new, purely additive ``SnapshotOutbox`` table (no existing
+table is touched) plus its index — the exact DDL FS-08 §6 specifies, copied verbatim.
+
+Version 6 (FS-09 §9/§10, IP-11 T-176) widens two CHECK constraints in the same migration: it
+rebuilds ``DetectionEvent`` to permit ``DeliveryStatus = 'suppressed_by_quota'`` (a third terminal
+state alongside ``'pending'``/``'delivered'``, FS-09 §9), and rebuilds ``SnapshotOutbox`` to permit
+``UploadStatus = 'suppressed_by_quota'`` (FS-09 §10) — both using the same table-rebuild technique
+version 2/4 already established, since SQLite cannot widen a CHECK constraint in place.
 
 Forward-only and idempotent, appending steps rather than editing shipped ones:
 
-* A **fresh** database applies the version-1 DDL and then migrates 1 → 2 → 3, so it ends at the
-  latest version through the same migration path an existing database takes (a fresh database's
-  rebuild copies zero rows). The shipped version-1 DDL is never edited.
-* An existing **version-1** database is migrated 1 → 2 → 3.
-* An existing **version-2** database is migrated 2 → 3.
-* An existing **version-3** database is a safe no-op — no rebuild, no data change.
+* A **fresh** database applies the version-1 DDL and then migrates 1 → 2 → 3 → 4 → 5 → 6, so it ends
+  at the latest version through the same migration path an existing database takes (a fresh
+  database's rebuild copies zero rows). The shipped version-1 DDL is never edited.
+* An existing **version-1** database is migrated 1 → 2 → 3 → 4 → 5 → 6.
+* An existing **version-2** database is migrated 2 → 3 → 4 → 5 → 6.
+* An existing **version-3** database is migrated 3 → 4 → 5 → 6.
+* An existing **version-4** database is migrated 4 → 5 → 6.
+* An existing **version-5** database is migrated 5 → 6.
+* An existing **version-6** database is a safe no-op — no rebuild, no data change.
 * A **newer** version raises :class:`UnsupportedSchemaVersionError` without modifying anything.
 
 What this module does **not** do: read or write a ``DeviceIdentity``/``ConfigCache``/
@@ -47,7 +62,7 @@ _LOGGER = logging.getLogger("weapon_detection_agent.persistence.schema")
 
 # The schema version this build understands. A database recording exactly this value is current; a
 # higher value is unsupported (this build must not touch it); anything else is an invalid state.
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 6
 
 # Version-1 DDL, verbatim from IP-02 §7 — retained unedited as the shipped version-1 schema. Each
 # statement is idempotent (IF NOT EXISTS); the ordered tuple is applied as one transaction. Exposed
@@ -187,6 +202,72 @@ _MIGRATION_V2_TO_V3_STATEMENTS: tuple[str, ...] = (
 )
 
 
+def _detection_event_v4_ddl(table_name: str) -> str:
+    """Return the ``CREATE TABLE`` DDL for the version-4 ``DetectionEvent`` shape (FS-06 §7.2).
+
+    Defined once and used for the migration's replacement table, mirroring
+    :func:`_device_identity_v2_ddl`'s technique for the same "SQLite cannot alter a CHECK constraint
+    in place" problem: ``DeliveredAtUtc`` is added and the ``DeliveryStatus`` CHECK widens from
+    ``('pending')`` to ``('pending', 'delivered')`` — the only two differences from the version-3
+    shape. ``table_name`` is a fixed literal (``DetectionEvent`` or ``DetectionEvent_v4``), never
+    caller input.
+    """
+    return f"""
+    CREATE TABLE {table_name} (
+        EventId        TEXT    PRIMARY KEY,
+        DeviceId       TEXT    NOT NULL,
+        CameraId       TEXT    NOT NULL,
+        SourceId       INTEGER NOT NULL,
+        ClassId        INTEGER NOT NULL,
+        ClassName      TEXT    NOT NULL,
+        Confidence     REAL    NOT NULL,
+        FrameNumber    INTEGER NOT NULL,
+        DetectedAtUtc  TEXT    NOT NULL,  -- ISO-8601 UTC
+        FrameWidth     INTEGER NOT NULL,
+        FrameHeight    INTEGER NOT NULL,
+        BboxLeft       REAL    NOT NULL,
+        BboxTop        REAL    NOT NULL,
+        BboxWidth      REAL    NOT NULL,
+        BboxHeight     REAL    NOT NULL,
+        DeliveryStatus TEXT    NOT NULL DEFAULT 'pending'
+            CHECK (DeliveryStatus IN ('pending', 'delivered')),
+        DeliveredAtUtc TEXT    NULL,  -- ISO-8601 UTC; set only when DeliveryStatus = 'delivered'
+        CreatedAtUtc   TEXT    NOT NULL  -- ISO-8601 UTC
+    )
+    """
+
+
+# The version-3 -> version-4 migration (FS-06 §7.2, IP-08 T-103), applied inside a single
+# transaction. SQLite cannot widen a CHECK constraint in place, so this rebuilds `DetectionEvent`
+# using the same create/copy/drop/rename technique `_MIGRATION_V1_TO_V2_STATEMENTS` already
+# established for the analogous `DeviceIdentity` problem: every existing row's `DeliveryStatus`
+# (necessarily 'pending', the only value version 3 permits) and every other column are copied
+# unchanged; the new `DeliveredAtUtc` column is NULL for every migrated row. The index is dropped
+# along with the old table (SQLite indexes do not survive `DROP TABLE`) and is recreated on the
+# renamed table. `DeviceIdentity`/`ConfigCache` are never touched. Exposed at module scope so a test
+# can substitute a deliberately failing step to prove the whole rebuild rolls back.
+_MIGRATION_V3_TO_V4_STATEMENTS: tuple[str, ...] = (
+    _detection_event_v4_ddl("DetectionEvent_v4"),
+    """
+    INSERT INTO DetectionEvent_v4
+        (EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, FrameNumber,
+         DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight,
+         DeliveryStatus, DeliveredAtUtc, CreatedAtUtc)
+    SELECT EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, FrameNumber,
+           DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight,
+           DeliveryStatus, NULL, CreatedAtUtc
+    FROM DetectionEvent
+    """,
+    "DROP TABLE DetectionEvent",
+    "ALTER TABLE DetectionEvent_v4 RENAME TO DetectionEvent",
+    """
+    CREATE INDEX IF NOT EXISTS idx_detection_event_delivery_status_created_at_utc
+        ON DetectionEvent (DeliveryStatus, CreatedAtUtc)
+    """,
+    "UPDATE SchemaVersion SET Version = 4",
+)
+
+
 class UnsupportedSchemaVersionError(DatabaseInitializationError):
     """The database records a schema version newer than this build supports.
 
@@ -216,10 +297,13 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
     """Bring ``connection``'s database to :data:`CURRENT_SCHEMA_VERSION`, idempotently.
 
     * **Fresh database** (no ``SchemaVersion`` table): create the version-1 tables, then migrate
-      1 → 2 → 3, atomically at each step. Returns 3.
-    * **Version 1**: migrate 1 → 2 → 3. Returns 3.
-    * **Version 2**: migrate 2 → 3. Returns 3.
-    * **Already current** (version 3): do nothing destructive; preserve all data. Returns 3.
+      1 → 2 → 3 → 4 → 5 → 6, atomically at each step. Returns 6.
+    * **Version 1**: migrate 1 → 2 → 3 → 4 → 5 → 6. Returns 6.
+    * **Version 2**: migrate 2 → 3 → 4 → 5 → 6. Returns 6.
+    * **Version 3**: migrate 3 → 4 → 5 → 6. Returns 6.
+    * **Version 4**: migrate 4 → 5 → 6. Returns 6.
+    * **Version 5**: migrate 5 → 6. Returns 6.
+    * **Already current** (version 6): do nothing destructive; preserve all data. Returns 6.
     * **Newer version**: raise :class:`UnsupportedSchemaVersionError` without modifying anything.
     * **Invalid version state**: raise :class:`InvalidSchemaStateError` without modifying anything.
 
@@ -250,6 +334,30 @@ def initialize_schema(connection: sqlite3.Connection) -> int:
         )
         _migrate_v2_to_v3(connection)
         version = 3
+        migrated = True
+
+    if version == 3:
+        _LOGGER.info(
+            "database_schema_migration_started", extra={"from_version": 3, "to_version": 4}
+        )
+        _migrate_v3_to_v4(connection)
+        version = 4
+        migrated = True
+
+    if version == 4:
+        _LOGGER.info(
+            "database_schema_migration_started", extra={"from_version": 4, "to_version": 5}
+        )
+        _migrate_v4_to_v5(connection)
+        version = 5
+        migrated = True
+
+    if version == 5:
+        _LOGGER.info(
+            "database_schema_migration_started", extra={"from_version": 5, "to_version": 6}
+        )
+        _migrate_v5_to_v6(connection)
+        version = 6
         migrated = True
 
     if version == CURRENT_SCHEMA_VERSION:
@@ -335,6 +443,214 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     with transaction(connection):
         for statement in _MIGRATION_V2_TO_V3_STATEMENTS:
             connection.execute(statement)
+
+
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    """Upgrade a version-3 database to version 4 in one atomic transaction (FS-06 §7.2, IP-08
+    T-103).
+
+    Rebuilds `DetectionEvent` to add `DeliveredAtUtc` and widen the `DeliveryStatus` CHECK to
+    permit `'delivered'`, preserving every existing row's data (a version-3 row's `DeliveryStatus`
+    is always `'pending'`, since no earlier code ever wrote `'delivered'`). `DeviceIdentity` and
+    `ConfigCache` are never rebuilt, altered, or touched. A failure at any step rolls the whole
+    rebuild back, leaving the database at version 3 with no partial replacement table or index
+    behind.
+    """
+    with transaction(connection):
+        for statement in _MIGRATION_V3_TO_V4_STATEMENTS:
+            connection.execute(statement)
+
+
+# Version-5 DDL (FS-08 §6, IP-10 T-141): a new, purely additive `SnapshotOutbox` table — copied
+# verbatim from the frozen spec, no existing table is rebuilt or altered. `EventId` is both the
+# primary key and a REFERENCES into the active `DetectionEvent` table only — the archive table
+# (`DetectionEvent_archive_20260728`) is never referenced (FS-08 §6/§14). `permanent_failure` is
+# deliberately not a permitted UploadStatus this increment (FS-08 §6) — a stuck row stays 'pending'
+# and keeps retrying with capped backoff. The index supports the upload worker's oldest-first
+# upload-ready scan (FS-08 §11/§12).
+_SNAPSHOT_OUTBOX_V5_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS SnapshotOutbox (
+        EventId          TEXT PRIMARY KEY REFERENCES DetectionEvent(EventId),
+        LocalPath        TEXT NOT NULL,
+        CaptureStatus    TEXT NOT NULL CHECK (CaptureStatus IN ('captured', 'capture_failed')),
+        UploadStatus     TEXT NOT NULL CHECK (UploadStatus IN ('pending', 'uploaded'))
+            DEFAULT 'pending',
+        BackendAlertId   TEXT NULL,
+        ContentType      TEXT NOT NULL,
+        SizeBytes        INTEGER NOT NULL,
+        Sha256           TEXT NOT NULL,
+        CapturedAtUtc    TEXT NOT NULL,
+        UploadedAtUtc    TEXT NULL,
+        AttemptCount     INTEGER NOT NULL DEFAULT 0,
+        LastAttemptAtUtc TEXT NULL,
+        LastErrorCategory TEXT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_snapshot_outbox_upload_status_captured_at_utc
+        ON SnapshotOutbox (UploadStatus, CapturedAtUtc)
+    """,
+)
+
+
+# The version-4 -> version-5 migration (FS-08 §6, IP-10 T-141), applied inside a single transaction.
+# Purely additive: it creates the new table/index and nothing else, so `DeviceIdentity`/
+# `ConfigCache`/`DetectionEvent` rows are never touched. Exposed at module scope so a test can
+# substitute a deliberately failing step to prove the whole migration rolls back.
+_MIGRATION_V4_TO_V5_STATEMENTS: tuple[str, ...] = (
+    *_SNAPSHOT_OUTBOX_V5_STATEMENTS,
+    "UPDATE SchemaVersion SET Version = 5",
+)
+
+
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    """Upgrade a version-4 database to version 5 in one atomic transaction (FS-08 §6, IP-10 T-141).
+
+    Adds the `SnapshotOutbox` table and its one index; every other table is untouched. A failure at
+    any step rolls the whole migration back, leaving the database at version 4 with no partial
+    `SnapshotOutbox` table or index behind.
+    """
+    with transaction(connection):
+        for statement in _MIGRATION_V4_TO_V5_STATEMENTS:
+            connection.execute(statement)
+
+
+def _detection_event_v6_ddl(table_name: str) -> str:
+    """Return the ``CREATE TABLE`` DDL for the version-6 ``DetectionEvent`` shape (FS-09 §9).
+
+    Adds two things to :func:`_detection_event_v4_ddl`'s shape: the ``DeliveryStatus`` CHECK widens
+    to permit ``'suppressed_by_quota'`` (the Backend's ``quota_exceeded`` sync outcome maps to this
+    terminal, never-resent status), and a new nullable ``FinalizedAtUtc`` column records when that
+    terminal state was reached — deliberately separate from ``DeliveredAtUtc``, which keeps its
+    narrower "successfully delivered" meaning. ``table_name`` is a fixed literal (``DetectionEvent``
+    or ``DetectionEvent_v6``), never caller input.
+    """
+    return f"""
+    CREATE TABLE {table_name} (
+        EventId        TEXT    PRIMARY KEY,
+        DeviceId       TEXT    NOT NULL,
+        CameraId       TEXT    NOT NULL,
+        SourceId       INTEGER NOT NULL,
+        ClassId        INTEGER NOT NULL,
+        ClassName      TEXT    NOT NULL,
+        Confidence     REAL    NOT NULL,
+        FrameNumber    INTEGER NOT NULL,
+        DetectedAtUtc  TEXT    NOT NULL,  -- ISO-8601 UTC
+        FrameWidth     INTEGER NOT NULL,
+        FrameHeight    INTEGER NOT NULL,
+        BboxLeft       REAL    NOT NULL,
+        BboxTop        REAL    NOT NULL,
+        BboxWidth      REAL    NOT NULL,
+        BboxHeight     REAL    NOT NULL,
+        DeliveryStatus TEXT    NOT NULL DEFAULT 'pending'
+            CHECK (DeliveryStatus IN ('pending', 'delivered', 'suppressed_by_quota')),
+        DeliveredAtUtc TEXT    NULL,  -- ISO-8601 UTC; set only when DeliveryStatus = 'delivered'
+        FinalizedAtUtc TEXT    NULL,  -- ISO-8601 UTC; set only for 'suppressed_by_quota'
+        CreatedAtUtc   TEXT    NOT NULL  -- ISO-8601 UTC
+    )
+    """
+
+
+def _snapshot_outbox_v6_ddl(table_name: str) -> str:
+    """Return the ``CREATE TABLE`` DDL for the version-6 ``SnapshotOutbox`` shape (FS-09 §10).
+
+    Identical to the version-5 shape except the ``UploadStatus`` CHECK widens to permit
+    ``'suppressed_by_quota'`` — set for any outbox row whose ``DetectionEvent`` was suppressed by
+    the Branch daily Alert quota, so it is never selected for upload (FS-09 §10). ``table_name`` is
+    a fixed literal (``SnapshotOutbox`` or ``SnapshotOutbox_v6``), never caller input.
+    """
+    return f"""
+    CREATE TABLE {table_name} (
+        EventId          TEXT PRIMARY KEY REFERENCES DetectionEvent(EventId),
+        LocalPath        TEXT NOT NULL,
+        CaptureStatus    TEXT NOT NULL CHECK (CaptureStatus IN ('captured', 'capture_failed')),
+        UploadStatus     TEXT NOT NULL
+            CHECK (UploadStatus IN ('pending', 'uploaded', 'suppressed_by_quota'))
+            DEFAULT 'pending',
+        BackendAlertId   TEXT NULL,
+        ContentType      TEXT NOT NULL,
+        SizeBytes        INTEGER NOT NULL,
+        Sha256           TEXT NOT NULL,
+        CapturedAtUtc    TEXT NOT NULL,
+        UploadedAtUtc    TEXT NULL,
+        AttemptCount     INTEGER NOT NULL DEFAULT 0,
+        LastAttemptAtUtc TEXT NULL,
+        LastErrorCategory TEXT NULL
+    )
+    """
+
+
+# The version-5 -> version-6 migration (FS-09 §9/§10, IP-11 T-176), applied inside a single
+# transaction. Rebuilds both `DetectionEvent` and `SnapshotOutbox` to widen their respective CHECK
+# constraints; `DeviceIdentity`/`ConfigCache` are never touched. Every existing row's data is
+# preserved unchanged (no pre-existing row can already hold `'suppressed_by_quota'`, since no
+# earlier code ever wrote it). The `SnapshotOutbox` rebuild happens after the `DetectionEvent`
+# rebuild so its `REFERENCES DetectionEvent(EventId)` always points at an existing table.
+# Exposed at module scope so a test can substitute a deliberately failing step to prove the whole
+# migration rolls back.
+_MIGRATION_V5_TO_V6_STATEMENTS: tuple[str, ...] = (
+    _detection_event_v6_ddl("DetectionEvent_v6"),
+    """
+    INSERT INTO DetectionEvent_v6
+        (EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, FrameNumber,
+         DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight,
+         DeliveryStatus, DeliveredAtUtc, FinalizedAtUtc, CreatedAtUtc)
+    SELECT EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, FrameNumber,
+           DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight,
+           DeliveryStatus, DeliveredAtUtc, NULL, CreatedAtUtc
+    FROM DetectionEvent
+    """,
+    "DROP TABLE DetectionEvent",
+    "ALTER TABLE DetectionEvent_v6 RENAME TO DetectionEvent",
+    """
+    CREATE INDEX IF NOT EXISTS idx_detection_event_delivery_status_created_at_utc
+        ON DetectionEvent (DeliveryStatus, CreatedAtUtc)
+    """,
+    _snapshot_outbox_v6_ddl("SnapshotOutbox_v6"),
+    """
+    INSERT INTO SnapshotOutbox_v6
+        (EventId, LocalPath, CaptureStatus, UploadStatus, BackendAlertId, ContentType, SizeBytes,
+         Sha256, CapturedAtUtc, UploadedAtUtc, AttemptCount, LastAttemptAtUtc, LastErrorCategory)
+    SELECT EventId, LocalPath, CaptureStatus, UploadStatus, BackendAlertId, ContentType, SizeBytes,
+           Sha256, CapturedAtUtc, UploadedAtUtc, AttemptCount, LastAttemptAtUtc, LastErrorCategory
+    FROM SnapshotOutbox
+    """,
+    "DROP TABLE SnapshotOutbox",
+    "ALTER TABLE SnapshotOutbox_v6 RENAME TO SnapshotOutbox",
+    """
+    CREATE INDEX IF NOT EXISTS idx_snapshot_outbox_upload_status_captured_at_utc
+        ON SnapshotOutbox (UploadStatus, CapturedAtUtc)
+    """,
+    "UPDATE SchemaVersion SET Version = 6",
+)
+
+
+def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+    """Upgrade a version-5 database to version 6 in one atomic transaction (FS-09 §9/§10, IP-11
+    T-176).
+
+    Rebuilds `DetectionEvent` and `SnapshotOutbox` to widen their `DeliveryStatus`/`UploadStatus`
+    CHECK constraints to permit `'suppressed_by_quota'`; every other table is untouched. A failure
+    at any step rolls the whole migration back, leaving the database at version 5 with no partial
+    replacement table or index behind.
+
+    Unlike the earlier rebuild migrations, this one temporarily disables foreign-key enforcement
+    (only outside the transaction, where SQLite permits changing the pragma) for its duration:
+    `SnapshotOutbox.EventId REFERENCES DetectionEvent(EventId)` would otherwise block `DROP TABLE
+    DetectionEvent` while the old `SnapshotOutbox` row still references it, regardless of statement
+    order — no ordering of the two rebuilds avoids that, since renaming one table never retargets an
+    existing FK definition in the other. Re-enabled unconditionally in a `finally`, and since the
+    whole rebuild is still one atomic transaction, a mid-way failure leaves both tables exactly as
+    they were, with FK enforcement restored either way.
+    """
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        with transaction(connection):
+            for statement in _MIGRATION_V5_TO_V6_STATEMENTS:
+                connection.execute(statement)
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:

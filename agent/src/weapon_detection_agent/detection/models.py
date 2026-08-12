@@ -49,9 +49,19 @@ class DetectionEvent:
     bbox_width: float
     bbox_height: float
 
+    # Populated only when this instance is read back from storage (IP-08 T-104,
+    # `DetectionEventRepository.list_pending`) — the moment `DetectionEventRepository.insert`
+    # actually assigns `CreatedAtUtc`, from its own injected clock, not from the event object. Never
+    # set by `validate_detection` (FS-05 §5) or read by `insert`; `None` for every not-yet-persisted
+    # event. `BackendSyncClient` (FS-06 §7.3) requires it be present on any event it is asked to
+    # send — a `None` there is a caller bug, not a wire-trust concern.
+    created_at_utc: datetime | None = None
+
     def __post_init__(self) -> None:
         if self.detected_at_utc.tzinfo is None:
             raise ValueError("detected_at_utc must be timezone-aware")
+        if self.created_at_utc is not None and self.created_at_utc.tzinfo is None:
+            raise ValueError("created_at_utc must be timezone-aware")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be within [0.0, 1.0]")
         if self.source_id < 0:

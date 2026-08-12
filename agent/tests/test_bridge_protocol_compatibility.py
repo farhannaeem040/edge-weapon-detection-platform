@@ -1,4 +1,5 @@
-"""Test-only Agent<->Bridge protocol compatibility check (IP-07 T-90, FS-05 §4.6, task item 5).
+"""Test-only Agent<->Bridge protocol compatibility check (IP-07 T-90, FS-05 §4.6; IP-10 T-131/T-139,
+FS-08 §4, task item 5).
 
 The Agent (``weapon_detection_agent.detection.protocol``) and the Bridge
 (``deployment/jetson/deepstream/bridge/app/deepstream_bridge/protocol.py``) each **duplicate** the
@@ -12,6 +13,7 @@ code is ever exposed to the Bridge's package.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,11 @@ from typing import Any
 import pytest
 
 import weapon_detection_agent.detection.protocol as agent_protocol
-from weapon_detection_agent.detection.validation import _REQUIRED_FLOAT_FIELDS, _REQUIRED_INT_FIELDS
+from weapon_detection_agent.detection.validation import (
+    _OPTIONAL_INT_FIELDS,
+    _REQUIRED_FLOAT_FIELDS,
+    _REQUIRED_INT_FIELDS,
+)
 
 _BRIDGE_APP_DIR = (
     Path(__file__).resolve().parent.parent.parent
@@ -88,24 +94,70 @@ def test_max_frame_bytes_match(bridge_protocol: Any) -> None:
     assert agent_protocol.MAX_FRAME_BYTES == bridge_protocol_module.MAX_FRAME_BYTES
 
 
-def test_schema_version_matches(bridge_protocol: Any) -> None:
+def test_max_snapshot_frame_bytes_match(bridge_protocol: Any) -> None:
     bridge_protocol_module, _ = bridge_protocol
-    assert agent_protocol.SUPPORTED_SCHEMA_VERSION == bridge_protocol_module.SCHEMA_VERSION == 1
+    assert (
+        agent_protocol.MAX_SNAPSHOT_FRAME_BYTES == bridge_protocol_module.MAX_SNAPSHOT_FRAME_BYTES
+    )
+
+
+def test_frame_kind_values_match(bridge_protocol: Any) -> None:
+    bridge_protocol_module, _ = bridge_protocol
+    assert agent_protocol.FRAME_KIND_DETECTION == bridge_protocol_module.FRAME_KIND_DETECTION == 1
+    assert agent_protocol.FRAME_KIND_SNAPSHOT == bridge_protocol_module.FRAME_KIND_SNAPSHOT == 2
+    assert (
+        agent_protocol.FRAME_KIND_ACKNOWLEDGEMENT
+        == bridge_protocol_module.FRAME_KIND_ACKNOWLEDGEMENT
+        == 3
+    )
+
+
+def test_frame_header_bytes_match(bridge_protocol: Any) -> None:
+    bridge_protocol_module, _ = bridge_protocol
+    assert agent_protocol.FRAME_HEADER_BYTES == bridge_protocol_module.FRAME_HEADER_BYTES == 5
+
+
+def test_schema_version_matches(bridge_protocol: Any) -> None:
+    """The Bridge (IP-10) emits schemaVersion 2; the Agent accepts both 1 (legacy) and 2 (FS-08
+    §4.2)."""
+    bridge_protocol_module, _ = bridge_protocol
+    assert bridge_protocol_module.SCHEMA_VERSION == 2
+    assert bridge_protocol_module.SCHEMA_VERSION in agent_protocol.SUPPORTED_SCHEMA_VERSIONS
+    assert agent_protocol.SNAPSHOT_PROTOCOL_SCHEMA_VERSION == bridge_protocol_module.SCHEMA_VERSION
+    assert bridge_protocol_module.LEGACY_SCHEMA_VERSION == agent_protocol.SUPPORTED_SCHEMA_VERSION
+    assert bridge_protocol_module.LEGACY_SCHEMA_VERSION in agent_protocol.SUPPORTED_SCHEMA_VERSIONS
 
 
 def test_encode_frame_produces_identical_bytes_on_both_sides(bridge_protocol: Any) -> None:
     bridge_protocol_module, _ = bridge_protocol
-    payload = b'{"schema_version":1,"class_id":0}'
+    payload = b'{"schemaVersion":2,"classId":0}'
     assert agent_protocol.encode_frame(payload) == bridge_protocol_module.encode_frame(payload)
+    assert agent_protocol.encode_frame(
+        payload, kind=agent_protocol.FRAME_KIND_SNAPSHOT
+    ) == bridge_protocol_module.encode_frame(
+        payload, kind=bridge_protocol_module.FRAME_KIND_SNAPSHOT
+    )
+
+
+def test_decode_frame_header_matches(bridge_protocol: Any) -> None:
+    bridge_protocol_module, _ = bridge_protocol
+    frame = agent_protocol.encode_frame(b"abc", kind=agent_protocol.FRAME_KIND_SNAPSHOT)
+    header = frame[: agent_protocol.FRAME_HEADER_BYTES]
+
+    assert agent_protocol.decode_frame_header(header) == bridge_protocol_module.decode_frame_header(
+        header
+    )
 
 
 def test_bridge_raw_wire_fields_match_agent_required_fields(bridge_protocol: Any) -> None:
-    """The Bridge's ``RawDetection`` payload fields (minus ``schema_version``, which is a framing
-    concern the transport layer checks before validation ever runs) are exactly the Agent
-    validator's required raw fields — no more, no less."""
+    """The Bridge's internal ``RawDetection`` payload fields (minus ``schema_version``/
+    ``message_id``, which are framing/correlation concerns the Agent's raw-fact validator never
+    reads as required fields) are exactly the Agent validator's required raw fields — no more, no
+    less."""
     _, bridge_probe = bridge_protocol
     detection = bridge_probe.RawDetection(
-        schema_version=1,
+        schema_version=2,
+        message_id="11111111-1111-1111-1111-111111111111",
         class_id=0,
         confidence=0.9,
         source_id=0,
@@ -117,16 +169,19 @@ def test_bridge_raw_wire_fields_match_agent_required_fields(bridge_protocol: Any
         bbox_width=3.0,
         bbox_height=4.0,
     )
-    bridge_fields = set(detection.to_payload().keys()) - {"schema_version"}
-    agent_required_fields = set(_REQUIRED_INT_FIELDS) | set(_REQUIRED_FLOAT_FIELDS)
+    bridge_fields = set(detection.to_payload().keys()) - {"schema_version", "message_id"}
+    agent_fields = (
+        set(_REQUIRED_INT_FIELDS) | set(_OPTIONAL_INT_FIELDS) | set(_REQUIRED_FLOAT_FIELDS)
+    )
 
-    assert bridge_fields == agent_required_fields
+    assert bridge_fields == agent_fields
 
 
 def test_bridge_never_emits_agent_owned_fields(bridge_protocol: Any) -> None:
     _, bridge_probe = bridge_protocol
     detection = bridge_probe.RawDetection(
-        schema_version=1,
+        schema_version=2,
+        message_id="11111111-1111-1111-1111-111111111111",
         class_id=0,
         confidence=0.9,
         source_id=0,
@@ -139,23 +194,43 @@ def test_bridge_never_emits_agent_owned_fields(bridge_protocol: Any) -> None:
         bbox_height=4.0,
     )
     assert _AGENT_OWNED_FIELDS.isdisjoint(detection.to_payload().keys())
+    assert _AGENT_OWNED_FIELDS.isdisjoint(detection.to_wire_message().keys())
 
 
 def test_multiple_frames_per_connection_supported_by_both_sides(bridge_protocol: Any) -> None:
     """Both sides frame independently (no connection-level state beyond byte-stream position) —
     two consecutive encoded frames concatenate and split back out identically on both sides."""
     bridge_protocol_module, _ = bridge_protocol
-    import json
 
     agent_frame = agent_protocol.encode_frame(json.dumps({"a": 1}).encode("utf-8"))
     bridge_frame = bridge_protocol_module.encode_message({"b": 2})
     combined = agent_frame + bridge_frame
 
-    length1 = int.from_bytes(combined[:4], "big")
-    body1 = combined[4 : 4 + length1]
-    rest = combined[4 + length1 :]
-    length2 = int.from_bytes(rest[:4], "big")
-    body2 = rest[4 : 4 + length2]
+    header_bytes = agent_protocol.FRAME_HEADER_BYTES
+    kind1, length1 = agent_protocol.decode_frame_header(combined[:header_bytes])
+    body1 = combined[header_bytes : header_bytes + length1]
+    rest = combined[header_bytes + length1 :]
+    kind2, length2 = agent_protocol.decode_frame_header(rest[:header_bytes])
+    body2 = rest[header_bytes : header_bytes + length2]
 
+    assert kind1 == kind2 == agent_protocol.FRAME_KIND_DETECTION
     assert json.loads(body1) == {"a": 1}
     assert json.loads(body2) == {"b": 2}
+
+
+def test_snapshot_message_round_trips_across_both_sides(bridge_protocol: Any) -> None:
+    bridge_protocol_module, _ = bridge_protocol
+    event_id = "22222222-2222-2222-2222-222222222222"
+    jpeg_bytes = b"\xff\xd8\xff\xe0fake-jpeg-body"
+
+    bridge_frame = bridge_protocol_module.encode_snapshot_message(event_id, jpeg_bytes)
+    agent_frame = agent_protocol.encode_snapshot_message(event_id, jpeg_bytes)
+    assert agent_frame == bridge_frame
+
+    header_bytes = agent_protocol.FRAME_HEADER_BYTES
+    kind, length = agent_protocol.decode_frame_header(bridge_frame[:header_bytes])
+    body = bridge_frame[header_bytes : header_bytes + length]
+
+    assert kind == agent_protocol.FRAME_KIND_SNAPSHOT == bridge_protocol_module.FRAME_KIND_SNAPSHOT
+    assert agent_protocol.decode_snapshot_message(body) == (event_id, jpeg_bytes)
+    assert bridge_protocol_module.decode_snapshot_message(body) == (event_id, jpeg_bytes)

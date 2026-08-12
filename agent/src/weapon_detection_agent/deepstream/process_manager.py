@@ -194,8 +194,15 @@ def default_deepstream_components_factory(
     Returns an empty tuple when ``settings.deepstream_enabled`` is ``False`` (the default) — no
     ``DeepStreamProcessManager`` is even constructed, so the supervisor registers no component at
     all. A disabled feature behaves as if it were not wired in, not merely as an idle component.
+
+    Also returns an empty tuple when ``settings.device_config_enabled`` is ``True`` (FS-11 §11,
+    IP-13 T-239): in that mode,
+    :class:`~weapon_detection_agent.configuration.coordinator.DeviceConfigurationCoordinator` owns
+    starting/stopping/restarting the Bridge itself, driven by the Backend's Camera configuration —
+    this static, start-once-from-a-fixed-file component must not also try to start it, or two
+    DeepStream processes would race for the same camera.
     """
-    if not settings.deepstream_enabled:
+    if not settings.deepstream_enabled or settings.device_config_enabled:
         return ()
     return (
         DeepStreamProcessManager(

@@ -55,10 +55,10 @@ public class BranchUpdateServiceTests : IDisposable
     private async Task<BranchView> CreateBranchAsync(int cameraCount = 2)
     {
         var cameras = Enumerable.Range(1, cameraCount)
-            .Select(i => new NewCameraRequest($"Camera {i}", $"rtsp://camera.example.invalid:554/s{i}"))
+            .Select(i => new NewCameraRequest($"Camera {i}", $"rtsp://camera.example.invalid:554/s{i}", $"cam-{Guid.NewGuid():N}"))
             .ToList();
         var result = await _branchService.CreateBranchAsync(
-            new NewBranchRequest("Downtown", "1 High Street", "ops@example.invalid", cameras));
+            new NewBranchRequest("Downtown", "1 High Street", "ops@example.invalid", "100.98.226.80", 8554, cameras));
         return result.Branch;
     }
 
@@ -71,7 +71,9 @@ public class BranchUpdateServiceTests : IDisposable
     private static CameraMutation Existing(Guid cameraId, string name, string url) =>
         new(cameraId, name, url);
 
-    private static CameraMutation Added(string name, string url) => new(null, name, url);
+    // FS-12 §3: a newly added Camera must carry an explicit administrator-entered key.
+    private static CameraMutation Added(string name, string url) =>
+        new(null, name, url, $"cam-{Guid.NewGuid():N}");
 
     // --- Scalar fields (AC-1) ---
 

@@ -37,6 +37,11 @@ from deepstream_bridge.errors import (
 )
 from deepstream_bridge.pipeline import BridgePipeline
 from deepstream_bridge.protocol import DEFAULT_QUEUE_CAPACITY
+from deepstream_bridge.snapshot import (
+    CandidateFrameTracker,
+    SnapshotAcknowledgementHandler,
+    SnapshotCandidateCache,
+)
 from deepstream_bridge.transport import TransportWorker
 
 _LOGGER = logging.getLogger("deepstream_bridge.main")
@@ -80,8 +85,36 @@ def run(argv: list[str] | None = None) -> int:
 
     transport = TransportWorker(socket_path=args.socket_path, queue_capacity=DEFAULT_QUEUE_CAPACITY)
 
+    # IP-10 T-136: only constructed when snapshot capture is configured on — a disabled deployment
+    # (the default) never builds the candidate tracker/JPEG cache/acknowledgement handler at all,
+    # matching the pipeline's own "no tee/valve/snapshot branch" kill-switch behavior.
+    if config.snapshot.enabled:
+        candidate_tracker = CandidateFrameTracker(
+            max_retained=config.snapshot.max_retained_frames,
+            ttl_seconds=config.snapshot.frame_ttl_ms / 1000.0,
+        )
+        snapshot_cache = SnapshotCandidateCache(
+            max_retained_frames=config.snapshot.max_retained_frames,
+            ttl_seconds=config.snapshot.frame_ttl_ms / 1000.0,
+        )
+        transport.set_acknowledgement_callback(
+            SnapshotAcknowledgementHandler(
+                candidate_tracker=candidate_tracker,
+                snapshot_cache=snapshot_cache,
+                send_snapshot=transport.enqueue_snapshot,
+            )
+        )
+    else:
+        candidate_tracker = None
+        snapshot_cache = None
+
     try:
-        pipeline = BridgePipeline(config=config, enqueue=transport.enqueue)
+        pipeline = BridgePipeline(
+            config=config,
+            enqueue=transport.enqueue,
+            candidate_tracker=candidate_tracker,
+            snapshot_cache=snapshot_cache,
+        )
         pipeline.build()
     except (
         MissingGStreamerBindingsError,

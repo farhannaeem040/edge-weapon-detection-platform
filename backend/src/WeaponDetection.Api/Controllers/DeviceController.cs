@@ -79,4 +79,41 @@ public class DeviceController : ControllerBase
 
         return Ok(RegenerateActivationKeyResponseDto.From(result));
     }
+
+    // FS-12 §4 — sets the Jetson network configuration (host + RTSP output port) for a branch's
+    // Device. Replaces the former `annotated-output-base-url` route: the structured pair is now
+    // authoritative, and keeping both writers would let two representations of one fact diverge.
+    //
+    // Keyed on branchId to match the regeneration route above: the branch id is the only
+    // always-present, client-visible handle to a branch's single Device, and it works before the
+    // Device has activated. This changes client-facing discovery metadata only — it never touches
+    // DeviceId, activation status, credentials, Cameras, Camera output paths, or Alerts, and it
+    // deliberately does not affect the Agent's configurationVersion, so it cannot restart the Bridge
+    // (FS-12 §6, §9 item 10).
+    [HttpPut("{branchId:guid}/network")]
+    public async Task<IActionResult> SetNetworkConfiguration(
+        Guid branchId,
+        [FromBody] SetDeviceNetworkRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        DeviceNetworkUpdate? result;
+        try
+        {
+            result = await _deviceService.SetNetworkConfigurationAsync(
+                branchId, request?.JetsonHost, request?.RtspOutputPort, cancellationToken);
+        }
+        catch (ArgumentException exception)
+        {
+            // The domain's own validation message — never the rejected value, and never a stack
+            // trace.
+            return BadRequest(ApiResponse.Fail("VALIDATION_ERROR", exception.Message));
+        }
+
+        if (result is null)
+        {
+            return NotFound(ApiResponse.Fail("NOT_FOUND", "Device not found."));
+        }
+
+        return Ok(ApiResponse.Ok(SetDeviceNetworkResponseDto.From(result)));
+    }
 }

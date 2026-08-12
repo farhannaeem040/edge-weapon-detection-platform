@@ -105,6 +105,95 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                     b.ToTable("AdminUsers", (string)null);
                 });
 
+            modelBuilder.Entity("WeaponDetection.Domain.Alert", b =>
+                {
+                    b.Property<Guid>("AlertId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double>("BboxHeight")
+                        .HasColumnType("float");
+
+                    b.Property<double>("BboxLeft")
+                        .HasColumnType("float");
+
+                    b.Property<double>("BboxTop")
+                        .HasColumnType("float");
+
+                    b.Property<double>("BboxWidth")
+                        .HasColumnType("float");
+
+                    b.Property<Guid>("CameraId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("ClassId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ClassName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<double>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTime>("DetectedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("FrameHeight")
+                        .HasColumnType("int");
+
+                    b.Property<long>("FrameNumber")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("FrameWidth")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ReceivedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SnapshotContentType")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("SnapshotReceivedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SnapshotReference")
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("SnapshotSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<long?>("SnapshotSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.HasKey("AlertId");
+
+                    b.HasIndex("CameraId");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("DeviceId", "EventId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_Alerts_DeviceId_EventId");
+
+                    b.ToTable("Alerts", (string)null);
+                });
+
             modelBuilder.Entity("WeaponDetection.Domain.Branch", b =>
                 {
                     b.Property<Guid>("BranchId")
@@ -126,9 +215,46 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<string>("TimeZoneId")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.HasKey("BranchId");
 
                     b.ToTable("Branches", (string)null);
+                });
+
+            modelBuilder.Entity("WeaponDetection.Domain.BranchDailyAlertQuota", b =>
+                {
+                    b.Property<Guid>("BranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LocalDate")
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
+                    b.Property<int>("AcceptedAlertCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("FirstSuppressedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("GunSuppressedCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("KnifeSuppressedCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("LastSuppressedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("SuppressedDetectionCount")
+                        .HasColumnType("int");
+
+                    b.HasKey("BranchId", "LocalDate")
+                        .HasName("PK_BranchDailyAlertQuotas");
+
+                    b.ToTable("BranchDailyAlertQuotas", (string)null);
                 });
 
             modelBuilder.Entity("WeaponDetection.Domain.Camera", b =>
@@ -139,6 +265,11 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("BranchId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CameraKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<bool>("Enabled")
                         .ValueGeneratedOnAdd()
@@ -155,9 +286,23 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                         .HasMaxLength(2048)
                         .HasColumnType("nvarchar(2048)");
 
+                    b.Property<int>("SourceOrder")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
                     b.HasKey("CameraId");
 
                     b.HasIndex("BranchId");
+
+                    b.HasIndex("BranchId", "CameraKey")
+                        .IsUnique()
+                        .HasDatabaseName("IX_Cameras_BranchId_CameraKey");
+
+                    b.HasIndex("BranchId", "SourceOrder")
+                        .IsUnique()
+                        .HasDatabaseName("IX_Cameras_BranchId_SourceOrder_Enabled")
+                        .HasFilter("[Enabled] = 1");
 
                     b.ToTable("Cameras", (string)null);
                 });
@@ -173,11 +318,19 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<string>("AnnotatedOutputBaseUrl")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
                     b.Property<Guid>("BranchId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid?>("DeviceId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("JetsonHost")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
 
                     b.Property<string>("LastKnownAddress")
                         .HasMaxLength(256)
@@ -186,6 +339,9 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                     b.Property<string>("ProtectedSharedSecret")
                         .HasMaxLength(1024)
                         .HasColumnType("nvarchar(1024)");
+
+                    b.Property<int?>("RtspOutputPort")
+                        .HasColumnType("int");
 
                     b.HasKey("DeviceRecordId");
 
@@ -197,6 +353,46 @@ namespace WeaponDetection.Infrastructure.Persistence.Migrations
                         .HasFilter("[DeviceId] IS NOT NULL");
 
                     b.ToTable("Devices", (string)null);
+                });
+
+            modelBuilder.Entity("WeaponDetection.Domain.SuppressedDetectionEvent", b =>
+                {
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ClassName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("DetectedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("LocalDate")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("DeviceId", "EventId")
+                        .HasName("PK_SuppressedDetectionEvents");
+
+                    b.HasIndex("BranchId", "LocalDate");
+
+                    b.ToTable("SuppressedDetectionEvents", (string)null);
                 });
 
             modelBuilder.Entity("WeaponDetection.Domain.ActivationKey", b =>

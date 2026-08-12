@@ -93,6 +93,7 @@ def test_environment_override_is_actually_used_by_the_ingest_handler(tmp_path: P
         deepstream_enabled=True,
         detection_events_enabled=True,
         deepstream_executable_path="/opt/weapon-detection/deepstream-bridge/run.sh",
+        deepstream_model_profile="yolov4-fp16",
         detection_socket_path=str(custom_socket),
     )
 

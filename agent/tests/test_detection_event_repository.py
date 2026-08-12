@@ -359,6 +359,291 @@ def test_malformed_stored_event_id_is_rejected_on_read(tmp_path: Path) -> None:
 # --- Import performs no I/O -----------------------------------------------------------------------
 
 
+# --- list_pending / mark_delivered_many (IP-08 T-104, FS-06 §7.1) ------------------------------
+
+
+def test_list_pending_returns_only_pending_rows_oldest_first(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    older = UUID(int=1)
+    newer = UUID(int=2)
+    repo.insert(
+        _event(
+            event_id=older,
+            detected_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    repo.insert(
+        _event(
+            event_id=newer,
+            detected_at_utc=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+    )
+    repo.mark_delivered_many([older], FIXED_CREATED_AT)
+
+    # 'older' is now delivered and must never be returned again; 'newer' remains pending.
+    pending = repo.list_pending(10)
+
+    assert [e.event_id for e in pending] == [newer]
+
+
+def test_list_pending_orders_oldest_detected_first_with_event_id_tiebreak(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    high_id = UUID(int=9)
+    low_id = UUID(int=1)
+    later = UUID(int=5)
+    repo.insert(_event(event_id=high_id, detected_at_utc=same_time))
+    repo.insert(_event(event_id=low_id, detected_at_utc=same_time))
+    repo.insert(_event(event_id=later, detected_at_utc=datetime(2026, 1, 2, tzinfo=timezone.utc)))
+
+    pending = repo.list_pending(10)
+
+    # Equal DetectedAtUtc breaks the tie by EventId ascending; the later-detected event is last.
+    assert [e.event_id for e in pending] == [low_id, high_id, later]
+
+
+def test_list_pending_respects_limit(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    for i in range(5):
+        repo.insert(
+            _event(
+                event_id=UUID(int=i + 1),
+                detected_at_utc=datetime(2026, 1, i + 1, tzinfo=timezone.utc),
+            )
+        )
+
+    pending = repo.list_pending(2)
+
+    assert len(pending) == 2
+
+
+def test_list_pending_rejects_non_positive_limit(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+
+    with pytest.raises(ValueError):
+        repo.list_pending(0)
+
+
+def test_list_pending_populates_created_at_utc(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event())
+
+    (loaded,) = repo.list_pending(10)
+
+    assert loaded.created_at_utc == FIXED_CREATED_AT
+
+
+def test_list_recent_does_not_populate_created_at_utc(tmp_path: Path) -> None:
+    # list_recent's own mapping is unchanged by this feature (it never selects CreatedAtUtc).
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event())
+
+    (loaded,) = repo.list_recent(10)
+
+    assert loaded.created_at_utc is None
+
+
+def test_mark_delivered_many_marks_successful_and_duplicate_outcomes(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.insert(_event(event_id=OTHER_EVENT_ID, camera_id="camera2"))
+    delivered_at = datetime(2026, 7, 24, 19, 0, 0, tzinfo=timezone.utc)
+
+    updated = repo.mark_delivered_many([EVENT_ID, OTHER_EVENT_ID], delivered_at)
+
+    assert updated == 2
+    assert repo.list_pending(10) == []
+    with open_connection(db) as connection:
+        rows = connection.execute(
+            "SELECT EventId, DeliveryStatus, DeliveredAtUtc FROM DetectionEvent"
+        ).fetchall()
+    for row in rows:
+        assert row["DeliveryStatus"] == "delivered"
+        assert row["DeliveredAtUtc"] == delivered_at.isoformat()
+
+
+def test_mark_delivered_many_partial_batch_marks_only_named_ids(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.insert(_event(event_id=OTHER_EVENT_ID, camera_id="camera2"))
+
+    updated = repo.mark_delivered_many([EVENT_ID], FIXED_CREATED_AT)
+
+    assert updated == 1
+    pending_ids = {e.event_id for e in repo.list_pending(10)}
+    assert pending_ids == {OTHER_EVENT_ID}
+
+
+def test_mark_delivered_many_never_re_marks_an_already_delivered_row(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.mark_delivered_many([EVENT_ID], datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    # A second call naming the already-delivered id updates nothing (idempotent, no re-stamping).
+    second_attempt_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    updated = repo.mark_delivered_many([EVENT_ID], second_attempt_at)
+
+    assert updated == 0
+    with open_connection(db) as connection:
+        row = connection.execute(
+            "SELECT DeliveredAtUtc FROM DetectionEvent WHERE EventId = ?", (str(EVENT_ID),)
+        ).fetchone()
+    assert row["DeliveredAtUtc"] == datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+
+
+def test_mark_delivered_many_ignores_unknown_event_ids(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+    repo.insert(_event(event_id=EVENT_ID))
+
+    updated = repo.mark_delivered_many([OTHER_EVENT_ID], FIXED_CREATED_AT)
+
+    assert updated == 0
+    assert [e.event_id for e in repo.list_pending(10)] == [EVENT_ID]
+
+
+def test_mark_delivered_many_empty_list_is_a_no_op(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+    repo.insert(_event())
+
+    updated = repo.mark_delivered_many([], FIXED_CREATED_AT)
+
+    assert updated == 0
+    assert len(repo.list_pending(10)) == 1
+
+
+def test_mark_delivered_many_rejects_naive_delivered_at(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+    repo.insert(_event())
+
+    with pytest.raises(ValueError):
+        repo.mark_delivered_many([EVENT_ID], datetime(2026, 1, 1))
+
+
+def test_delivered_row_is_never_selected_again_by_list_pending(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event())
+    repo.mark_delivered_many([EVENT_ID], FIXED_CREATED_AT)
+
+    assert repo.list_pending(10) == []
+    # Insert a second event to prove the query still runs correctly, not just returns empty always.
+    repo.insert(_event(event_id=OTHER_EVENT_ID))
+    assert [e.event_id for e in repo.list_pending(10)] == [OTHER_EVENT_ID]
+
+
+# --- FS-09 §9, IP-11 T-177: mark_suppressed_by_quota_many -----------------------------------------
+
+
+def test_mark_suppressed_by_quota_many_marks_pending_rows_terminal(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.insert(_event(event_id=OTHER_EVENT_ID, camera_id="camera2"))
+    finalized_at = datetime(2026, 7, 24, 19, 0, 0, tzinfo=timezone.utc)
+
+    updated = repo.mark_suppressed_by_quota_many([EVENT_ID, OTHER_EVENT_ID], finalized_at)
+
+    assert updated == 2
+    assert repo.list_pending(10) == []
+    with open_connection(db) as connection:
+        rows = connection.execute(
+            "SELECT EventId, DeliveryStatus, FinalizedAtUtc, DeliveredAtUtc FROM DetectionEvent"
+        ).fetchall()
+    for row in rows:
+        assert row["DeliveryStatus"] == "suppressed_by_quota"
+        assert row["FinalizedAtUtc"] == finalized_at.isoformat()
+        assert row["DeliveredAtUtc"] is None
+
+
+def test_mark_suppressed_by_quota_many_partial_batch_marks_only_named_ids(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.insert(_event(event_id=OTHER_EVENT_ID, camera_id="camera2"))
+
+    updated = repo.mark_suppressed_by_quota_many([EVENT_ID], FIXED_CREATED_AT)
+
+    assert updated == 1
+    pending_ids = {e.event_id for e in repo.list_pending(10)}
+    assert pending_ids == {OTHER_EVENT_ID}
+
+
+def test_mark_suppressed_by_quota_many_never_re_marks_an_already_delivered_row(
+    tmp_path: Path,
+) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.mark_delivered_many([EVENT_ID], datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    # quota_exceeded must never overwrite an already-delivered row's terminal state.
+    updated = repo.mark_suppressed_by_quota_many([EVENT_ID], FIXED_CREATED_AT)
+
+    assert updated == 0
+    with open_connection(db) as connection:
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = ?", (str(EVENT_ID),)
+        ).fetchone()
+    assert row["DeliveryStatus"] == "delivered"
+
+
+def test_mark_suppressed_by_quota_many_never_re_marks_an_already_suppressed_row(
+    tmp_path: Path,
+) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event(event_id=EVENT_ID))
+    repo.mark_suppressed_by_quota_many([EVENT_ID], datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    # A retried quota_exceeded outcome for the same EventId is idempotent, not a re-stamp.
+    second_attempt_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    updated = repo.mark_suppressed_by_quota_many([EVENT_ID], second_attempt_at)
+
+    assert updated == 0
+    with open_connection(db) as connection:
+        row = connection.execute(
+            "SELECT FinalizedAtUtc FROM DetectionEvent WHERE EventId = ?", (str(EVENT_ID),)
+        ).fetchone()
+    assert row["FinalizedAtUtc"] == datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+
+
+def test_mark_suppressed_by_quota_many_empty_list_is_a_no_op(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+    repo.insert(_event())
+
+    updated = repo.mark_suppressed_by_quota_many([], FIXED_CREATED_AT)
+
+    assert updated == 0
+    assert len(repo.list_pending(10)) == 1
+
+
+def test_mark_suppressed_by_quota_many_rejects_naive_finalized_at(tmp_path: Path) -> None:
+    repo = _repo(_ready_db(tmp_path))
+    repo.insert(_event())
+
+    with pytest.raises(ValueError):
+        repo.mark_suppressed_by_quota_many([EVENT_ID], datetime(2026, 1, 1))
+
+
+def test_suppressed_by_quota_row_is_never_selected_again_by_list_pending(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = _repo(db)
+    repo.insert(_event())
+    repo.mark_suppressed_by_quota_many([EVENT_ID], FIXED_CREATED_AT)
+
+    assert repo.list_pending(10) == []
+    repo.insert(_event(event_id=OTHER_EVENT_ID))
+    assert [e.event_id for e in repo.list_pending(10)] == [OTHER_EVENT_ID]
+
+
 def test_repository_import_performs_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("importing the repository must not perform I/O")

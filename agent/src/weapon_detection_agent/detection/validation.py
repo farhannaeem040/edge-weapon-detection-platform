@@ -30,7 +30,16 @@ from weapon_detection_agent.detection.models import DetectionEvent
 # The raw wire payload's required fields (FS-05 §5) — everything the Bridge is responsible for
 # sending. Identity/attribution fields are deliberately absent: they are never read from `payload`
 # even if present (a malicious/buggy Bridge payload cannot forge them).
-_REQUIRED_INT_FIELDS = ("class_id", "source_id", "frame_number", "frame_width", "frame_height")
+#
+# `frame_width`/`frame_height` moved to _OPTIONAL_INT_FIELDS (IP-10 T-139, FS-08 §4.3): the Bridge's
+# v2 wire message (`build_detection_message`) deliberately omits them — FS-08 §4.3's own example
+# payload has no frame dimensions at all, confirmed against the real Bridge's wire-message builder.
+# A v1 payload (and any v2 payload that does carry them) still validates them exactly as before when
+# present; when absent, :func:`validate_detection` derives the smallest frame that contains the
+# reported bounding box (see the derivation below) so `DetectionEvent`'s own "bbox never exceeds
+# frame" invariant still holds by construction, and logs this as a documented deviation.
+_REQUIRED_INT_FIELDS = ("class_id", "source_id", "frame_number")
+_OPTIONAL_INT_FIELDS = ("frame_width", "frame_height")
 _REQUIRED_FLOAT_FIELDS = ("confidence", "bbox_left", "bbox_top", "bbox_width", "bbox_height")
 
 
@@ -48,6 +57,9 @@ class DetectionRejectionReason(str, Enum):
     UNKNOWN_CLASS = "unknown_class"
     CONFIDENCE_OUT_OF_RANGE = "confidence_out_of_range"
     CONFIDENCE_BELOW_THRESHOLD = "confidence_below_threshold"
+    # FS-11 §9: a Bridge-reported source_id that does not resolve to a Camera in the currently
+    # applied configuration generation (server-driven Camera configuration mode only).
+    UNRESOLVED_CAMERA_SOURCE = "unresolved_camera_source"
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,39 @@ class DetectionRejection:
 
     reason: DetectionRejectionReason
     field: str | None = None
+
+
+def normalize_v2_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Translate a v2 wire message (FS-08 §4.3: camelCase, nested ``boundingBox``) into the flat
+    snake_case shape :func:`validate_detection` expects (the same shape a v1 message already uses).
+
+    This is the one place schema-version-specific wire-shape translation belongs — every rule below
+    it in :func:`validate_detection` runs identically regardless of which schema version produced
+    the now-normalized fields. A missing/malformed ``boundingBox`` (not a ``dict``, or missing a
+    sub-field) degrades gracefully: the corresponding flat key is simply left absent, which
+    :func:`validate_detection` already rejects as ``malformed_field`` — the same outcome a
+    genuinely-missing v1 field produces, no special-cased error path needed here.
+    """
+    bbox = payload.get("boundingBox")
+    bbox = bbox if isinstance(bbox, dict) else {}
+
+    normalized: dict[str, Any] = dict(payload)
+    for camel, snake in (
+        ("classId", "class_id"),
+        ("sourceId", "source_id"),
+        ("frameNumber", "frame_number"),
+    ):
+        if camel in payload:
+            normalized[snake] = payload[camel]
+    for snake, value in (
+        ("bbox_left", bbox.get("left")),
+        ("bbox_top", bbox.get("top")),
+        ("bbox_width", bbox.get("width")),
+        ("bbox_height", bbox.get("height")),
+    ):
+        if value is not None:
+            normalized[snake] = value
+    return normalized
 
 
 def validate_detection(
@@ -97,6 +142,16 @@ def validate_detection(
             return DetectionRejection(DetectionRejectionReason.MALFORMED_FIELD, field=field)
         ints[field] = value
 
+    optional_ints: dict[str, int | None] = {}
+    for field in _OPTIONAL_INT_FIELDS:
+        if field not in payload:
+            optional_ints[field] = None
+            continue
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return DetectionRejection(DetectionRejectionReason.MALFORMED_FIELD, field=field)
+        optional_ints[field] = value
+
     floats: dict[str, float] = {}
     for field in _REQUIRED_FLOAT_FIELDS:
         value = payload.get(field)
@@ -109,16 +164,16 @@ def validate_detection(
     class_id = ints["class_id"]
     source_id = ints["source_id"]
     frame_number = ints["frame_number"]
-    frame_width = ints["frame_width"]
-    frame_height = ints["frame_height"]
+    frame_width = optional_ints["frame_width"]
+    frame_height = optional_ints["frame_height"]
 
     if source_id < 0:
         return DetectionRejection(DetectionRejectionReason.NEGATIVE_VALUE, field="source_id")
     if frame_number < 0:
         return DetectionRejection(DetectionRejectionReason.NEGATIVE_VALUE, field="frame_number")
-    if frame_width <= 0:
+    if frame_width is not None and frame_width <= 0:
         return DetectionRejection(DetectionRejectionReason.NEGATIVE_VALUE, field="frame_width")
-    if frame_height <= 0:
+    if frame_height is not None and frame_height <= 0:
         return DetectionRejection(DetectionRejectionReason.NEGATIVE_VALUE, field="frame_height")
 
     confidence = floats["confidence"]
@@ -147,6 +202,18 @@ def validate_detection(
     class_name = class_names.get(class_id)
     if class_name is None:
         return DetectionRejection(DetectionRejectionReason.UNKNOWN_CLASS, field="class_id")
+
+    # IP-10 T-139, FS-08 §4.3: a v2 message omits frame_width/frame_height entirely (confirmed
+    # against the real Bridge's wire-message builder). When absent, derive the smallest frame that
+    # contains the reported bounding box — this is a deliberate, documented deviation from the
+    # native camera resolution (which a v2 message alone cannot convey), chosen so
+    # `DetectionEvent`'s
+    # existing "bounding box never exceeds the frame" invariant still holds by construction without
+    # a DetectionEvent/SQLite schema change this feature does not otherwise need.
+    if frame_width is None:
+        frame_width = max(1, math.ceil(bbox_left + bbox_width))
+    if frame_height is None:
+        frame_height = max(1, math.ceil(bbox_top + bbox_height))
 
     # Clamp bounding-box overflow to the frame boundary (FS-05 §5) — an edge-of-frame detection is
     # still a real detection, unlike a negative coordinate (rejected above).

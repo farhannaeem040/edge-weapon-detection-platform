@@ -40,16 +40,27 @@ public class BranchController : ControllerBase
             request.Name,
             request.Address,
             request.ContactDetails,
+            request.JetsonHost,
+            request.RtspOutputPort,
             request.Cameras
                 // A null element passes model validation; preserve it so the service's own guard
                 // rejects it as an ArgumentException rather than this mapping throwing an NRE.
-                .Select(c => c is null ? null! : new NewCameraRequest(c.Name, c.RtspUrl))
+                .Select(c => c is null ? null! : new NewCameraRequest(c.Name, c.RtspUrl, c.CameraKey))
                 .ToList());
 
         BranchCreationResult result;
         try
         {
             result = await _branchService.CreateBranchAsync(appRequest, cancellationToken);
+        }
+        catch (ConfigurationValidationException ex)
+        {
+            // FS-12 §3.1/§4: these failures carry their own named code, because an administrator
+            // needs to know whether a camera key was malformed, reserved or already taken — each
+            // implies a different fix. Caught before the generic ArgumentException below, which this
+            // type derives from. The message is the exception's own fixed text and still never
+            // echoes a submitted value.
+            return BadRequest(ApiResponse.Fail(ex.ErrorCode, ex.Message));
         }
         catch (ArgumentException)
         {
@@ -115,10 +126,23 @@ public class BranchController : ControllerBase
             request.Cameras
                 // A null element passes model validation; preserve it so the service's own guard
                 // rejects it rather than this mapping throwing an NRE.
-                .Select(c => c is null ? null! : new CameraMutation(c.CameraId, c.Name, c.RtspUrl))
+                .Select(c => c is null
+                    ? null!
+                    : new CameraMutation(c.CameraId, c.Name, c.RtspUrl, c.CameraKey))
                 .ToList());
 
-        var result = await _branchService.UpdateBranchAsync(appRequest, cancellationToken);
+        BranchUpdateResult result;
+        try
+        {
+            result = await _branchService.UpdateBranchAsync(appRequest, cancellationToken);
+        }
+        catch (ConfigurationValidationException ex)
+        {
+            // FS-12 §3.1 — chiefly CAMERA_KEY_IMMUTABLE. Surfaced with its own code rather than
+            // collapsed into the generic VALIDATION_ERROR below, so a client that believes it
+            // renamed a key is told precisely why it did not.
+            return BadRequest(ApiResponse.Fail(ex.ErrorCode, ex.Message));
+        }
 
         return result.Status switch
         {

@@ -13,7 +13,7 @@ import {
   UpdateBranchRequest,
 } from './branch.models';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchDetailRoute } from './branch.routes';
-import { notBlank, rtspUrl } from './branch.validators';
+import { cameraKey, notBlank, rtspUrl } from './branch.validators';
 
 /**
  * Branch editing: the form that loads an existing branch, lets an Admin change its scalar fields and
@@ -30,7 +30,9 @@ import { notBlank, rtspUrl } from './branch.validators';
  * simply absent from the submission, which the Backend reads as a deletion (FS-03 §1.3, §5.2).
  *
  * The camera rows reuse `app-camera-config-form` exactly as creation does — that component renders
- * only name and RTSP URL and never sees the `cameraId`, so the hidden control rides along untouched.
+ * only name, camera key and RTSP URL and never sees the `cameraId`, so the hidden control rides
+ * along untouched. FS-12 §2: an existing camera's key renders read-only, because it forms a live
+ * public RTSP mount and cannot be changed after creation.
  * As everywhere in this module, nothing here logs the branch, its cameras, or the request: an RTSP
  * URL may embed credentials (FS-03 §12).
  */
@@ -116,6 +118,8 @@ import { notBlank, rtspUrl } from './branch.validators';
             <div class="card__body branch-form__cameras">
               @for (cameraForm of cameraForms; track cameraForm; let i = $index) {
                 <app-camera-config-form
+                  [keyReadOnly]="cameraForm.get('cameraId')?.value !== null"
+                  [suggestable]="cameraForm.get('cameraId')?.value === null"
                   [form]="cameraForm"
                   [position]="i + 1"
                   [removable]="cameras.length > 1"
@@ -254,7 +258,9 @@ export class BranchEditComponent implements OnInit {
         // rather than replacing it (FS-03 §5.2). A branch always has at least one camera (FS-02
         // §12), so this leaves the "final camera cannot be removed" rule already satisfied.
         for (const camera of branch.cameras) {
-          this.cameras.push(this.buildCameraForm(camera.cameraId, camera.name, camera.rtspUrl));
+          this.cameras.push(
+            this.buildCameraForm(camera.cameraId, camera.name, camera.rtspUrl, camera.cameraKey),
+          );
         }
       },
       // The endpoint's documented 404 is the null above; anything else — including a 401 the
@@ -269,7 +275,7 @@ export class BranchEditComponent implements OnInit {
   protected addCamera(): void {
     // A camera added here has no id: the Backend generates a fresh identity for it on save
     // (FS-03 §1.3, §5.2).
-    this.cameras.push(this.buildCameraForm(null, '', ''));
+    this.cameras.push(this.buildCameraForm(null, '', '', ''));
   }
 
   /**
@@ -351,15 +357,22 @@ export class BranchEditComponent implements OnInit {
       cameras: this.cameraForms.map((cameraForm) => {
         const camera = cameraForm.getRawValue() as {
           cameraId: string | null;
+          cameraKey: string;
           name: string;
           rtspUrl: string;
         };
 
         const request = { name: camera.name.trim(), rtspUrl: camera.rtspUrl.trim() };
 
+        // FS-12 §3: an added camera carries its administrator-entered key; an existing one sends no
+        // key at all. Omitting it is what makes an accidental rename impossible — the Backend
+        // rejects a *differing* key with CAMERA_KEY_IMMUTABLE, so echoing an unchanged one back
+        // would only add a way to fail.
         // Only existing cameras carry an id; a new camera's request must have no `cameraId` member
         // at all, not a null one.
-        return camera.cameraId ? { cameraId: camera.cameraId, ...request } : request;
+        return camera.cameraId
+          ? { cameraId: camera.cameraId, ...request }
+          : { ...request, cameraKey: (camera.cameraKey ?? '').trim() };
       }),
     };
   }
@@ -369,10 +382,21 @@ export class BranchEditComponent implements OnInit {
    * `app-camera-config-form` never reads: it exists only to carry an existing camera's identity
    * through the form to the request. Name and RTSP URL carry the same validators as creation.
    */
-  private buildCameraForm(cameraId: string | null, name: string, url: string): FormGroup {
+  private buildCameraForm(
+    cameraId: string | null,
+    name: string,
+    url: string,
+    key: string,
+  ): FormGroup {
+    // FS-12 §3: an existing camera's key is immutable, so its control is disabled — it renders as
+    // read-only text and, because Angular omits disabled controls from `value`, it also cannot be
+    // submitted by accident. A *new* camera (no cameraId) needs a real, validated key.
+    const existing = cameraId !== null;
+
     return this.formBuilder.group({
       cameraId: [cameraId],
       name: [name, [notBlank, Validators.maxLength(CAMERA_NAME_MAX_LENGTH)]],
+      cameraKey: [{ value: key, disabled: existing }, existing ? [] : [notBlank, cameraKey]],
       rtspUrl: [url, [notBlank, rtspUrl, Validators.maxLength(CAMERA_RTSP_URL_MAX_LENGTH)]],
     });
   }

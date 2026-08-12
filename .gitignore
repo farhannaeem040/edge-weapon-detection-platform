@@ -22,6 +22,12 @@ dist/
 mcp.json
 .mcp.json
 
+# ASP.NET Core Data Protection key ring (FS-07). Production keys live in a Docker named volume,
+# never the repo; this guards only against a local/dev DataProtection:KeyPath accidentally pointed
+# inside the working tree.
+dataprotection-keys/
+key-*.xml
+
 # Local SQLite artifacts (e.g. a stray agent.db from a dev/test run). No .db fixture is tracked;
 # the Agent's real store lives under /opt/weapon-detection on the Jetson, never in the repo.
 *.db

@@ -72,9 +72,28 @@ public class DeviceCredentialValidator : IDeviceCredentialValidator
 
         // The state guard passed, so the stored secret is present. Recover it (it is stored
         // recoverable-but-protected, not hashed — ARCH-001 §13.3) and compare in constant time.
-        var storedSecret = _deviceSecretProtector.Unprotect(device.ProtectedSharedSecret!);
+        string storedSecret;
+        try
+        {
+            storedSecret = _deviceSecretProtector.Unprotect(device.ProtectedSharedSecret!);
+        }
+        catch (CryptographicException)
+        {
+            // FS-07: the server's Data Protection key ring cannot decrypt this stored secret right
+            // now (e.g. lost across a container recreation) — a server-side storage failure, not a
+            // wrong credential. The caught exception (whose message names the missing key ID) is
+            // deliberately discarded here, never rethrown or logged, so the key ID can never reach a
+            // log sink or the wire.
+            return DeviceCredentialValidationResult.Invalid(
+                DeviceCredentialValidationOutcome.CredentialStorageUnavailable);
+        }
+
         return SecretsMatch(storedSecret, presentedSecret)
-            ? DeviceCredentialValidationResult.Valid()
+            // BranchId/DeviceRecordId (FS-06 §6.2) come from this same, already-loaded Device row —
+            // never a second lookup — so the resolved device can never diverge from the one just
+            // authenticated. DeviceId is assigned by the time CanAuthenticate() can be true, so the
+            // guard above guarantees device.DeviceId == deviceId here.
+            ? DeviceCredentialValidationResult.Valid(device.BranchId, device.DeviceRecordId)
             : DeviceCredentialValidationResult.Invalid(DeviceCredentialValidationOutcome.SecretMismatch);
     }
 

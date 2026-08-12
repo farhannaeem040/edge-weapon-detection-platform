@@ -161,6 +161,8 @@ a:hover {
 input[type='text'],
 input[type='password'],
 input[type='search'],
+input[type='datetime-local'],
+select,
 textarea {
   width: 100%;
   font-family: inherit;
@@ -176,6 +178,8 @@ textarea {
 input[type='text']:focus,
 input[type='password']:focus,
 input[type='search']:focus,
+input[type='datetime-local']:focus,
+select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--color-primary);
@@ -361,6 +365,36 @@ textarea::placeholder {
   white-space: nowrap;
 }
 
+.badge--gun {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-strong);
+  border-color: #e3b4b4;
+}
+
+.badge--knife {
+  background: var(--color-warning-bg);
+  color: #6a4a00;
+  border-color: #e6cf8a;
+}
+
+.badge--unknown {
+  background: var(--color-neutral-bg);
+  color: var(--color-neutral-text);
+  border-color: var(--color-border);
+}
+
+.badge--unknown-class {
+  background: var(--color-neutral-bg);
+  color: var(--color-neutral-text);
+  border-color: var(--color-border);
+}
+
+.badge--new {
+  background: var(--color-surface-tint);
+  color: var(--color-primary-deep);
+  border-color: var(--color-border);
+}
+
 /* ---------------------------------------------------------------- Banners / status text */
 .banner {
   display: flex;
@@ -400,6 +434,38 @@ textarea::placeholder {
   color: var(--color-danger);
 }
 
+/* ---------------------------------------------------------------- Table (Alert list) */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+}
+
+.table th {
+  font-family: var(--font-heading);
+  font-size: var(--text-label);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--color-surface-subtle);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
 /* ---------------------------------------------------------------- Empty state */
 .empty-state {
   display: flex;
@@ -433,6 +499,59 @@ textarea::placeholder {
   .spinner {
     animation-duration: 2s;
   }
+}
+
+/* ---------------------------------------------------------------- Stat tiles (dashboard summary) */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-4);
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.stat-tile__label {
+  font-size: var(--text-label);
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-tile__value {
+  font-family: var(--font-heading);
+  font-size: var(--text-display);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.stat-tile__meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* ---------------------------------------------------------------- Progress bar (quota usage) */
+.progress {
+  width: 100%;
+  height: 0.5rem;
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--transition);
+}
+
+.progress__bar--full {
+  background: var(--color-danger-strong);
 }
 
 /* Visually hidden but available to assistive technology. */

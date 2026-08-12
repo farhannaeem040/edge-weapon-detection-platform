@@ -73,7 +73,40 @@ public interface IDeviceService
     Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
         Guid deviceId,
         CancellationToken cancellationToken = default);
+
+    // Sets (or clears, with null/blank) the annotated-output base URL advertised for a branch's
+    // Device (FS-11 §11). Keyed on branchId for the same reason as RegenerateActivationKeyAsync: it
+    // must work before the Device has ever activated, when DeviceId is still NULL.
+    //
+    // This is discovery metadata only. It deliberately leaves DeviceId, ActivationStatus, the
+    // protected shared secret, and every Camera (including each Camera's OutputPath) untouched — and
+    // because the Agent's configurationVersion hashes only CameraId/StreamUrl/SourceOrder/OutputPath,
+    // changing it provokes no pipeline restart. Returns null when no branch/device has that id
+    // (mapped to 404); throws ArgumentException for an invalid base URL (mapped to the standard
+    // validation envelope).
+    //
+    // Returns a dedicated result rather than DeviceDetailView? so that "no such branch" stays
+    // distinguishable from "updated a Device that has not activated yet and therefore has no
+    // external DeviceId" — the latter is a success, not a 404.
+    // FS-12 §4 / IP-14 §1 decision 3: replaces SetAnnotatedOutputBaseUrlAsync. The structured
+    // host/port pair is now authoritative, and running both writers side by side would let the two
+    // representations of the same fact diverge.
+    Task<DeviceNetworkUpdate?> SetNetworkConfigurationAsync(
+        Guid branchId,
+        string? jetsonHost,
+        int? rtspOutputPort,
+        CancellationToken cancellationToken = default);
 }
+
+// The outcome of a successful Jetson network configuration update (FS-12 §4). `DeviceId` is null when
+// the Device has not activated yet; the update still applied. `AnnotatedOutputBaseUrl` is the
+// *computed* base, echoed so a client can see exactly what its Cameras' URLs will now compose to.
+public sealed record DeviceNetworkUpdate(
+    Guid BranchId,
+    Guid? DeviceId,
+    string? JetsonHost,
+    int? RtspOutputPort,
+    string? AnnotatedOutputBaseUrl);
 
 // A single activated Device's detail, for GET /api/v1/devices/{id}. Because the lookup key is the
 // external DeviceId, any Device this projects is necessarily activated, so DeviceId is non-null
@@ -84,7 +117,12 @@ public sealed record DeviceDetailView(
     Guid DeviceId,
     Guid BranchId,
     DeviceActivationStatus ActivationStatus,
-    string? LastKnownAddress);
+    string? LastKnownAddress,
+    // FS-12 §4: the structured network configuration; null until an Admin sets it.
+    string? JetsonHost,
+    int? RtspOutputPort,
+    // FS-12 §2.1: computed from the two fields above, with the legacy column as fallback.
+    string? AnnotatedOutputBaseUrl);
 
 // The result of provisioning a branch's Device and its first Activation Key. All three parts are
 // produced together and belong together:

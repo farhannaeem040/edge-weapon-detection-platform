@@ -32,7 +32,13 @@ requires_posix_modes = pytest.mark.skipif(
     reason="POSIX permission modes are not enforceable on this platform (IP-02 §17)",
 )
 
-APPLICATION_TABLES = ("SchemaVersion", "DeviceIdentity", "ConfigCache", "DetectionEvent")
+APPLICATION_TABLES = (
+    "SchemaVersion",
+    "DeviceIdentity",
+    "ConfigCache",
+    "DetectionEvent",
+    "SnapshotOutbox",
+)
 
 # A recognisable fake secret used to prove no stored value ever reaches an error message or a log.
 # Not a real credential (IP-02 §10 forbids committing real ones); a sentinel string only.
@@ -349,9 +355,10 @@ def test_initialization_creates_only_the_database_file(tmp_path: Path) -> None:
         "database",
         "logs",
         "runtime",
+        "snapshots",
     ]
     assert [child.name for child in paths.database_dir.iterdir()] == ["agent.db"]
-    for deferred in ("snapshots", "recordings", "models", "pipeline"):
+    for deferred in ("recordings", "models", "pipeline"):
         assert not (paths.root / deferred).exists()
 
 
@@ -483,7 +490,7 @@ def test_migration_from_v1_preserves_data_and_assigns_operational(tmp_path: Path
     with open_connection(database_file) as connection:
         assert read_schema_version(connection) == 1
 
-    # Opening the v1 database with the current initializer cascades it through v2 to v3.
+    # Opening the v1 database with the current initializer cascades it through v2, v3, to v4.
     assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
 
     with open_connection(database_file) as connection:
@@ -542,7 +549,7 @@ def test_failed_v1_to_v2_migration_rolls_back_and_preserves_v1(
 
 def test_reopening_current_version_is_a_no_op_that_does_not_modify_data(tmp_path: Path) -> None:
     database_file = _provisioned_paths(tmp_path).database_file
-    initialize_database(database_file)  # fresh → current version (3)
+    initialize_database(database_file)  # fresh → current version (4)
 
     with open_connection(database_file) as connection:
         connection.execute(
@@ -612,6 +619,8 @@ _DETECTION_EVENT_COLUMNS = [
     "BboxWidth",
     "BboxHeight",
     "DeliveryStatus",
+    "DeliveredAtUtc",
+    "FinalizedAtUtc",
     "CreatedAtUtc",
 ]
 
@@ -651,6 +660,12 @@ def test_detection_event_columns_and_types(tmp_path: Path) -> None:
     ):
         assert columns[text_col]["type"] == "TEXT"
         assert columns[text_col]["notnull"] == 1
+    # DeliveredAtUtc (FS-06 §7.2) is nullable — NULL until delivery confirmed.
+    assert columns["DeliveredAtUtc"]["type"] == "TEXT"
+    assert columns["DeliveredAtUtc"]["notnull"] == 0
+    # FinalizedAtUtc (FS-09 §9) is nullable — NULL until quota-suppressed.
+    assert columns["FinalizedAtUtc"]["type"] == "TEXT"
+    assert columns["FinalizedAtUtc"]["notnull"] == 0
 
 
 def test_detection_event_delivery_status_defaults_to_pending(tmp_path: Path) -> None:
@@ -748,7 +763,7 @@ def test_migration_from_v2_preserves_device_identity_and_config_cache(tmp_path: 
     assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
 
     with open_connection(database_file) as connection:
-        assert read_schema_version(connection) == 3
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
         assert "DetectionEvent" in _table_names(connection)
 
         identity_row = connection.execute(
@@ -815,3 +830,346 @@ def test_reinitializing_v3_database_does_not_touch_detection_events(tmp_path: Pa
             "SELECT EventId FROM DetectionEvent WHERE EventId = 'evt-keep'"
         ).fetchone()
     assert row is not None
+
+
+# --- IP-08 T-103: v3 -> v4 migration (DeliveredAtUtc, widened DeliveryStatus CHECK) -------------
+
+_PENDING_ROW_VALUES = (
+    "'evt-pending', 'device-v4mig', 'cam', 0, 0, 'gun', 0.91, 12345, "
+    "'2026-07-24T18:30:00+00:00', 640, 640, 210.0, 130.0, 95.0, 70.0, "
+    "'pending', '2026-07-24T18:30:01+00:00'"
+)
+
+
+def _build_v3_database_with_pending_row(database_file: Path) -> None:
+    """Create a genuine schema-version-3 database with one 'pending' DetectionEvent row.
+
+    Applies the shipped v1 DDL, migrates 1 -> 2 -> 3, then inserts directly (the version-3 table has
+    no DeliveredAtUtc column at all) — used to exercise the real v3 -> v4 migration in isolation,
+    mirroring `_build_v1_database_with_row`/`_build_v2_database_with_rows`.
+    """
+    with open_connection(database_file) as connection:
+        schema_module._apply_version_1(connection)
+        schema_module._migrate_v1_to_v2(connection)
+        schema_module._migrate_v2_to_v3(connection)
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, DeliveryStatus, CreatedAtUtc) "
+            f"VALUES ({_PENDING_ROW_VALUES})"
+        )
+
+
+def test_fresh_database_ends_at_v4_with_new_column_and_widened_constraint(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(paths.database_file) as connection:
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
+        columns = _columns(connection, "DetectionEvent")
+        assert "DeliveredAtUtc" in columns
+        assert columns["DeliveredAtUtc"]["notnull"] == 0
+
+
+def test_migration_from_v3_preserves_pending_row_unchanged(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v3_database_with_pending_row(database_file)
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 3
+
+    assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
+        row = connection.execute(
+            "SELECT EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, "
+            "BboxHeight, DeliveryStatus, DeliveredAtUtc, CreatedAtUtc "
+            "FROM DetectionEvent WHERE EventId = 'evt-pending'"
+        ).fetchone()
+
+    assert row is not None
+    assert row["DeviceId"] == "device-v4mig"
+    assert row["CameraId"] == "cam"
+    assert row["SourceId"] == 0
+    assert row["ClassId"] == 0
+    assert row["ClassName"] == "gun"
+    assert row["Confidence"] == 0.91
+    assert row["FrameNumber"] == 12345
+    assert row["DetectedAtUtc"] == "2026-07-24T18:30:00+00:00"
+    assert row["FrameWidth"] == 640
+    assert row["FrameHeight"] == 640
+    assert row["BboxLeft"] == 210.0
+    assert row["BboxTop"] == 130.0
+    assert row["BboxWidth"] == 95.0
+    assert row["BboxHeight"] == 70.0
+    assert row["CreatedAtUtc"] == "2026-07-24T18:30:01+00:00"
+    # The migration's own contract: the pending row's delivery state is untouched.
+    assert row["DeliveryStatus"] == "pending"
+    assert row["DeliveredAtUtc"] is None
+
+
+def test_migrated_schema_accepts_delivered_status(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v3_database_with_pending_row(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        connection.execute(
+            "UPDATE DetectionEvent SET DeliveryStatus = 'delivered', DeliveredAtUtc = ? "
+            "WHERE EventId = 'evt-pending'",
+            ("2026-07-24T18:30:05+00:00",),
+        )
+        row = connection.execute(
+            "SELECT DeliveryStatus, DeliveredAtUtc FROM DetectionEvent "
+            "WHERE EventId = 'evt-pending'"
+        ).fetchone()
+
+    assert row["DeliveryStatus"] == "delivered"
+    assert row["DeliveredAtUtc"] == "2026-07-24T18:30:05+00:00"
+
+
+def test_migrated_schema_still_rejects_values_outside_the_permitted_lifecycle(
+    tmp_path: Path,
+) -> None:
+    # Proves the CHECK constraint was widened, not dropped (IP-08 T-103 requirement).
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v3_database_with_pending_row(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE DetectionEvent SET DeliveryStatus = 'invalid_value' "
+                "WHERE EventId = 'evt-pending'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO DetectionEvent "
+                "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+                "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+                "BboxWidth, BboxHeight, DeliveryStatus, CreatedAtUtc) "
+                "VALUES ('evt-bogus-v4', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+                "0, 0, 10, 10, 'invalid_value', 't')"
+            )
+
+
+def test_failed_v3_to_v4_migration_rolls_back_and_preserves_v3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v3_database_with_pending_row(database_file)
+
+    monkeypatch.setattr(
+        schema_module,
+        "_MIGRATION_V3_TO_V4_STATEMENTS",
+        (*schema_module._MIGRATION_V3_TO_V4_STATEMENTS, "THIS IS NOT VALID SQL ("),
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 3
+        assert "DetectionEvent_v4" not in _table_names(connection)
+        columns = _columns(connection, "DetectionEvent")
+        assert "DeliveredAtUtc" not in columns
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-pending'"
+        ).fetchone()
+        assert row["DeliveryStatus"] == "pending"
+
+
+# --- IP-11 T-176: v5 -> v6 migration (widened DeliveryStatus/UploadStatus CHECK constraints) -----
+
+_V5_PENDING_DETECTION_EVENT_ROW_VALUES = (
+    "'evt-pending', 'device-v4mig', 'cam', 0, 0, 'gun', 0.91, 12345, "
+    "'2026-07-24T18:30:00+00:00', 640, 640, 210.0, 130.0, 95.0, 70.0, "
+    "'pending', NULL, '2026-07-24T18:30:01+00:00'"
+)
+
+_V5_SNAPSHOT_ROW_VALUES = (
+    "'evt-pending', '/tmp/evt-pending.jpg', 'captured', 'pending', "
+    "'image/jpeg', 12345, "
+    "'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd', "
+    "'2026-07-24T18:30:02+00:00'"
+)
+
+
+def _build_v5_database_with_rows(database_file: Path) -> None:
+    """Create a genuine schema-version-5 database with one 'pending' DetectionEvent row and one
+    'pending'-upload SnapshotOutbox row referencing it.
+
+    Applies the shipped v1 DDL, migrates 1 -> 2 -> 3 -> 4 -> 5, then inserts directly — used to
+    exercise the real v5 -> v6 migration in isolation, mirroring
+    `_build_v3_database_with_pending_row`.
+    """
+    with open_connection(database_file) as connection:
+        schema_module._apply_version_1(connection)
+        schema_module._migrate_v1_to_v2(connection)
+        schema_module._migrate_v2_to_v3(connection)
+        schema_module._migrate_v3_to_v4(connection)
+        schema_module._migrate_v4_to_v5(connection)
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, DeliveryStatus, DeliveredAtUtc, CreatedAtUtc) "
+            f"VALUES ({_V5_PENDING_DETECTION_EVENT_ROW_VALUES})"
+        )
+        connection.execute(
+            "INSERT INTO SnapshotOutbox "
+            "(EventId, LocalPath, CaptureStatus, UploadStatus, ContentType, SizeBytes, Sha256, "
+            "CapturedAtUtc) "
+            f"VALUES ({_V5_SNAPSHOT_ROW_VALUES})"
+        )
+
+
+def test_fresh_database_ends_at_v6_with_widened_constraints(tmp_path: Path) -> None:
+    paths = _provisioned_paths(tmp_path)
+
+    assert initialize_database(paths.database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(paths.database_file) as connection:
+        assert read_schema_version(connection) == CURRENT_SCHEMA_VERSION
+        connection.execute(
+            "INSERT INTO DetectionEvent "
+            "(EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, "
+            "FrameNumber, DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, "
+            "BboxWidth, BboxHeight, DeliveryStatus, CreatedAtUtc) "
+            "VALUES ('evt-fresh-v6', 'dev', 'cam', 0, 0, 'gun', 0.9, 1, 't', 640, 480, "
+            "0, 0, 10, 10, 'suppressed_by_quota', 't')"
+        )
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-fresh-v6'"
+        ).fetchone()
+        assert row["DeliveryStatus"] == "suppressed_by_quota"
+
+
+def test_migration_from_v5_preserves_existing_rows_unchanged(tmp_path: Path) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 5
+
+    assert initialize_database(database_file) == CURRENT_SCHEMA_VERSION
+
+    with open_connection(database_file) as connection:
+        event_row = connection.execute(
+            "SELECT DeliveryStatus, DeliveredAtUtc FROM DetectionEvent "
+            "WHERE EventId = 'evt-pending'"
+        ).fetchone()
+        assert event_row["DeliveryStatus"] == "pending"
+        assert event_row["DeliveredAtUtc"] is None
+
+        outbox_row = connection.execute(
+            "SELECT CaptureStatus, UploadStatus, ContentType, SizeBytes, Sha256 "
+            "FROM SnapshotOutbox WHERE EventId = 'evt-pending'"
+        ).fetchone()
+        assert outbox_row["CaptureStatus"] == "captured"
+        assert outbox_row["UploadStatus"] == "pending"
+        assert outbox_row["ContentType"] == "image/jpeg"
+        assert outbox_row["SizeBytes"] == 12345
+
+
+def test_migrated_schema_accepts_suppressed_by_quota_detection_event_status(
+    tmp_path: Path,
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        connection.execute(
+            "UPDATE DetectionEvent SET DeliveryStatus = 'suppressed_by_quota' "
+            "WHERE EventId = 'evt-pending'"
+        )
+        row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-pending'"
+        ).fetchone()
+
+    assert row["DeliveryStatus"] == "suppressed_by_quota"
+
+
+def test_migrated_schema_accepts_suppressed_by_quota_snapshot_outbox_status(
+    tmp_path: Path,
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        connection.execute(
+            "UPDATE SnapshotOutbox SET UploadStatus = 'suppressed_by_quota' "
+            "WHERE EventId = 'evt-pending'"
+        )
+        row = connection.execute(
+            "SELECT UploadStatus FROM SnapshotOutbox WHERE EventId = 'evt-pending'"
+        ).fetchone()
+
+    assert row["UploadStatus"] == "suppressed_by_quota"
+
+
+def test_migrated_schema_still_rejects_detection_event_values_outside_the_permitted_lifecycle_v6(
+    tmp_path: Path,
+) -> None:
+    # Proves the CHECK constraint was widened, not dropped (IP-11 T-176 requirement).
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE DetectionEvent SET DeliveryStatus = 'invalid_value' "
+                "WHERE EventId = 'evt-pending'"
+            )
+
+
+def test_migrated_schema_still_rejects_snapshot_outbox_values_outside_the_permitted_lifecycle(
+    tmp_path: Path,
+) -> None:
+    # Proves the CHECK constraint was widened, not dropped (IP-11 T-176 requirement).
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+    initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE SnapshotOutbox SET UploadStatus = 'invalid_value' "
+                "WHERE EventId = 'evt-pending'"
+            )
+
+
+def test_failed_v5_to_v6_migration_rolls_back_and_preserves_v5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_file = _provisioned_paths(tmp_path).database_file
+    _build_v5_database_with_rows(database_file)
+
+    monkeypatch.setattr(
+        schema_module,
+        "_MIGRATION_V5_TO_V6_STATEMENTS",
+        (*schema_module._MIGRATION_V5_TO_V6_STATEMENTS, "THIS IS NOT VALID SQL ("),
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        initialize_database(database_file)
+
+    with open_connection(database_file) as connection:
+        assert read_schema_version(connection) == 5
+        assert "DetectionEvent_v6" not in _table_names(connection)
+        assert "SnapshotOutbox_v6" not in _table_names(connection)
+        event_row = connection.execute(
+            "SELECT DeliveryStatus FROM DetectionEvent WHERE EventId = 'evt-pending'"
+        ).fetchone()
+        assert event_row["DeliveryStatus"] == "pending"
+        outbox_row = connection.execute(
+            "SELECT UploadStatus FROM SnapshotOutbox WHERE EventId = 'evt-pending'"
+        ).fetchone()
+        assert outbox_row["UploadStatus"] == "pending"

@@ -4,7 +4,7 @@
 |-------|-------|
 | Plan ID | IP-08 |
 | Title | Detection Event Backend Synchronization — Backend `SyncEventsController`/`Alert`/SQL Server, Agent `DetectionEventSyncWorker` |
-| Status | Draft — awaiting approval; no code written yet |
+| Status | Complete, including production enablement (T-114/T-115). Backlog archived to `DetectionEvent_archive_20260728` (4,785 rows, untouched). `WDA_DETECTION_SYNC_ENABLED=true` live. 15-minute production soak: 0 Agent/Backend restarts, 253 Alerts created, 0 duplicates, 0 rejections. |
 | Realizes | FS-06 |
 | Governing Documents | FS-06, ADR-012 (frozen — event idempotency), ARCH-001 §14.1 (frozen — endpoint/auth headers), IP-07 (delivered — `DetectionEvent`/`DetectionEventRepository`/schema v3) |
 | Depends On | IP-07 fully delivered (done, committed) |

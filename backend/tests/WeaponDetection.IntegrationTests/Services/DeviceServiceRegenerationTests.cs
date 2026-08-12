@@ -67,7 +67,7 @@ public class DeviceServiceRegenerationTests : IDisposable
     private async Task<(Guid BranchId, Guid DeviceRecordId, string OriginalKeyId)> SeedBranchAsync()
     {
         var branch = new Branch("Downtown Branch", "1 High Street", "ops@example.local");
-        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1");
+        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1", $"cam-{Guid.NewGuid():N}");
         var provisioning = _service.ProvisionForBranch(branch.BranchId);
 
         _dbContext.Branches.Add(branch);

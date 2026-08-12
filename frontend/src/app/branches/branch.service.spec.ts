@@ -36,7 +36,15 @@ function placeholderCreateRequest(): CreateBranchRequest {
     name: 'Placeholder Branch',
     address: '1 Example Street, Placeholder City',
     contactDetails: 'placeholder@example.invalid',
-    cameras: [{ name: 'Front Entrance', rtspUrl: 'rtsp://camera.example.invalid:554/stream1' }],
+    jetsonHost: '100.98.226.80',
+    rtspOutputPort: 8554,
+    cameras: [
+      {
+        name: 'Front Entrance',
+        rtspUrl: 'rtsp://camera.example.invalid:554/stream1',
+        cameraKey: 'front-entrance',
+      },
+    ],
   };
 }
 
@@ -55,10 +63,13 @@ function placeholderBranch(overrides: Partial<Branch> = {}): Branch {
     cameras: [
       {
         cameraId: '22222222-2222-2222-2222-222222222222',
+        cameraKey: 'cam-key-1',
         name: 'Front Entrance',
         // Already redacted by the Backend's RtspUrlSanitizer — this is the shape that reaches us.
         rtspUrl: 'rtsp://***@camera.example.invalid:554/stream1',
         enabled: true,
+        sourceOrder: 0,
+        outputPath: 'cameras/00000000-0000-0000-0000-000000000000',
       },
     ],
     device: { activationStatus: 'Unactivated' },
@@ -224,8 +235,15 @@ describe('BranchService', () => {
       // Field-for-field against CreateBranchRequestDto/CameraConfigDto. The key assertions are the
       // exact key sets: an extra member here (a client-generated id, an activation field, an
       // `enabled` flag) would be a contract the Backend never agreed to.
-      expect(Object.keys(body).sort()).toEqual(['address', 'cameras', 'contactDetails', 'name']);
-      expect(Object.keys(body.cameras[0]).sort()).toEqual(['name', 'rtspUrl']);
+      expect(Object.keys(body).sort()).toEqual([
+        'address',
+        'cameras',
+        'contactDetails',
+        'jetsonHost',
+        'name',
+        'rtspOutputPort',
+      ]);
+      expect(Object.keys(body.cameras[0]).sort()).toEqual(['cameraKey', 'name', 'rtspUrl']);
       expect(body).toEqual(placeholderCreateRequest());
 
       request.flush({ success: true, data: placeholderCreatedBranch() });

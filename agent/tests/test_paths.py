@@ -117,14 +117,14 @@ def test_provision_creates_only_the_managed_directories(tmp_path: Path) -> None:
 
     entries = sorted(child.name for child in root.iterdir())
 
-    assert entries == ["config", "database", "logs", "runtime"]
+    assert entries == ["config", "database", "logs", "runtime", "snapshots"]
 
 
 @pytest.mark.parametrize("excluded", DEFERRED_DIRECTORIES)
 def test_provision_does_not_create_deferred_directories(tmp_path: Path, excluded: str) -> None:
     paths = resolve_paths(tmp_path).provision()
 
-    # snapshots/, recordings/, models/, pipeline/ have no writer in this milestone.
+    # recordings/, models/, pipeline/ have no writer in this milestone.
     assert not (paths.root / excluded).exists()
 
 
@@ -215,6 +215,7 @@ def test_managed_directories_lists_root_first(tmp_path: Path) -> None:
         paths.database_dir,
         paths.logs_dir,
         paths.runtime_dir,
+        paths.snapshots_dir,
     }
 
 

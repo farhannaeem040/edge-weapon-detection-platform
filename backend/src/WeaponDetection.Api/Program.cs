@@ -72,6 +72,26 @@ using (var startupScope = app.Services.CreateScope())
     await adminBootstrapper.BootstrapAsync();
 }
 
+// FS-07: fails startup immediately with a clear, redacted error if the configured Data Protection
+// key directory is missing/unwritable, rather than letting a broken mount surface only on the
+// first request that needs to protect/unprotect a Device secret.
+using (var startupScope = app.Services.CreateScope())
+{
+    var dataProtectionKeyPathValidator =
+        startupScope.ServiceProvider.GetRequiredService<IDataProtectionKeyPathValidator>();
+    dataProtectionKeyPathValidator.Validate();
+}
+
+// FS-08 §8: fails startup immediately with a clear, redacted error if the configured Alert snapshot
+// storage directory is missing/unwritable, rather than letting a broken mount surface only on the
+// first upload request — mirrors the Data Protection key-path validation immediately above.
+using (var startupScope = app.Services.CreateScope())
+{
+    var alertSnapshotStoragePathValidator =
+        startupScope.ServiceProvider.GetRequiredService<IAlertSnapshotStoragePathValidator>();
+    alertSnapshotStoragePathValidator.Validate();
+}
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {

@@ -21,11 +21,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from weapon_detection_agent.app import create_app
+from weapon_detection_agent.configuration.coordinator import (
+    default_device_configuration_components_factory,
+)
 from weapon_detection_agent.deepstream.process_manager import (
     default_deepstream_components_factory,
 )
 from weapon_detection_agent.detection.ingest_handler import default_detection_components_factory
 from weapon_detection_agent.runtime.operational_components import OperationalComponent
+from weapon_detection_agent.snapshot.worker import default_snapshot_components_factory
+from weapon_detection_agent.sync.worker import default_sync_components_factory
 
 if TYPE_CHECKING:
     from weapon_detection_agent.config.paths import AgentPaths
@@ -50,26 +55,49 @@ def _components_factory(
 
         systemd -> FastAPI Agent -> DetectionIngestHandler
                                   -> DeepStreamProcessManager -> (later) DeepStream Bridge
+                                  -> DetectionEventSyncWorker
 
     **Order matters.** The coordinator starts registered components in list order and stops them in
     the *reverse* of the order they actually started (``OperationalStateCoordinator``, unchanged) —
-    so listing the detection ingest handler first and DeepStream second means:
+    so listing the detection ingest handler first, DeepStream second, and the sync worker last
+    (FS-06 §8) means:
 
     * **startup:** the ingest handler's Unix domain socket is bound and its listener is already
       accepting connections *before* DeepStream's child process (and, from IP-07 T-88 onward, the
-      Bridge it eventually launches) ever starts — the Bridge can never race an absent listener;
-    * **shutdown:** DeepStream is stopped first (no further detections are produced), and only then
-      does the ingest handler finish/cancel its in-flight processing and remove the socket (T-86
-      policy) — so no detection can be produced with nowhere for it to land.
+      Bridge it eventually launches) ever starts — the Bridge can never race an absent listener; the
+      sync worker starts last, so Backend availability never gates Agent/DeepStream startup;
+    * **shutdown:** the sync worker cancels first (bounded, no hang on a sleeping backoff or an
+      in-flight HTTP request), then DeepStream is stopped (no further detections are produced), and
+      only then does the ingest handler finish/cancel its in-flight processing and remove the socket
+      (T-86 policy) — so no detection can be produced with nowhere for it to land.
 
     Each factory is independently gated (``default_detection_components_factory`` checks both
     ``deepstream_enabled`` and ``detection_events_enabled`` itself; ``default_deepstream_components_
-    factory`` checks only ``deepstream_enabled``), so every combination of the two kill switches
-    composes correctly here with no branching in this function.
+    factory`` checks only ``deepstream_enabled``; ``default_sync_components_factory`` checks only
+    ``detection_sync_enabled``), so every combination of the three kill switches composes correctly
+    here with no branching in this function.
     """
+    # Built before the detection factory (FS-11 §9, IP-13 T-238/T-239) so its resolve_camera_id
+    # method can be wired into DetectionIngestHandler below — construction order here is
+    # independent of the start/stop order the returned tuple still encodes (detection-ingest first,
+    # deepstream/coordinator second, sync last).
+    device_configuration_components = default_device_configuration_components_factory(
+        settings, paths, identity_repository
+    )
+    camera_id_resolver = (
+        device_configuration_components[0].resolve_camera_id
+        if device_configuration_components
+        else None
+    )
+
     return (
-        *default_detection_components_factory(settings, paths, identity_repository),
+        *default_detection_components_factory(
+            settings, paths, identity_repository, camera_id_resolver
+        ),
         *default_deepstream_components_factory(settings),
+        *device_configuration_components,
+        *default_sync_components_factory(settings, paths, identity_repository),
+        *default_snapshot_components_factory(settings, paths, identity_repository),
     )
 
 

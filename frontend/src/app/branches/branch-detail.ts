@@ -10,7 +10,7 @@ import {
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 
 import { ActivationKeyDisplayComponent } from './activation-key-display';
-import { Branch } from './branch.models';
+import { Branch, DEFAULT_RTSP_OUTPUT_PORT } from './branch.models';
 import { ActivationKeyRegenerationConflictError, BranchService } from './branch.service';
 import { BranchDeleteConfirmComponent } from './branch-delete-confirm';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchEditRoute } from './branch.routes';
@@ -199,6 +199,30 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 <p class="branch__device-id-absent">Device ID: not yet assigned</p>
               }
 
+              <!--
+                FS-12 §4 — the Jetson's network location. Displayed as two independent facts plus the
+                Backend-computed base, rather than a URL the browser assembles: composing it here
+                would mean re-implementing IPv6 bracketing and the legacy-column fallback in the
+                client. Precedence is the Backend's value, then an explicit "not configured" — never
+                a guessed address (task Phase 10).
+              -->
+              @if (branch.device.jetsonHost) {
+                <p class="branch__device-jetson-host">Jetson host: {{ branch.device.jetsonHost }}</p>
+                <p class="branch__device-rtsp-port">
+                  RTSP output port: {{ branch.device.rtspOutputPort ?? defaultRtspOutputPort }}
+                </p>
+              } @else {
+                <p class="branch__device-jetson-host-absent status-text">
+                  Jetson output network is not configured
+                </p>
+              }
+
+              @if (branch.device.annotatedOutputBaseUrl) {
+                <p class="branch__device-output-base">
+                  Annotated output base: {{ branch.device.annotatedOutputBaseUrl }}
+                </p>
+              }
+
               <!-- The action is offered in both Device states. FS-02 §5.3/FR-BRN-005 restrict it to
                    neither: regeneration invalidates the current key "regardless of its consumption
                    state", which is precisely the activated case (§15 T-09, reactivation). -->
@@ -325,14 +349,89 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
               <ul class="branch__camera-list">
                 @for (camera of branch.cameras; track camera.cameraId) {
                   <li class="branch__camera">
-                    <span class="branch__camera-name">{{ camera.name }}</span>
-                    <span class="branch__camera-url">{{ camera.rtspUrl }}</span>
-                    <span
-                      class="branch__camera-enabled badge"
-                      [class.branch__camera-enabled--on]="camera.enabled"
-                      [class.branch__camera-enabled--off]="!camera.enabled"
-                      >{{ camera.enabled ? 'Enabled' : 'Disabled' }}</span
-                    >
+                    <div class="branch__camera-primary">
+                      <span class="branch__camera-name">
+                        <span class="branch__camera-field-label">Camera name:</span>
+                        {{ camera.name }}
+                      </span>
+                      <!--
+                        FS-12 §2: the *public* stream identifier — what an operator reads and types.
+                        The immutable cameraId is deliberately not shown as the primary identifier;
+                        it stays available below, explicitly labelled as internal.
+                      -->
+                      <span class="branch__camera-key">
+                        <span class="branch__camera-field-label">Camera key:</span>
+                        {{ camera.cameraKey }}
+                      </span>
+                      <span class="branch__camera-source-order">
+                        <span class="branch__camera-field-label">Source order:</span>
+                        {{ camera.sourceOrder }}
+                      </span>
+                      <span class="branch__camera-url">
+                        <span class="branch__camera-field-label">Input stream URL:</span>
+                        {{ camera.rtspUrl }}
+                      </span>
+                    </div>
+
+                    <span class="branch__camera-status">
+                      <span class="branch__camera-field-label">Status:</span>
+                      <span
+                        class="branch__camera-enabled badge"
+                        [class.branch__camera-enabled--on]="camera.enabled"
+                        [class.branch__camera-enabled--off]="!camera.enabled"
+                        >{{ camera.enabled ? 'Enabled' : 'Disabled' }}</span
+                      >
+                    </span>
+
+                    <!--
+                      FS-11 §11: the annotated output is a *different* stream from the input above —
+                      the same camera after inference, with detection boxes drawn on it. Shown
+                      separately and labelled so the two can never be confused. Null base URL is
+                      rendered as an explicit "not configured" state, never a guessed address.
+                    -->
+                    <span class="branch__camera-output">
+                      <span class="branch__camera-field-label">Annotated output URL:</span>
+                      @if (camera.outputStreamUrl) {
+                        {{ camera.outputStreamUrl }}
+                      } @else {
+                        <span class="branch__camera-output-missing status-text">
+                          Output base URL not configured
+                        </span>
+                      }
+                    </span>
+
+                    @if (clipboardAvailable) {
+                      <button
+                        class="branch__camera-copy btn btn--secondary"
+                        type="button"
+                        (click)="copyCameraStreamUrl(camera.cameraId, camera.rtspUrl)"
+                      >
+                        Copy input URL
+                      </button>
+                      @if (camera.outputStreamUrl) {
+                        <button
+                          class="branch__camera-copy-output btn btn--secondary"
+                          type="button"
+                          (click)="copyCameraOutputUrl(camera.cameraId, camera.outputStreamUrl)"
+                        >
+                          Copy output URL
+                        </button>
+                      }
+                    } @else {
+                      <p class="branch__camera-copy-unavailable status-text">
+                        Copying is unavailable in this browser. Select the URL above and copy it manually.
+                      </p>
+                    }
+
+                    @if (cameraCopyState(camera.cameraId) === 'copied') {
+                      <p class="branch__camera-copy-status status-text" role="status">
+                        Stream URL copied to the clipboard.
+                      </p>
+                    } @else if (cameraCopyState(camera.cameraId) === 'failed') {
+                      <p class="branch__camera-copy-status status-text--error" role="alert">
+                        The URL could not be copied. Select it above and copy it manually.
+                      </p>
+                    }
                   </li>
                 }
               </ul>
@@ -439,6 +538,12 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       margin-top: var(--space-3);
     }
 
+    .branch__camera-field-label {
+      font-weight: var(--weight-medium);
+      color: var(--color-text-faint);
+      margin-right: var(--space-1);
+    }
+
     .branch__camera-list {
       list-style: none;
       margin: 0;
@@ -447,8 +552,9 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
 
     .branch__camera {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: var(--space-4);
+      gap: var(--space-2) var(--space-4);
       padding: var(--space-3) 0;
       border-bottom: 1px solid var(--color-border);
     }
@@ -457,17 +563,30 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       border-bottom: 0;
     }
 
+    .branch__camera-primary {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+      flex: 1 1 20rem;
+      min-width: 0;
+    }
+
     .branch__camera-name {
       font-weight: var(--weight-medium);
-      min-width: 9rem;
     }
 
     .branch__camera-url {
-      flex: 1;
       font-family: var(--font-mono);
       font-size: var(--text-sm);
       color: var(--color-text-muted);
       overflow-wrap: anywhere;
+      user-select: all;
+    }
+
+    .branch__camera-status {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
     }
 
     .branch__camera-enabled--on {
@@ -482,17 +601,26 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       border-color: var(--color-border);
     }
 
+    .branch__camera-copy-status,
+    .branch__camera-copy-unavailable {
+      flex-basis: 100%;
+      margin: 0;
+    }
+
     @media (max-width: 640px) {
       .branch__camera {
         flex-direction: column;
         align-items: flex-start;
-        gap: var(--space-1);
+        gap: var(--space-2);
       }
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class BranchDetailComponent implements OnInit, OnDestroy {
+  /** Mirrors the Backend default, shown when a Device stores a host but no explicit port. */
+  protected readonly defaultRtspOutputPort = DEFAULT_RTSP_OUTPUT_PORT;
+
   private readonly branchService = inject(BranchService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
@@ -503,6 +631,22 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   protected readonly loading = signal(true);
   protected readonly notFound = signal(false);
   protected readonly failed = signal(false);
+
+  /**
+   * Whether the browser exposes `navigator.clipboard` (absent in insecure contexts and older
+   * browsers) — read once, purely to decide whether to offer each camera's copy button (mirrors
+   * `ActivationKeyDisplayComponent`'s identical check).
+   */
+  protected readonly clipboardAvailable =
+    typeof navigator !== 'undefined' && navigator.clipboard !== undefined;
+
+  /**
+   * The outcome of the most recent "Copy URL" press, per camera (a branch can have more than one) —
+   * `idle`/absent until that camera's button is pressed.
+   */
+  protected readonly cameraCopyStates = signal<ReadonlyMap<string, 'idle' | 'copied' | 'failed'>>(
+    new Map(),
+  );
 
   /** True once the Admin has asked to regenerate and before they confirm or cancel. */
   protected readonly confirming = signal(false);
@@ -699,6 +843,51 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
    */
   protected completeRegeneration(): void {
     this.regeneratedKey.set(null);
+  }
+
+  /** The given camera's most recent copy outcome, or `'idle'` if its button has never been pressed. */
+  protected cameraCopyState(cameraId: string): 'idle' | 'copied' | 'failed' {
+    return this.cameraCopyStates().get(cameraId) ?? 'idle';
+  }
+
+  /**
+   * Copies one camera's stream URL to the clipboard, in response to the Admin's click on that
+   * camera's own button and never otherwise. This is operational configuration, not a secret, but
+   * both outcomes are still reported on screen so a silent failure never leaves the Admin unsure
+   * whether the copy worked (mirrors `ActivationKeyDisplayComponent.copy`).
+   */
+  protected copyCameraStreamUrl(cameraId: string, streamUrl: string): void {
+    if (!this.clipboardAvailable) {
+      return;
+    }
+
+    navigator.clipboard.writeText(streamUrl).then(
+      () => this.setCameraCopyState(cameraId, 'copied'),
+      () => this.setCameraCopyState(cameraId, 'failed'),
+    );
+  }
+
+  /**
+   * Copies the camera's *annotated output* URL (FS-11 §11) — deliberately a separate action from
+   * the input-URL copy above so an Admin cannot copy one believing it is the other.
+   */
+  protected copyCameraOutputUrl(cameraId: string, outputStreamUrl: string): void {
+    if (!this.clipboardAvailable) {
+      return;
+    }
+
+    navigator.clipboard.writeText(outputStreamUrl).then(
+      () => this.setCameraCopyState(cameraId, 'copied'),
+      () => this.setCameraCopyState(cameraId, 'failed'),
+    );
+  }
+
+  private setCameraCopyState(cameraId: string, state: 'copied' | 'failed'): void {
+    this.cameraCopyStates.update((states) => {
+      const next = new Map(states);
+      next.set(cameraId, state);
+      return next;
+    });
   }
 
   /**

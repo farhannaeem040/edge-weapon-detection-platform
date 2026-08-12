@@ -54,6 +54,7 @@ from weapon_detection_agent.runtime.operational_state_coordinator import (
     OperationalComponentStartError,
     OperationalStateCoordinator,
 )
+from weapon_detection_agent.sync.worker import DetectionEventSyncWorker
 
 # IP-07 T-90's incompatible-configuration preflight rejects detection_events_enabled=True
 # combined with the default deepstream_executable_path — every fixture below that enables both
@@ -217,6 +218,7 @@ def test_detection_factory_both_enabled_builds_one_handler_with_correct_dependen
         deepstream_enabled=True,
         detection_events_enabled=True,
         deepstream_executable_path=BRIDGE_RUN_SH_PATH,
+        deepstream_model_profile="yolov4-fp16",
         detection_camera_id="camera-7",
         detection_min_confidence=0.75,
         detection_cooldown_seconds=12.0,
@@ -258,6 +260,7 @@ def test_detection_factory_construction_succeeds_with_no_identity_yet(tmp_path: 
         deepstream_enabled=True,
         detection_events_enabled=True,
         deepstream_executable_path=BRIDGE_RUN_SH_PATH,
+        deepstream_model_profile="yolov4-fp16",
     )
     identity_repository = DeviceIdentityRepository(paths.database_file)  # nothing stored yet
 
@@ -413,6 +416,7 @@ def test_main_factory_both_enabled_orders_ingest_handler_before_deepstream(tmp_p
         deepstream_enabled=True,
         detection_events_enabled=True,
         deepstream_executable_path=BRIDGE_RUN_SH_PATH,
+        deepstream_model_profile="yolov4-fp16",
     )
     identity_repository = DeviceIdentityRepository(paths.database_file)
     _store_identity(identity_repository)
@@ -437,6 +441,7 @@ def test_main_factory_no_duplicate_across_repeated_calls(tmp_path: Path) -> None
         deepstream_enabled=True,
         detection_events_enabled=True,
         deepstream_executable_path=BRIDGE_RUN_SH_PATH,
+        deepstream_model_profile="yolov4-fp16",
     )
     identity_repository = DeviceIdentityRepository(paths.database_file)
     _store_identity(identity_repository)
@@ -489,6 +494,30 @@ def test_ingest_handler_starts_before_deepstream(tmp_path: Path) -> None:
         await coordinator.start_operational_components()
 
         assert log == ["start:detection-ingest", "start:deepstream"]
+
+    asyncio.run(_scenario())
+
+
+def test_sync_worker_stops_first_when_all_three_are_registered(tmp_path: Path) -> None:
+    """FS-06 §8: shutdown is the reverse of start order — the sync worker cancels first, then
+    DeepStream, then the ingest handler."""
+
+    async def _scenario() -> None:
+        log: list[str] = []
+        ingest = FakeComponent("detection-ingest", log=log)
+        deepstream = FakeComponent("deepstream", log=log)
+        sync = FakeComponent("detection-event-sync", log=log)
+        coordinator = _coordinator(tmp_path, (ingest, deepstream, sync))
+        await coordinator.start_operational_components()
+        log.clear()
+
+        await coordinator.enter_reactivation_required()
+
+        assert log == [
+            "stop:detection-event-sync",
+            "stop:deepstream",
+            "stop:detection-ingest",
+        ]
 
     asyncio.run(_scenario())
 
@@ -605,6 +634,56 @@ def test_deepstream_never_starts_when_ingest_handler_cannot_obtain_identity(tmp_
         assert not paths.detection_socket_file.exists()
 
     asyncio.run(_scenario())
+
+
+# ==================================================================================================
+# main._components_factory — DetectionEventSyncWorker wiring (IP-08 T-108, FS-06 §8)
+# ==================================================================================================
+
+
+def test_main_factory_sync_only_registers_one_sync_worker(tmp_path: Path) -> None:
+    paths = _ready_paths(tmp_path)
+    settings = _settings_for(tmp_path, detection_sync_enabled=True)
+    identity_repository = DeviceIdentityRepository(paths.database_file)
+
+    components = _components_factory(settings, paths, identity_repository)
+
+    assert len(components) == 1
+    assert isinstance(components[0], DetectionEventSyncWorker)
+
+
+def test_main_factory_sync_disabled_by_default_registers_nothing(tmp_path: Path) -> None:
+    paths = _ready_paths(tmp_path)
+    settings = _settings_for(tmp_path)
+    identity_repository = DeviceIdentityRepository(paths.database_file)
+
+    assert settings.detection_sync_enabled is False
+    assert _components_factory(settings, paths, identity_repository) == ()
+
+
+def test_main_factory_orders_ingest_deepstream_then_sync_worker_last(tmp_path: Path) -> None:
+    paths = _ready_paths(tmp_path)
+    (paths.root / "config" / "deepstream" / "profiles" / "yolov4-fp16").mkdir(parents=True)
+    (paths.root / "config" / "deepstream" / "profiles" / "yolov4-fp16" / "labels.txt").write_text(
+        "gun\nknife\n", encoding="utf-8"
+    )
+    settings = _settings_for(
+        tmp_path,
+        deepstream_enabled=True,
+        detection_events_enabled=True,
+        detection_sync_enabled=True,
+        deepstream_executable_path=BRIDGE_RUN_SH_PATH,
+        deepstream_model_profile="yolov4-fp16",
+    )
+    identity_repository = DeviceIdentityRepository(paths.database_file)
+    _store_identity(identity_repository)
+
+    components = _components_factory(settings, paths, identity_repository)
+
+    assert len(components) == 3
+    assert isinstance(components[0], DetectionIngestHandler)
+    assert isinstance(components[1], DeepStreamProcessManager)
+    assert isinstance(components[2], DetectionEventSyncWorker)
 
 
 @requires_unix_sockets

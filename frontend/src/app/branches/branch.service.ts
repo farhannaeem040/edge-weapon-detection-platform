@@ -5,10 +5,12 @@ import { Observable, catchError, map, of, throwError } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { ApiEnvelope } from '../auth/auth.service';
 import {
+  DeviceNetworkUpdate,
   Branch,
   CreateBranchRequest,
   CreatedBranch,
   RegeneratedActivationKey,
+  SetDeviceNetworkRequest,
   UpdateBranchRequest,
 } from './branch.models';
 
@@ -226,6 +228,43 @@ export class BranchService {
             if (error.status === 409 && (errorCode === null || errorCode === ACTIVATION_KEY_REGENERATION_CONFLICT)) {
               return throwError(() => new ActivationKeyRegenerationConflictError());
             }
+          }
+
+          return throwError(() => error);
+        }),
+      );
+  }
+
+  /**
+   * Sets (or clears, with `null`) the annotated-output base URL advertised for a branch's Device
+   * (FS-12 §4) — `PUT /api/v1/devices/{branchId}/network`.
+   *
+   * Addressed by *branch* id, matching `regenerateActivationKey`: it is the only always-present,
+   * client-visible handle to a branch's single Device, and it works before the Device has activated.
+   *
+   * This is discovery metadata only. It never touches device identity, credentials, activation
+   * state, cameras, or camera output paths, and by contract it does not change the Agent's pipeline
+   * configuration version — so it cannot restart the Bridge.
+   *
+   * Returns the stored (normalised) value, or `null` for a documented not-found branch.
+   */
+  setDeviceNetwork(
+    branchId: string,
+    jetsonHost: string | null,
+    rtspOutputPort: number | null,
+  ): Observable<DeviceNetworkUpdate | null> {
+    const request: SetDeviceNetworkRequest = { jetsonHost, rtspOutputPort };
+
+    return this.http
+      .put<ApiEnvelope<DeviceNetworkUpdate>>(
+        `${this.devicesUrl}/${encodeURIComponent(branchId)}/network`,
+        request,
+      )
+      .pipe(
+        map((envelope) => unwrap(envelope)),
+        catchError((error: unknown) => {
+          if (error instanceof HttpErrorResponse && error.status === 404) {
+            return of(null);
           }
 
           return throwError(() => error);

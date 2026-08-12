@@ -240,7 +240,28 @@ persistence succeeds.
 The recorded real-Jetson verification (steps, modes, Device ID matching the Dashboard, offline
 restart, reactivation, clean-log inspection) is captured in the root `README.md` and IP-02 §21.
 
+## Detection event Backend sync (IP-08, FS-06)
+
+`WDA_DETECTION_SYNC_ENABLED` (`agent.env.example`) turns on `DetectionEventSyncWorker`, which drains
+already-persisted `DetectionEvent` rows (written by the Detection Event Bridge, IP-07) to the
+Backend's `POST /api/v1/sync/events` and marks only Backend-acknowledged events delivered.
+
+* **Metadata synchronization only.** Snapshot capture and upload are **not** implemented anywhere in
+  the Agent/Bridge. Every `Alert` row this feature creates on the Backend has `SnapshotReference =
+  null`; there is no code path that populates it. Full FR-DET-004/FR-DET-007 acceptance (which
+  requires a snapshot) is not claimed by this feature.
+* **Camera name convention.** The Backend resolves the Agent's `WDA_DETECTION_CAMERA_ID` (e.g.
+  `"camera1"`) against a `Camera.Name` on the authenticated Device's own Branch, case-insensitively.
+  The Branch operator's Camera row must be named identically to this Agent's configured camera id, or
+  every event is rejected with `UNKNOWN_CAMERA`.
+* **Ship state.** `WDA_DETECTION_SYNC_ENABLED` defaults to `false` and **must stay `false`** for this
+  deployment until the isolated end-to-end staging test (IP-08 Phase 16 — Backend + real SQL Server
+  test database + a temporary Agent SQLite, exercising online delivery, an outage, reconnection, and
+  duplicate retry) has actually passed. That verification is separate from, and has not been
+  performed as part of, this feature's Agent-side implementation.
+
 ## Current exclusions
 
-No DeepStream unit/supervision, camera/model/GPU config, detection, alerts, heartbeat, health
-endpoint, commands, siren, WebRTC, or `ConfigCache` writing. The Agent is not containerized.
+No camera/model/GPU config beyond what `deepstream/README.md` documents, no alert-status
+transitions (acknowledge/dismiss), no heartbeat, no health endpoint, no remote commands, no siren,
+no WebRTC. The Agent is not containerized.

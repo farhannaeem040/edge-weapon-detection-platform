@@ -1,12 +1,15 @@
-"""Repository for the Agent's persisted Detection Events (IP-07 T-85, FS-05 §7; IP-02 T-36 pattern).
+"""Repository for the Agent's persisted Detection Events (IP-07 T-85, FS-05 §7; IP-08 T-104, FS-06
+§7.1; IP-02 T-36 pattern).
 
-This is the only code that writes or reads the ``DetectionEvent`` table. It offers exactly what
-T-85 needs: an accepted :class:`~weapon_detection_agent.detection.models.DetectionEvent` is a
-single-row, parameterized, transactional insert, and a :meth:`~DetectionEventRepository.list_recent`
-read path for verifying persistence and the FS-05 §8 diagnostics query. It makes no delivery
-decision, retry, or Backend call — ``DeliveryStatus`` is always written as ``'pending'`` here; this
-repository has no method that ever writes ``'delivered'`` (a later outbox/backend-delivery feature
-owns that transition, FS-05 §7/§10 — this task only reserves the column value the schema permits).
+This is the only code that writes or reads the ``DetectionEvent`` table. :meth:`~
+DetectionEventRepository.insert` always writes ``DeliveryStatus = 'pending'`` — it makes no delivery
+decision and contacts no Backend. :meth:`~DetectionEventRepository.list_pending` /
+:meth:`~DetectionEventRepository.mark_delivered_many` (IP-08 T-104, FS-06 §7.1) are the only methods
+that ever transition a row to ``'delivered'``; they still make no delivery *decision* and perform no
+HTTP call themselves — the outbox worker (FS-06 §7.4) owns deciding what to send and reading the
+Backend's response, this repository only executes the two SQL operations that decision needs.
+:meth:`~DetectionEventRepository.list_recent` remains the separate FS-05 §8 diagnostics read path,
+unchanged by this addition.
 
 Boundaries kept, mirroring :class:`~weapon_detection_agent.persistence.device_identity_repository.
 DeviceIdentityRepository`/:class:`~weapon_detection_agent.persistence.config_cache_repository.
@@ -24,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +67,20 @@ _SELECT_RECENT = (
     "DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight "
     "FROM DetectionEvent ORDER BY CreatedAtUtc DESC LIMIT ?"
 )
+# Includes CreatedAtUtc (unlike _SELECT_RECENT) because the outbox worker/BackendSyncClient (FS-06
+# §4.1/§7.3) needs it on every event it sends; _row_to_event populates DetectionEvent.created_at_utc
+# only when the queried row actually carries the column, so _SELECT_RECENT's own mapping is
+# unchanged (IP-08 T-104).
+_SELECT_PENDING = (
+    "SELECT EventId, DeviceId, CameraId, SourceId, ClassId, ClassName, Confidence, FrameNumber, "
+    "DetectedAtUtc, FrameWidth, FrameHeight, BboxLeft, BboxTop, BboxWidth, BboxHeight, "
+    "CreatedAtUtc FROM DetectionEvent WHERE DeliveryStatus = 'pending' "
+    "ORDER BY DetectedAtUtc ASC, EventId ASC LIMIT ?"
+)
+_DELIVERED_STATUS = "delivered"
+# FS-09 §9, IP-11 T-177: the terminal status for a Backend-suppressed detection (sync outcome
+# `quota_exceeded`) — never resent, never mapped to 'delivered'.
+_SUPPRESSED_BY_QUOTA_STATUS = "suppressed_by_quota"
 
 
 def _utc_now() -> datetime:
@@ -177,6 +194,90 @@ class DetectionEventRepository:
 
         return [self._row_to_event(row) for row in rows]
 
+    def list_pending(self, limit: int) -> list[DetectionEvent]:
+        """Return up to ``limit`` not-yet-delivered events, oldest detection first (FS-06 §7.1).
+
+        Ordered by ``DetectedAtUtc`` then ``EventId`` (a deterministic tiebreak for equal
+        timestamps) — the field the outbox worker drains oldest-first, reusing the
+        ``(DeliveryStatus, CreatedAtUtc)`` index IP-07 built anticipating this query. Never returns
+        an already-``delivered`` row. Raises :class:`ValueError` for a non-positive ``limit`` rather
+        than silently returning everything or nothing. Each returned event's ``created_at_utc`` is
+        populated from the stored row (unlike :meth:`list_recent`), since the Backend sync payload
+        requires it (FS-06 §4.1).
+        """
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+
+        with self._open() as connection:
+            rows = connection.execute(_SELECT_PENDING, (limit,)).fetchall()
+
+        return [self._row_to_event(row) for row in rows]
+
+    def mark_delivered_many(self, event_ids: Sequence[UUID], delivered_at_utc: datetime) -> int:
+        """Mark every currently-``pending`` id in ``event_ids`` ``'delivered'``, in one transaction.
+
+        Returns the number of rows actually updated — never raises on a mismatch against
+        ``len(event_ids)``; comparing the two and deciding what that means is the caller's job
+        (FS-06 §7.1). Never touches a row that is already ``'delivered'`` (so a duplicate call is
+        safe and idempotent), never ``INSERT OR REPLACE``s, and never deletes. An empty
+        ``event_ids`` is a no-op that returns 0 without opening a connection.
+        """
+        if delivered_at_utc.tzinfo is None:
+            raise ValueError("delivered_at_utc must be timezone-aware")
+
+        ids = [str(event_id) for event_id in event_ids]
+        if not ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in ids)
+        sql = (
+            "UPDATE DetectionEvent SET DeliveryStatus = ?, DeliveredAtUtc = ? "
+            f"WHERE EventId IN ({placeholders}) AND DeliveryStatus = 'pending'"
+        )
+        params: list[object] = [_DELIVERED_STATUS, to_iso_utc(delivered_at_utc), *ids]
+
+        with self._open() as connection:
+            with transaction(connection):
+                cursor = connection.execute(sql, params)
+                updated = cursor.rowcount
+
+        return updated
+
+    def mark_suppressed_by_quota_many(
+        self, event_ids: Sequence[UUID], finalized_at_utc: datetime
+    ) -> int:
+        """Mark every currently-``pending`` id in ``event_ids`` ``'suppressed_by_quota'``, in one
+        transaction (FS-09 §9).
+
+        Structurally identical to :meth:`mark_delivered_many`: returns the number of rows actually
+        updated, never touches a row that is already terminal (``'delivered'`` or
+        ``'suppressed_by_quota'``) so a duplicate call is safe and idempotent, never ``INSERT OR
+        REPLACE``s, and never deletes. The original event row and all its metadata are preserved —
+        only ``DeliveryStatus``/``FinalizedAtUtc`` change. An empty ``event_ids`` is a no-op that
+        returns 0 without opening a connection. A ``quota_exceeded`` outcome is never mapped to
+        ``'delivered'`` — this is the only method that ever writes ``'suppressed_by_quota'``.
+        """
+        if finalized_at_utc.tzinfo is None:
+            raise ValueError("finalized_at_utc must be timezone-aware")
+
+        ids = [str(event_id) for event_id in event_ids]
+        if not ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in ids)
+        sql = (
+            "UPDATE DetectionEvent SET DeliveryStatus = ?, FinalizedAtUtc = ? "
+            f"WHERE EventId IN ({placeholders}) AND DeliveryStatus = 'pending'"
+        )
+        params: list[object] = [_SUPPRESSED_BY_QUOTA_STATUS, to_iso_utc(finalized_at_utc), *ids]
+
+        with self._open() as connection:
+            with transaction(connection):
+                cursor = connection.execute(sql, params)
+                updated = cursor.rowcount
+
+        return updated
+
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> DetectionEvent:
         try:
@@ -191,6 +292,15 @@ class DetectionEventRepository:
             raise InvalidDetectionEventStateError(
                 "stored detection event has an invalid timestamp"
             ) from exc
+
+        created_at_utc: datetime | None = None
+        if "CreatedAtUtc" in row.keys():
+            try:
+                created_at_utc = parse_iso_utc(row["CreatedAtUtc"])
+            except ValueError as exc:
+                raise InvalidDetectionEventStateError(
+                    "stored detection event has an invalid timestamp"
+                ) from exc
 
         try:
             return DetectionEvent(
@@ -209,6 +319,7 @@ class DetectionEventRepository:
                 bbox_top=row["BboxTop"],
                 bbox_width=row["BboxWidth"],
                 bbox_height=row["BboxHeight"],
+                created_at_utc=created_at_utc,
             )
         except ValueError as exc:
             raise InvalidDetectionEventStateError(

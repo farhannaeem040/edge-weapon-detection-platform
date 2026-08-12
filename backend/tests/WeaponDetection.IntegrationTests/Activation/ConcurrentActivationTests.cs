@@ -84,7 +84,9 @@ public class ConcurrentActivationTests : IDisposable
                 name,
                 address = "1 High Street",
                 contactDetails = "ops@example.local",
-                cameras = new[] { new { name = "Front Entrance", rtspUrl = "rtsp://camera.example.local:554/stream1" } },
+                jetsonHost = "100.98.226.80",
+                rtspOutputPort = 8554,
+                cameras = new[] { new { name = "Front Entrance", rtspUrl = "rtsp://camera.example.local:554/stream1", cameraKey = $"cam-{Guid.NewGuid():N}" } },
             }),
         });
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);

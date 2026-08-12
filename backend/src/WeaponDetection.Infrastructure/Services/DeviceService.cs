@@ -47,6 +47,45 @@ public class DeviceService : IDeviceService
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
     }
 
+    public async Task<DeviceNetworkUpdate?> SetNetworkConfigurationAsync(
+        Guid branchId,
+        string? jetsonHost,
+        int? rtspOutputPort,
+        CancellationToken cancellationToken = default)
+    {
+        if (branchId == Guid.Empty)
+        {
+            return null;
+        }
+
+        // Tracked (not AsNoTracking) — this is the one path that mutates the Device row.
+        var device = await _dbContext.Devices
+            .SingleOrDefaultAsync(d => d.BranchId == branchId, cancellationToken);
+        if (device is null)
+        {
+            return null;
+        }
+
+        // Validation lives in the entity, so no service or controller can persist a base URL the
+        // domain would have rejected. An invalid value throws before SaveChanges, leaving the row
+        // untouched.
+        device.SetNetworkConfiguration(jetsonHost, rtspOutputPort);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        // DeviceId stays null for a Device that has not activated yet — the update still applied,
+        // which is why this is a distinct result type and not a nullable DeviceDetailView.
+        //
+        // FS-12 §9 item 10: nothing else on the Device was touched — credentials, activation status
+        // and the Cameras are all untouched, and because host/port are excluded from
+        // configurationVersion this change cannot restart the Bridge.
+        return new DeviceNetworkUpdate(
+            device.BranchId,
+            device.DeviceId,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.ComposeAnnotatedOutputBase());
+    }
+
     public async Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
         Guid deviceId,
         CancellationToken cancellationToken = default)
@@ -74,7 +113,10 @@ public class DeviceService : IDeviceService
             device.DeviceId!.Value,
             device.BranchId,
             device.ActivationStatus,
-            device.LastKnownAddress);
+            device.LastKnownAddress,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.ComposeAnnotatedOutputBase());
     }
 
     public DeviceProvisioning ProvisionForBranch(Guid branchId)

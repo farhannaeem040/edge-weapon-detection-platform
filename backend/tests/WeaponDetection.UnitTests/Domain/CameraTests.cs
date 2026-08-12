@@ -19,7 +19,7 @@ public class CameraTests
     {
         var branchId = Guid.NewGuid();
 
-        var camera = new Camera(branchId, CameraName, RtspUrl);
+        var camera = new Camera(branchId, CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         Assert.Equal(branchId, camera.BranchId);
         Assert.Equal(CameraName, camera.Name);
@@ -31,8 +31,8 @@ public class CameraTests
     {
         var branchId = Guid.NewGuid();
 
-        var first = new Camera(branchId, CameraName, RtspUrl);
-        var second = new Camera(branchId, CameraName, RtspUrl);
+        var first = new Camera(branchId, CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
+        var second = new Camera(branchId, CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         Assert.NotEqual(Guid.Empty, first.CameraId);
         Assert.NotEqual(first.CameraId, second.CameraId);
@@ -43,7 +43,7 @@ public class CameraTests
     {
         // The approved inbound camera contract carries only a name and an RTSP URL (IP-01 §11),
         // so a newly configured camera is an enabled one.
-        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         Assert.True(camera.Enabled);
     }
@@ -51,7 +51,7 @@ public class CameraTests
     [Fact]
     public void Constructor_HonoursAnExplicitlyDisabledCamera()
     {
-        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, enabled: false);
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}", enabled: false);
 
         Assert.False(camera.Enabled);
     }
@@ -59,7 +59,44 @@ public class CameraTests
     [Fact]
     public void Constructor_EmptyBranchId_Throws()
     {
-        Assert.Throws<ArgumentException>(() => new Camera(Guid.Empty, CameraName, RtspUrl));
+        Assert.Throws<ArgumentException>(() => new Camera(Guid.Empty, CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}"));
+    }
+
+    // --- FS-11 §2: SourceOrder --------------------------------------------------------------------
+
+    [Fact]
+    public void Constructor_DefaultsSourceOrderToZero()
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
+
+        Assert.Equal(0, camera.SourceOrder);
+    }
+
+    [Fact]
+    public void Constructor_HonoursAnExplicitSourceOrder()
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}", sourceOrder: 3);
+
+        Assert.Equal(3, camera.SourceOrder);
+    }
+
+    [Fact]
+    public void Constructor_NegativeSourceOrder_Throws()
+    {
+        Assert.Throws<ArgumentException>(
+            () => new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}", sourceOrder: -1));
+    }
+
+    [Fact]
+    public void UpdateConfiguration_NeverChangesSourceOrder()
+    {
+        // FS-11 §2: renaming/re-pointing a camera via the admin edit path must never touch its
+        // pipeline-order assignment.
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}", sourceOrder: 2);
+
+        camera.UpdateConfiguration("Renamed Camera", "rtsp://camera.example.invalid:554/stream2");
+
+        Assert.Equal(2, camera.SourceOrder);
     }
 
     [Theory]
@@ -68,7 +105,7 @@ public class CameraTests
     [InlineData("   ")]
     public void Constructor_MissingOrBlankName_Throws(string? name)
     {
-        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), name!, RtspUrl));
+        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), name!, RtspUrl, $"cam-{Guid.NewGuid():N}"));
     }
 
     [Theory]
@@ -77,13 +114,13 @@ public class CameraTests
     [InlineData("   ")]
     public void Constructor_MissingOrBlankRtspUrl_Throws(string? rtspUrl)
     {
-        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), CameraName, rtspUrl!));
+        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), CameraName, rtspUrl!, $"cam-{Guid.NewGuid():N}"));
     }
 
     [Fact]
     public void Constructor_TrimsSurroundingWhitespace()
     {
-        var camera = new Camera(Guid.NewGuid(), $"  {CameraName}  ", $"  {RtspUrl}  ");
+        var camera = new Camera(Guid.NewGuid(), $"  {CameraName}  ", $"  {RtspUrl}  ", $"cam-{Guid.NewGuid():N}");
 
         Assert.Equal(CameraName, camera.Name);
         Assert.Equal(RtspUrl, camera.RtspUrl);
@@ -94,7 +131,7 @@ public class CameraTests
     {
         var name = new string('n', Camera.NameMaxLength + 1);
 
-        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), name, RtspUrl));
+        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), name, RtspUrl, $"cam-{Guid.NewGuid():N}"));
     }
 
     [Fact]
@@ -102,7 +139,7 @@ public class CameraTests
     {
         var rtspUrl = BuildRtspUrlOfLength(Camera.RtspUrlMaxLength);
 
-        var camera = new Camera(Guid.NewGuid(), CameraName, rtspUrl);
+        var camera = new Camera(Guid.NewGuid(), CameraName, rtspUrl, $"cam-{Guid.NewGuid():N}");
 
         Assert.Equal(Camera.RtspUrlMaxLength, camera.RtspUrl.Length);
     }
@@ -112,7 +149,7 @@ public class CameraTests
     {
         var rtspUrl = BuildRtspUrlOfLength(Camera.RtspUrlMaxLength + 1);
 
-        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), CameraName, rtspUrl));
+        Assert.Throws<ArgumentException>(() => new Camera(Guid.NewGuid(), CameraName, rtspUrl, $"cam-{Guid.NewGuid():N}"));
     }
 
     [Fact]
@@ -128,7 +165,7 @@ public class CameraTests
             new string('x', Camera.RtspUrlMaxLength);
 
         var exception = Assert.Throws<ArgumentException>(() =>
-            new Camera(Guid.NewGuid(), CameraName, rtspUrl));
+            new Camera(Guid.NewGuid(), CameraName, rtspUrl, $"cam-{Guid.NewGuid():N}"));
 
         var text = exception.ToString();
 
@@ -142,7 +179,7 @@ public class CameraTests
     public void Constructor_BlankRtspUrl_ExceptionDoesNotEchoTheInput()
     {
         var exception = Assert.Throws<ArgumentException>(() =>
-            new Camera(Guid.NewGuid(), CameraName, "   "));
+            new Camera(Guid.NewGuid(), CameraName, "   ", $"cam-{Guid.NewGuid():N}"));
 
         Assert.DoesNotContain("rtsp://", exception.ToString());
     }
@@ -153,7 +190,7 @@ public class CameraTests
     public void UpdateConfiguration_ValidValues_ReplacesNameAndUrlAndKeepsIdentity()
     {
         var branchId = Guid.NewGuid();
-        var camera = new Camera(branchId, CameraName, RtspUrl);
+        var camera = new Camera(branchId, CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
         var originalCameraId = camera.CameraId;
 
         camera.UpdateConfiguration("New Camera", "rtsp://camera.example.invalid:554/stream2");
@@ -167,7 +204,7 @@ public class CameraTests
     [Fact]
     public void UpdateConfiguration_KeepsEnabledUnchanged()
     {
-        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         camera.UpdateConfiguration("New Camera", "rtsp://camera.example.invalid:554/stream2");
 
@@ -180,7 +217,7 @@ public class CameraTests
     [InlineData(null)]
     public void UpdateConfiguration_BlankName_Throws(string? blank)
     {
-        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         Assert.Throws<ArgumentException>(() => camera.UpdateConfiguration(blank!, RtspUrl));
     }
@@ -188,12 +225,121 @@ public class CameraTests
     [Fact]
     public void UpdateConfiguration_BlankRtspUrl_ExceptionDoesNotEchoTheInput()
     {
-        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl);
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, $"cam-{Guid.NewGuid():N}");
 
         var exception = Assert.Throws<ArgumentException>(() =>
             camera.UpdateConfiguration(CameraName, "   "));
 
         Assert.DoesNotContain("rtsp://", exception.ToString());
+    }
+
+    // --- FS-11 §11: derived per-camera output path -------------------------------------------------
+
+    // FS-12 §2.1 — the mount is now derived from the administrator-defined CameraKey, not the GUID.
+    [Fact]
+    public void DeriveOutputPath_IsBuiltFromTheCameraKey()
+    {
+        Assert.Equal("cameras/front-entrance", Camera.DeriveOutputPath("front-entrance"));
+    }
+
+    [Fact]
+    public void DeriveOutputPath_IsDeterministicForTheSameKey()
+    {
+        Assert.Equal(Camera.DeriveOutputPath("rear-door"), Camera.DeriveOutputPath("rear-door"));
+    }
+
+    [Fact]
+    public void DeriveOutputPath_IsDistinctForDistinctKeys()
+    {
+        var paths = Enumerable.Range(0, 64)
+            .Select(i => Camera.DeriveOutputPath($"cam-{i}"))
+            .ToList();
+
+        Assert.Equal(paths.Count, paths.Distinct().Count());
+    }
+
+    [Fact]
+    public void DeriveOutputPath_IsUrlPathSafeAndRelative()
+    {
+        var path = Camera.DeriveOutputPath("front-entrance-2");
+
+        Assert.DoesNotContain("..", path);
+        Assert.DoesNotContain("://", path);
+        Assert.DoesNotContain(@"\", path);
+        Assert.DoesNotContain("?", path);
+        Assert.DoesNotContain("#", path);
+        Assert.False(path.StartsWith('/'));
+        Assert.All(path, c => Assert.True(char.IsAsciiLetterOrDigit(c) || c is '-' or '/'));
+    }
+
+    // FS-12 §9 item 8: a rename, and a StreamUrl change, must both leave the public mount untouched.
+    [Fact]
+    public void DeriveOutputPath_IsUnaffectedByNameOrRtspUrl()
+    {
+        var camera = new Camera(Guid.NewGuid(), CameraName, RtspUrl, "front-entrance");
+        var before = Camera.DeriveOutputPath(camera.CameraKey);
+
+        camera.UpdateConfiguration("A Completely New Label", "rtsp://camera.example.invalid:554/moved");
+
+        Assert.Equal("front-entrance", camera.CameraKey);
+        Assert.Equal(before, Camera.DeriveOutputPath(camera.CameraKey));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("ab")]                       // too short
+    [InlineData("Front-Entrance")]           // uppercase is rejected, never normalised
+    [InlineData("front entrance")]           // space
+    [InlineData("front_entrance")]           // underscore
+    [InlineData("front/entrance")]           // slash
+    [InlineData(@"front\entrance")]          // backslash
+    [InlineData("../etc")]                   // traversal
+    [InlineData("-front")]                   // leading hyphen
+    [InlineData("front-")]                   // trailing hyphen
+    [InlineData("front?x=1")]                // query
+    [InlineData("front#frag")]               // fragment
+    [InlineData("front%2fentrance")]         // URL-encoding trick
+    public void RequireCameraKey_RejectsInvalidKeys(string cameraKey)
+    {
+        Assert.Throws<ArgumentException>(() => Camera.RequireCameraKey(cameraKey));
+    }
+
+    [Theory]
+    [InlineData("ds-test")]
+    [InlineData("api")]
+    [InlineData("admin")]
+    [InlineData("health")]
+    [InlineData("metrics")]
+    [InlineData("cameras")]
+    public void RequireCameraKey_RejectsReservedKeys(string cameraKey)
+    {
+        Assert.True(Camera.IsReservedCameraKey(cameraKey));
+        Assert.Throws<ArgumentException>(() => Camera.RequireCameraKey(cameraKey));
+    }
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("front-entrance")]
+    [InlineData("cam1")]
+    [InlineData("a1")]
+    public void RequireCameraKey_AcceptsValidKeys(string cameraKey)
+    {
+        if (cameraKey.Length < Camera.CameraKeyMinLength)
+        {
+            Assert.Throws<ArgumentException>(() => Camera.RequireCameraKey(cameraKey));
+            return;
+        }
+
+        Assert.Equal(cameraKey, Camera.RequireCameraKey(cameraKey));
+    }
+
+    [Fact]
+    public void RequireCameraKey_RejectsKeyLongerThanTheMaximum()
+    {
+        var tooLong = new string('a', Camera.CameraKeyMaxLength + 1);
+
+        Assert.Throws<ArgumentException>(() => Camera.RequireCameraKey(tooLong));
     }
 
     private static string BuildRtspUrlOfLength(int length)

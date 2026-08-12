@@ -75,6 +75,39 @@ public class DeviceCredentialValidatorTests : IDisposable
         Assert.Equal(DeviceCredentialValidationOutcome.Valid, result.Outcome);
     }
 
+    // FS-06 §6.2 (additive, non-breaking): a valid result now also carries the authenticated
+    // device's BranchId/DeviceRecordId, resolved from the same Device row the credential check
+    // already loaded — never a second, independent lookup.
+    [Fact]
+    public async Task ValidateAsync_ValidActiveCredentials_PopulatesBranchIdAndDeviceRecordId()
+    {
+        var branch = new Branch("Downtown Branch", "1 High Street", "ops@example.local");
+        var device = new Device(branch.BranchId);
+        _dbContext.Branches.Add(branch);
+        _dbContext.Devices.Add(device);
+        await _dbContext.SaveChangesAsync();
+        device.Activate(_protector.Protect(KnownSecret));
+        await _dbContext.SaveChangesAsync();
+
+        var result = await _validator.ValidateAsync(device.DeviceId!.Value, KnownSecret);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(branch.BranchId, result.BranchId);
+        Assert.Equal(device.DeviceRecordId, result.DeviceRecordId);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_InvalidOutcome_LeavesBranchIdAndDeviceRecordIdNull()
+    {
+        var (deviceId, _) = await SeedActivatedDeviceAsync(KnownSecret);
+
+        var result = await _validator.ValidateAsync(deviceId, WrongSecret);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.BranchId);
+        Assert.Null(result.DeviceRecordId);
+    }
+
     [Fact]
     public async Task ValidateAsync_IncorrectSecret_ReturnsSecretMismatch()
     {

@@ -47,10 +47,12 @@ public class BranchDeleteApiTests : IDisposable
             name,
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
-                new { name = "Camera 1", rtspUrl = "rtsp://camera.example.invalid:554/s1" },
-                new { name = "Camera 2", rtspUrl = "rtsp://camera.example.invalid:554/s2" },
+                new { name = "Camera 1", rtspUrl = "rtsp://camera.example.invalid:554/s1", cameraKey = $"cam-{Guid.NewGuid():N}" },
+                new { name = "Camera 2", rtspUrl = "rtsp://camera.example.invalid:554/s2", cameraKey = $"cam-{Guid.NewGuid():N}" },
             },
         };
 

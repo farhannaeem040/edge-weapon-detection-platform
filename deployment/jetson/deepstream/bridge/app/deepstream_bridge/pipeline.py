@@ -24,9 +24,17 @@ without hardware (task item 12).
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Sequence
+import threading
+from collections import deque
+from typing import Any, Callable, Optional, Sequence
 
-from deepstream_bridge.config import BridgeConfig, RtspOutConfig, SourceConfig, TrackerConfig
+from deepstream_bridge.config import (
+    BridgeConfig,
+    RtspOutConfig,
+    SnapshotConfig,
+    SourceConfig,
+    TrackerConfig,
+)
 from deepstream_bridge.errors import (
     MissingGstRtspServerBindingsError,
     MissingGStreamerBindingsError,
@@ -35,9 +43,25 @@ from deepstream_bridge.errors import (
     PipelineElementCreationError,
     PipelineLinkError,
 )
-from deepstream_bridge.probe import handle_buffer
+from deepstream_bridge.probe import frame_number_from_buffer, handle_buffer
+from deepstream_bridge.snapshot import CandidateFrameTracker, SnapshotCandidateCache
 
 _LOGGER = logging.getLogger("deepstream_bridge.pipeline")
+
+# GstQueue's "leaky" enum (confirmed via gst-inspect-1.0 queue): 0=no, 1=upstream, 2=downstream.
+# FS-08 §3 requires downstream-leaky (drop the newest/incoming buffer on overflow, never block the
+# OSD-rendering thread waiting for the snapshot branch to keep up).
+_QUEUE_LEAK_DOWNSTREAM = 2
+
+# Small and bounded (FS-08 §3: "queue leaky=downstream, small bounded max-size-buffers") — this
+# branch only ever needs to hold the handful of in-flight candidate frames between the valve and the
+# hardware JPEG encoder; it is not a general backlog buffer (that's the queue's whole point here).
+_SNAPSHOT_QUEUE_MAX_SIZE_BUFFERS = 4
+
+# The pseudo source index used by the legacy single-shared-output topology, where one nvdsosd serves
+# every source and there is no demultiplexing to attribute a buffer to a real camera. Never collides
+# with a real source_index, which is always >= 0.
+_SHARED_OUTPUT_SOURCE_INDEX = -1
 
 
 def import_gst() -> tuple[Any, Any]:
@@ -86,9 +110,34 @@ class BridgePipeline:
     codebase, e.g. ``DeepStreamProcessManager``'s injectable subprocess factory).
     """
 
-    def __init__(self, *, config: BridgeConfig, enqueue: Callable[[dict[str, Any]], None]) -> None:
+    def __init__(
+        self,
+        *,
+        config: BridgeConfig,
+        enqueue: Callable[[dict[str, Any]], None],
+        candidate_tracker: Optional[CandidateFrameTracker] = None,
+        snapshot_cache: Optional[SnapshotCandidateCache] = None,
+    ) -> None:
+        if config.snapshot.enabled and (candidate_tracker is None or snapshot_cache is None):
+            raise ValueError(
+                "candidate_tracker and snapshot_cache are required when config.snapshot.enabled"
+            )
+
         self._config = config
         self._enqueue = enqueue
+        self._candidate_tracker = candidate_tracker
+        self._snapshot_cache = snapshot_cache
+
+        # Frame numbers the valve-gating probe let through, in the exact order their buffers enter
+        # the snapshot branch (queue -> valve -> nvjpegenc -> appsink is a single synchronous push
+        # chain per buffer, so FIFO order here matches pull order in the appsink callback below).
+        # Populated on the queue's src-pad probe thread, consumed on the appsink's new-sample thread
+        # (in practice the same call stack, but a lock is cheap insurance either way).
+        # Per-source FIFOs. Keyed by source_index because each camera has its own independent
+        # snapshot branch (queue -> valve -> nvjpegenc -> appsink is a synchronous push chain per
+        # branch), so pull order matches push order *within* a source but never across sources.
+        self._pending_snapshot_frames: "dict[int, deque[int]]" = {}
+        self._pending_snapshot_frames_lock = threading.Lock()
 
         self._Gst, self._GLib = import_gst()
         self._pyds = import_pyds()
@@ -98,6 +147,10 @@ class BridgePipeline:
         self._loop: Any | None = None
         self._rtsp_server: Any | None = None
         self._bus_error: Exception | None = None
+        # FS-11 §11: every RTSP mount this pipeline registered, so shutdown can remove each one
+        # explicitly rather than relying on process exit — a stale mount must never outlive the
+        # configuration that created it across a controlled Bridge restart.
+        self._mount_points_added: "list[str]" = []
 
     # --- Construction ----------------------------------------------------------------------------
 
@@ -111,14 +164,26 @@ class BridgePipeline:
         pipeline = Gst.Pipeline.new("deepstream-bridge-pipeline")
         self._pipeline = pipeline
 
-        source_element = self._create_source_element(cfg.source)
+        # FS-11 §8, IP-13 T-243: one source bin per configured [sourceN] section — the single-
+        # camera case (every Bridge run before this feature) is simply a one-element tuple, no
+        # separate code path. Each element is named uniquely (its own source_index) so multiple
+        # sources coexist in the same pipeline without a GStreamer element-name collision.
+        source_elements = [self._create_source_element(src) for src in cfg.sources]
         streammux = self._make("nvstreammux", "stream-muxer")
         pgie = self._make("nvinfer", "primary-inference")
         tracker = self._make("nvtracker", "tracker") if cfg.tracker is not None else None
         nvvidconv = self._make("nvvideoconvert", "convertor")
-        nvosd = self._make("nvdsosd", "onscreendisplay")
 
-        for element in (source_element, streammux, pgie, tracker, nvvidconv, nvosd):
+        # FS-11 §11: which sources have their own annotated output mount. When any do, the OSD moves
+        # *into* each per-camera branch (so each output is drawn with only its own camera's
+        # detections) and the shared pre-demux nvdsosd is not built at all. Otherwise the original
+        # single shared-OSD topology is built byte-for-byte as before.
+        per_camera_sources = [src for src in cfg.sources if src.output_path]
+        dynamic_outputs = cfg.rtsp_out.enabled and bool(per_camera_sources)
+
+        nvosd = None if dynamic_outputs else self._make("nvdsosd", "onscreendisplay")
+
+        for element in (*source_elements, streammux, pgie, tracker, nvvidconv, nvosd):
             if element is not None:
                 pipeline.add(element)
 
@@ -127,31 +192,77 @@ class BridgePipeline:
         if tracker is not None:
             assert cfg.tracker is not None
             self._configure_tracker(tracker, cfg.tracker)
-        self._configure_osd(nvosd)
+        if nvosd is not None:
+            self._configure_osd(nvosd)
 
         # nvurisrcbin's video src pad ("vsrc_%u") has "Sometimes" availability — it appears only
-        # once the source negotiates, so linking happens in the pad-added callback, not here.
-        source_element.connect("pad-added", self._on_source_pad_added, streammux)
+        # once each source negotiates, independently of the others, so linking happens in each
+        # source's own pad-added callback, not here. Each callback is bound to its own source's
+        # sink_%u request-pad index (FS-11 §8) — never inferred from list position, so a sparse/
+        # reordered SourceOrder still maps to the correct streammux pad.
+        for source_element, source_cfg in zip(source_elements, cfg.sources):
+            source_element.connect(
+                "pad-added", self._on_source_pad_added, streammux, source_cfg.source_index
+            )
 
+        # One shared nvstreammux and exactly one shared nvinfer, always — batching N sources into a
+        # single inference pass is the architecture this feature must not change (FS-11 §11).
         chain: Sequence[Any] = [
             streammux,
             pgie,
             *([tracker] if tracker is not None else []),
             nvvidconv,
-            nvosd,
+            *([nvosd] if nvosd is not None else []),
         ]
         for upstream, downstream in zip(chain, chain[1:]):
             if not upstream.link(downstream):
                 raise PipelineLinkError(
                     f"failed to link {upstream.get_name()} -> {downstream.get_name()}"
                 )
+        tail = chain[-1]
 
-        if cfg.rtsp_out.enabled:
-            self._attach_rtsp_out(pipeline, nvosd, cfg.rtsp_out)
+        # FS-08 snapshot tap point (corrected).
+        #
+        # The snapshot branch may only ever hang off an *annotated, demultiplexed, single-camera*
+        # buffer. Where that buffer lives depends entirely on the output topology:
+        #
+        #  * dynamic per-camera outputs (production): the OSD lives inside each per-camera branch,
+        #    so the snapshot tee is built there too — see _attach_one_camera_output. Nothing is
+        #    tapped here, because `tail` at this point is the shared *pre-demux, pre-OSD*
+        #    nvvideoconvert carrying a batched NvBufSurface for every camera at once. Tapping it
+        #    (as this code did until FS-08's re-architecture) yields an un-annotated, multi-camera
+        #    batched buffer that nvjpegenc cannot turn into one camera's evidence JPEG — which is
+        #    precisely why no snapshot ever reached the spool.
+        #
+        #  * legacy single shared output: the shared nvdsosd is `tail`, so the historical tee here
+        #    is still correct and is built exactly as before.
+        if cfg.snapshot.enabled and not dynamic_outputs:
+            tee = self._make("tee", "osd-tee")
+            pipeline.add(tee)
+            if not tail.link(tee):
+                raise PipelineLinkError(f"failed to link {tail.get_name()} -> osd-tee")
+            self._attach_snapshot_branch(
+                pipeline, tee, cfg.snapshot, source_index=_SHARED_OUTPUT_SOURCE_INDEX
+            )
+            branch_source = tee
         else:
-            self._attach_fakesink(pipeline, nvosd)
+            branch_source = tail
 
-        self._attach_probe(nvosd)
+        if dynamic_outputs:
+            # FS-11 §11: N enabled Cameras -> N independent annotated RTSP outputs, via one shared
+            # nvstreamdemux. The detection probe is attached to the demuxer's own *batched* sink pad
+            # (see _attach_per_camera_outputs) — never to the per-branch OSDs.
+            self._attach_per_camera_outputs(
+                pipeline, branch_source, per_camera_sources, cfg.rtsp_out
+            )
+        else:
+            assert nvosd is not None
+            # Legacy single shared output: probe on the batched nvdsosd sink pad, exactly as before.
+            self._attach_probe(nvosd)
+            if cfg.rtsp_out.enabled:
+                self._attach_rtsp_out(pipeline, branch_source, cfg.rtsp_out)
+            else:
+                self._attach_fakesink(pipeline, branch_source)
 
     def _make(self, factory_name: str, element_name: str) -> Any:
         element = self._Gst.ElementFactory.make(factory_name, element_name)
@@ -171,7 +282,9 @@ class BridgePipeline:
         dynamic ``vsrc_%u`` pad — matching what ``deepstream-app`` itself uses internally, never a
         hardcoded model/decoder assumption.
         """
-        element = self._make("nvurisrcbin", "uri-source-bin")
+        # Unique element name per source_index (FS-11 §8) — required once more than one source bin
+        # can coexist in the same pipeline; GStreamer element names must be unique per-bin.
+        element = self._make("nvurisrcbin", f"uri-source-bin-{cfg.source_index}")
         element.set_property("uri", cfg.uri)
         element.set_property("gpu-id", cfg.gpu_id)
         element.set_property("latency", cfg.latency_ms)
@@ -183,23 +296,32 @@ class BridgePipeline:
         element.set_property("file-loop", cfg.file_loop)
         return element
 
-    def _on_source_pad_added(self, _element: Any, pad: Any, streammux: Any) -> None:
-        """Link ``nvurisrcbin``'s dynamic video pad to ``nvstreammux`` once it appears. Never
-        raises (this runs on a GStreamer streaming thread, not the caller of :meth:`build` — an
-        exception here would not propagate as a normal Python error) — a link failure is logged
-        instead, which surfaces as a downstream negotiation/bus error the run loop already handles.
+    def _on_source_pad_added(
+        self, _element: Any, pad: Any, streammux: Any, sink_pad_index: int
+    ) -> None:
+        """Link one ``nvurisrcbin``'s dynamic video pad to ``nvstreammux``'s
+        ``sink_<sink_pad_index>`` request pad once it appears (FS-11 §8: the index is this
+        source's own ``source_index``,
+        never inferred from callback-invocation order — independent sources negotiate
+        independently and may fire in any order). Never raises (this runs on a GStreamer streaming
+        thread, not the caller of :meth:`build` — an exception here would not propagate as a
+        normal Python error) — a link failure is logged instead, which surfaces as a downstream
+        negotiation/bus error the run loop already handles. A failure on one source's pad does not
+        prevent another source's callback from linking its own pad.
         """
         caps = pad.get_current_caps() or pad.query_caps()
         structure = caps.get_structure(0)
         if not structure.get_name().startswith("video/"):
             return  # ignore nvurisrcbin's optional audio pad (asrc_%u) — video only
 
-        sink_pad = streammux.get_request_pad("sink_0")
+        sink_pad = streammux.get_request_pad(f"sink_{sink_pad_index}")
         if sink_pad is None:
-            _LOGGER.error("bridge_streammux_request_pad_unavailable")
+            _LOGGER.error(
+                "bridge_streammux_request_pad_unavailable", extra={"sink_pad_index": sink_pad_index}
+            )
             return
         if pad.link(sink_pad) != self._Gst.PadLinkReturn.OK:
-            _LOGGER.error("bridge_source_pad_link_failed")
+            _LOGGER.error("bridge_source_pad_link_failed", extra={"sink_pad_index": sink_pad_index})
 
     # --- Element property configuration (task item 4) ---------------------------------------------
 
@@ -251,6 +373,177 @@ class BridgePipeline:
         pipeline.add(fakesink)
         if not nvosd.link(fakesink):
             raise PipelineLinkError("failed to link nvdsosd -> fakesink")
+
+    def _attach_per_camera_outputs(
+        self,
+        pipeline: Any,
+        batched_source: Any,
+        sources: "list[SourceConfig]",
+        cfg: RtspOutConfig,
+    ) -> None:
+        """FS-11 §11: fan one batched, inferred stream out into N independent annotated RTSP
+        outputs — one per enabled Camera — through a single ``nvstreamdemux``.
+
+        Topology (N sources, no per-count special-casing anywhere)::
+
+            ... -> nvstreamdemux -> src_<source_index> -> queue -> nvvideoconvert -> nvdsosd
+                -> nvvideoconvert -> capsfilter -> nvv4l2h264enc -> h264parse -> rtph264pay
+                -> udpsink  ⇢  GstRtspServer factory on this Camera's own mount
+
+        The detection probe is attached to the demuxer's **sink** pad: that pad still carries the
+        batched ``NvDsBatchMeta``, so ``frame_meta.source_id`` remains the single, unchanged source
+        of detection identity (FS-11 §11 — per-camera OSD is rendering only). Each branch's OSD
+        draws only its own demuxed stream's metadata, so no camera's boxes can appear on another's
+        output.
+        """
+        GstRtspServer = import_gst_rtsp_server()
+
+        demux = self._make("nvstreamdemux", "stream-demuxer")
+        pipeline.add(demux)
+        if not batched_source.link(demux):
+            raise PipelineLinkError(
+                f"failed to link {batched_source.get_name()} -> nvstreamdemux"
+            )
+
+        # Probe on the batched side of the demuxer — the identity contract, unchanged.
+        self._attach_probe(demux)
+
+        server = GstRtspServer.RTSPServer()
+        server.props.service = str(cfg.port)
+        mount_points = server.get_mount_points()
+
+        for offset, source in enumerate(sources):
+            index = source.source_index
+            # Deterministic, collision-free port allocation: RTP and its RTCP companion occupy
+            # consecutive ports, so each branch advances the base by two (FS-11 §11). Derived from
+            # enumeration position, not source_index, so a sparse index set cannot push a port out
+            # of range.
+            udp_port = cfg.udp_port + (offset * 2)
+            self._attach_one_camera_output(
+                pipeline=pipeline,
+                demux=demux,
+                source=source,
+                udp_port=udp_port,
+                cfg=cfg,
+                mount_points=mount_points,
+                GstRtspServer=GstRtspServer,
+            )
+            _LOGGER.info(
+                "bridge_camera_output_attached",
+                extra={
+                    "source_index": index,
+                    "camera_id": source.camera_id,
+                    "mount_point": self._mount_point_of(source),
+                    "udp_port": udp_port,
+                },
+            )
+
+        server.attach(None)
+        self._rtsp_server = server
+        _LOGGER.info(
+            "bridge_per_camera_outputs_attached",
+            extra={"port": cfg.port, "output_count": len(sources)},
+        )
+
+    @staticmethod
+    def _mount_point_of(source: "SourceConfig") -> str:
+        """GstRtspServer mount points are absolute paths; the configured output path is relative."""
+        return "/" + source.output_path.strip("/")
+
+    def _attach_one_camera_output(
+        self,
+        *,
+        pipeline: Any,
+        demux: Any,
+        source: "SourceConfig",
+        udp_port: int,
+        cfg: RtspOutConfig,
+        mount_points: Any,
+        GstRtspServer: Any,
+    ) -> None:
+        """Build exactly one Camera's demuxed output branch and publish its own RTSP mount."""
+        index = source.source_index
+        suffix = f"-{index}"
+
+        queue_el = self._make("queue", f"out-queue{suffix}")
+        preconv = self._make("nvvideoconvert", f"out-preconv{suffix}")
+        nvosd = self._make("nvdsosd", f"out-osd{suffix}")
+        postconv = self._make("nvvideoconvert", f"out-postconv{suffix}")
+        capsfilter = self._make("capsfilter", f"out-caps{suffix}")
+        encoder = self._make("nvv4l2h264enc", f"out-encoder{suffix}")
+        h264parse = self._make("h264parse", f"out-h264parse{suffix}")
+        rtppay = self._make("rtph264pay", f"out-rtppay{suffix}")
+        udpsink = self._make("udpsink", f"out-udpsink{suffix}")
+
+        # Same OSD properties the shared single-output path applies — per-camera rendering must not
+        # silently differ from what this deployment already produces.
+        self._configure_osd(nvosd)
+
+        capsfilter.set_property(
+            "caps", self._Gst.Caps.from_string("video/x-raw(memory:NVMM), format=I420")
+        )
+        # Identical encoder/payloader settings to _attach_rtsp_out (T-92/T-94 fixes) — a per-camera
+        # output must inherit the same late-join/packet-loss recovery behaviour.
+        encoder.set_property("bitrate", cfg.bitrate)
+        encoder.set_property("idrinterval", cfg.idr_interval)
+        encoder.set_property("iframeinterval", cfg.iframe_interval)
+        encoder.set_property("insert-sps-pps", cfg.insert_sps_pps)
+        h264parse.set_property("config-interval", cfg.h264parse_config_interval)
+        rtppay.set_property("config-interval", cfg.rtph264pay_config_interval)
+        udpsink.set_property("host", cfg.multicast_group)
+        udpsink.set_property("port", udp_port)
+        udpsink.set_property("async", False)
+        udpsink.set_property("sync", True)
+
+        # FS-08: when snapshot capture is enabled, a tee is inserted immediately after *this camera's*
+        # nvdsosd. Everything downstream of the tee's first pad is byte-for-byte the branch that
+        # already exists, so the live RTSP output is unchanged; the snapshot branch hangs off a
+        # second request pad and is bounded/leaky so it can never back-pressure that output.
+        #
+        # This is the only point in the pipeline where a buffer is simultaneously demultiplexed (one
+        # camera) and annotated (post-OSD), which is exactly what FS-08's evidence contract requires.
+        snapshot_tee = (
+            self._make("tee", f"snapshot-tee{suffix}") if self._config.snapshot.enabled else None
+        )
+
+        head = (queue_el, preconv, nvosd)
+        tail_elements = (postconv, capsfilter, encoder, h264parse, rtppay, udpsink)
+        branch = (*head, *([snapshot_tee] if snapshot_tee is not None else []), *tail_elements)
+
+        for element in branch:
+            pipeline.add(element)
+        for upstream, downstream in zip(branch, branch[1:]):
+            if not upstream.link(downstream):
+                raise PipelineLinkError(
+                    f"failed to link {upstream.get_name()} -> {downstream.get_name()}"
+                )
+
+        if snapshot_tee is not None:
+            self._attach_snapshot_branch(
+                pipeline, snapshot_tee, self._config.snapshot, source_index=index
+            )
+
+        # nvstreamdemux's src_%u pads are request pads, and the index is this source's own
+        # source_index — the same index it occupies on nvstreammux's sink_%u side, which is what
+        # keeps output N showing Camera N and nothing else.
+        src_pad = demux.get_request_pad(f"src_{index}")
+        if src_pad is None:
+            raise PipelineLinkError(
+                f"nvstreamdemux has no src_{index} request pad for this source"
+            )
+        queue_sink_pad = queue_el.get_static_pad("sink")
+        if src_pad.link(queue_sink_pad) != self._Gst.PadLinkReturn.OK:
+            raise PipelineLinkError(f"failed to link nvstreamdemux src_{index} -> its output queue")
+
+        factory = GstRtspServer.RTSPMediaFactory()
+        factory.set_launch(
+            f"( udpsrc name=pay0 port={udp_port} buffer-size=524288 "
+            f'caps="application/x-rtp, media=video, clock-rate=90000, '
+            f'encoding-name={cfg.codec}, payload=96" )'
+        )
+        factory.set_shared(True)
+        mount_points.add_factory(self._mount_point_of(source), factory)
+        self._mount_points_added.append(self._mount_point_of(source))
 
     def _attach_rtsp_out(self, pipeline: Any, nvosd: Any, cfg: RtspOutConfig) -> None:
         """Reconstruct DeepStream's own internal RTSP-out branch, matching NVIDIA's
@@ -331,9 +624,141 @@ class BridgePipeline:
 
     def _on_buffer_probe(self, _pad: Any, info: Any, _user_data: Any) -> Any:
         # Minimal, non-blocking, returns immediately (task item 6) — all real work happens in
-        # probe.handle_buffer, which is pure Python + injected pyds, never Gst.
-        handle_buffer(self._pyds, info.get_buffer(), self._enqueue)
+        # probe.handle_buffer, which is pure Python + injected pyds, never Gst. on_candidate (IP-10
+        # T-133) is likewise a cheap, synchronous, in-memory-only call — never JPEG/GStreamer work.
+        on_candidate = self._candidate_tracker.record_detection if self._candidate_tracker else None
+        handle_buffer(self._pyds, info.get_buffer(), self._enqueue, on_candidate)
         return self._Gst.PadProbeReturn.OK
+
+    # --- Snapshot branch (IP-10 T-134/T-135, FS-08 §3) ------------------------------------------------
+
+    def _attach_snapshot_branch(
+        self, pipeline: Any, tee: Any, cfg: SnapshotConfig, *, source_index: int
+    ) -> None:
+        """One camera's snapshot branch: ``queue(leaky=downstream, small bounded max-size-buffers)
+        -> valve (closed by default) -> nvjpegenc (hardware, FS-08 §3 spike finding) -> appsink``.
+
+        Built once **per enabled Camera**, hanging off that camera's own post-OSD tee, so every
+        element name is suffixed with the source index and every buffer that reaches it belongs to
+        exactly one camera. The existing RTSP-out branch on the tee's first pad is untouched.
+
+        ``source_index`` is carried through the valve probe and the appsink callback into the
+        candidate structures, because a frame number alone is **not** unique across demultiplexed
+        cameras — two cameras can present the same frame number simultaneously, and correlating on
+        it alone could attach one camera's JPEG to the other camera's detection.
+        """
+        suffix = f"-{source_index}"
+        queue_el = self._make("queue", f"snapshot-queue{suffix}")
+        queue_el.set_property("leaky", _QUEUE_LEAK_DOWNSTREAM)
+        queue_el.set_property("max-size-buffers", _SNAPSHOT_QUEUE_MAX_SIZE_BUFFERS)
+        queue_el.set_property("max-size-bytes", 0)
+        queue_el.set_property("max-size-time", 0)
+
+        valve = self._make("valve", f"snapshot-valve{suffix}")
+        valve.set_property("drop", True)
+
+        jpegenc = self._make("nvjpegenc", f"snapshot-jpeg-encoder{suffix}")
+        jpegenc.set_property("quality", cfg.jpeg_quality)
+
+        appsink = self._make("appsink", f"snapshot-appsink{suffix}")
+        appsink.set_property("emit-signals", True)
+        appsink.set_property("max-buffers", 1)
+        appsink.set_property("drop", True)
+        appsink.set_property("sync", False)
+        appsink.connect("new-sample", self._on_snapshot_new_sample, source_index)
+
+        for element in (queue_el, valve, jpegenc, appsink):
+            pipeline.add(element)
+
+        chain = (tee, queue_el, valve, jpegenc, appsink)
+        for upstream, downstream in zip(chain, chain[1:]):
+            if not upstream.link(downstream):
+                raise PipelineLinkError(
+                    f"failed to link {upstream.get_name()} -> {downstream.get_name()}"
+                )
+
+        # The valve-gating probe (task item 3's last paragraph) sits on the queue's src pad — after
+        # the bounded queue, before the (comparatively expensive) hardware JPEG encode — so only a
+        # candidate frame ever reaches nvjpegenc at all.
+        queue_src_pad = queue_el.get_static_pad("src")
+        if queue_src_pad is None:
+            raise PipelineLinkError(
+                f"snapshot-queue{suffix} has no src pad to attach the valve-gating probe to"
+            )
+        queue_src_pad.add_probe(
+            self._Gst.PadProbeType.BUFFER, self._on_snapshot_valve_probe, (valve, source_index)
+        )
+
+    def _on_snapshot_valve_probe(self, _pad: Any, info: Any, user_data: Any) -> Any:
+        """Briefly open the valve for exactly the buffer matching a recorded candidate frame
+        number, then close it again for every other buffer (FS-08 §3). Never raises — an
+        unrecognized/expired frame is simply treated as non-candidate (valve stays closed)."""
+        valve, source_index = user_data
+        frame_number = frame_number_from_buffer(self._pyds, info.get_buffer())
+        is_candidate = (
+            frame_number is not None
+            and self._candidate_tracker is not None
+            and self._candidate_tracker.consume_candidate(source_index, frame_number)
+        )
+        if is_candidate:
+            # Record the frame number here, while NvDsBatchMeta is still attached to the buffer —
+            # nvjpegenc produces a new output buffer for the encoded JPEG that does not carry the
+            # metadata forward, so frame_number_from_buffer() on the appsink side would find nothing
+            # (this was the actual root cause of "genuine detections, zero persisted JPEGs": the
+            # candidate frame was correctly gated through the valve and encoded, but
+            # _on_snapshot_new_sample could never recover which frame_number the resulting JPEG
+            # belonged to, so it silently discarded every one). See
+            # _pending_snapshot_frames' docstring in __init__.
+            assert frame_number is not None  # noqa: S101 -- guaranteed by is_candidate above
+            with self._pending_snapshot_frames_lock:
+                self._pending_snapshot_frames.setdefault(source_index, deque()).append(
+                    frame_number
+                )
+        valve.set_property("drop", not is_candidate)
+        return self._Gst.PadProbeReturn.OK
+
+    def _on_snapshot_new_sample(self, appsink: Any, source_index: int) -> Any:
+        """appsink's ``new-sample`` callback (IP-10 T-135) — runs on the snapshot branch's own
+        streaming thread, never the nvdsosd sink-pad probe thread, satisfying "JPEG work never
+        occurs in the pad-probe thread". Pulls the encoded JPEG sample, copies it to plain
+        ``bytes`` (never retaining the ``GstBuffer``/sample itself), and caches it. A capture
+        failure here is logged and swallowed — it must never stop the pipeline (task item)."""
+        Gst = self._Gst
+        try:
+            sample = appsink.emit("pull-sample")
+            if sample is None:
+                return Gst.FlowReturn.OK
+
+            # Not frame_number_from_buffer(self._pyds, gst_buffer) here: this buffer is nvjpegenc's
+            # own encoded-JPEG output, which does not carry NvDsBatchMeta forward from its input —
+            # the frame number instead comes from the valve-gating probe's FIFO handoff (see
+            # __init__/_on_snapshot_valve_probe), recorded while the metadata was still attached.
+            with self._pending_snapshot_frames_lock:
+                pending = self._pending_snapshot_frames.get(source_index)
+                frame_number = pending.popleft() if pending else None
+            if frame_number is None:
+                _LOGGER.warning("bridge_snapshot_frame_number_unavailable")
+                return Gst.FlowReturn.OK
+            if self._snapshot_cache is None:
+                return Gst.FlowReturn.OK
+
+            gst_buffer = sample.get_buffer()
+            mapped, map_info = gst_buffer.map(Gst.MapFlags.READ)
+            if not mapped:
+                return Gst.FlowReturn.OK
+            try:
+                jpeg_bytes = bytes(map_info.data)
+            finally:
+                gst_buffer.unmap(map_info)
+
+            self._snapshot_cache.put(frame_number, jpeg_bytes)
+            _LOGGER.debug(
+                "bridge_snapshot_candidate_cached",
+                extra={"frame_number": frame_number, "size_bytes": len(jpeg_bytes)},
+            )
+        except Exception:  # noqa: BLE001 - capture failure must never fault the pipeline
+            _LOGGER.exception("bridge_snapshot_capture_failed")
+        return Gst.FlowReturn.OK
 
     # --- Run / shutdown (task item 10) ---------------------------------------------------------------
 
@@ -386,9 +811,28 @@ class BridgePipeline:
 
     def shutdown(self) -> None:
         """Release GStreamer/RTSP-server resources (task item 10). Idempotent and safe to call even
-        if :meth:`build`/:meth:`run` never completed."""
+        if :meth:`build`/:meth:`run` never completed. Also releases every retained snapshot cache
+        entry (IP-10 T-135 test requirement: "shutdown releases all retained cache entries") — no
+        cached JPEG bytes outlive the Bridge process that captured them."""
         if self._pipeline is not None:
             self._pipeline.set_state(self._Gst.State.NULL)
             self._pipeline = None
+
+        # Remove every mount this pipeline registered before dropping the server reference (FS-11
+        # §11: "no stale mount remains"). Best-effort per mount — one failure must not prevent the
+        # rest of shutdown, which is the only path that releases the pipeline's GPU resources.
+        if self._rtsp_server is not None and self._mount_points_added:
+            try:
+                mount_points = self._rtsp_server.get_mount_points()
+                for mount_point in self._mount_points_added:
+                    mount_points.remove_factory(mount_point)
+            except Exception:  # noqa: BLE001 - teardown must never raise
+                _LOGGER.exception("bridge_rtsp_mount_removal_failed")
+        self._mount_points_added = []
+
         self._rtsp_server = None
         self._loop = None
+        if self._snapshot_cache is not None:
+            self._snapshot_cache.clear()
+        with self._pending_snapshot_frames_lock:
+            self._pending_snapshot_frames.clear()

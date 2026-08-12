@@ -1,9 +1,13 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { RouterLink, RouterLinkActive, RouterOutlet, Router } from '@angular/router';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { filter, map } from 'rxjs';
 
 import { AuthService } from '../auth/auth.service';
 import { LOGIN_ROUTE } from '../auth/auth.routes';
 import { BRANCHES_ROUTE } from '../branches/branch.routes';
+import { ALERTS_ROUTE } from '../alerts/alert.routes';
+import { DASHBOARD_ROUTE } from '../dashboard/dashboard.routes';
 
 /**
  * The authenticated application shell (Stitch "Operations Overview" chrome, applied as styling only).
@@ -13,12 +17,14 @@ import { BRANCHES_ROUTE } from '../branches/branch.routes';
  * via a parent route in `app.routes.ts`, so every authenticated view shares one frame without each
  * view re-declaring it.
  *
- * **Navigation shows only implemented features.** The sole nav item is Branches — the one protected
- * area that exists. The Stitch sidebar's other entries (Live monitoring, Alerts, Incidents, Cameras,
+ * **Navigation shows only implemented features.** Dashboard, Alerts, and Branches are the three
+ * protected areas that exist (FS-10 graduates Dashboard and Alerts from placeholders to real,
+ * Backend-backed features). The Stitch sidebar's other entries (Live monitoring, Incidents, Cameras,
  * Edge devices, Analytics, System health, Users and access, Settings) back no implemented feature and
- * are deliberately absent; no dead links, no "coming soon" stubs (SCREEN-INVENTORY.md). `/dashboard`
- * still exists as a route but carries no meaningful content beyond what the shell already offers, so
- * it is not surfaced as navigation either.
+ * are deliberately absent; no dead links, no "coming soon" stubs (SCREEN-INVENTORY.md). A separate
+ * Devices nav item is also deliberately absent: device/camera counts already surface on the dashboard
+ * summary, and full device detail already lives under each Branch's own detail page — a redundant
+ * fleet-list page would be exactly the kind of decorative nav item this platform avoids (FS-10 §3).
  *
  * Sign-out mirrors the established logout contract: it asks the Backend to revoke the server-side
  * `AdminSession`, discards the local token whatever the outcome, and returns to the login view
@@ -63,6 +69,58 @@ import { BRANCHES_ROUTE } from '../branches/branch.routes';
         </div>
 
         <nav class="shell__nav" aria-label="Primary">
+          <a
+            class="shell__nav-link"
+            [routerLink]="dashboardRoute"
+            routerLinkActive="shell__nav-link--active"
+            (click)="closeNav()"
+          >
+            <svg
+              class="shell__nav-icon"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 13h6V4H4v9z M14 20h6v-9h-6v9z M4 20h6v-4H4v4z M14 9h6V4h-6v5z"
+              />
+            </svg>
+            <span>Dashboard</span>
+          </a>
+
+          <a
+            class="shell__nav-link"
+            [routerLink]="alertsRoute"
+            routerLinkActive="shell__nav-link--active"
+            (click)="closeNav()"
+          >
+            <svg
+              class="shell__nav-icon"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 3 3 20h18L12 3z M12 10v4 M12 17h.01"
+              />
+            </svg>
+            <span>Alerts</span>
+          </a>
+
           <a
             class="shell__nav-link"
             [routerLink]="branchesRoute"
@@ -117,7 +175,7 @@ import { BRANCHES_ROUTE } from '../branches/branch.routes';
             </svg>
           </button>
 
-          <span class="shell__header-title">Branch management</span>
+          <span class="shell__header-title">{{ headerTitle() }}</span>
 
           <button
             class="shell__logout btn btn--ghost"
@@ -341,8 +399,31 @@ export class ShellComponent {
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
 
+  protected readonly dashboardRoute = DASHBOARD_ROUTE;
+  protected readonly alertsRoute = ALERTS_ROUTE;
   protected readonly branchesRoute = BRANCHES_ROUTE;
   protected readonly loggingOut = signal(false);
+
+  /** The current top-level section, read from the URL so the header title stays truthful as the
+   *  Admin navigates between Dashboard, Alerts, and Branches, without duplicating the routing table. */
+  private readonly currentUrl = toSignal(
+    this.router.events.pipe(
+      filter((event): event is NavigationEnd => event instanceof NavigationEnd),
+      map((event) => event.urlAfterRedirects),
+    ),
+    { initialValue: this.router.url },
+  );
+
+  protected readonly headerTitle = computed(() => {
+    const url = this.currentUrl();
+    if (url.startsWith(this.alertsRoute)) {
+      return 'Alerts';
+    }
+    if (url.startsWith(this.branchesRoute)) {
+      return 'Branch management';
+    }
+    return 'Operations overview';
+  });
 
   /** Whether the off-canvas sidebar is open (mobile only; desktop shows it permanently). */
   protected readonly navOpen = signal(false);

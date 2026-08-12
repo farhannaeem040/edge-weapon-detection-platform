@@ -56,11 +56,16 @@ def test_pipeline_chain_conditionally_includes_tracker() -> None:
 
 
 def test_metadata_probe_is_registered_exactly_once() -> None:
-    """Exactly one ``add_probe`` call must exist, and ``_attach_probe`` must be called exactly once
-    from ``build()`` — regardless of tracker state, since the probe is attached to nvdsosd's sink
-    pad, downstream of both the tracker-present and tracker-absent chains."""
-    assert _PIPELINE_SOURCE.count("add_probe(") == 1
+    """``_attach_probe`` (the existing metadata probe on nvdsosd's sink pad) must be called exactly
+    once from ``build()`` — regardless of tracker state, since the probe is attached downstream of
+    both the tracker-present and tracker-absent chains. IP-10 added a second, distinct
+    ``add_probe(`` call (the snapshot branch's valve-gating probe, ``_on_snapshot_valve_probe``,
+    only reachable when snapshot capture is enabled) — this test now asserts the metadata probe's
+    own attachment count specifically, not a whole-file ``add_probe(`` count, since the file
+    legitimately contains two different probes for two different purposes."""
     assert _PIPELINE_SOURCE.count("self._attach_probe(nvosd)") == 1
+    assert _PIPELINE_SOURCE.count("add_probe(") == 2
+    assert "_on_snapshot_valve_probe" in _PIPELINE_SOURCE
 
 
 def test_probe_is_attached_after_pgie_regardless_of_tracker() -> None:

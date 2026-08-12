@@ -59,8 +59,12 @@ def test_tracker_remains_conditional() -> None:
 
 
 def test_metadata_probe_is_registered_exactly_once() -> None:
-    assert _PIPELINE_SOURCE.count("add_probe(") == 1
+    """See the identical, more fully documented assertion in
+    ``test_pipeline_tracker_construction.py`` — IP-10 legitimately added a second ``add_probe(``
+    call (the snapshot branch's valve-gating probe), so this checks the metadata probe's own
+    attachment count specifically rather than a whole-file total."""
     assert _PIPELINE_SOURCE.count("self._attach_probe(nvosd)") == 1
+    assert _PIPELINE_SOURCE.count("add_probe(") == 2
 
 
 def test_no_nms_parser_confidence_cooldown_sqlite_logic_in_pipeline_module() -> None:

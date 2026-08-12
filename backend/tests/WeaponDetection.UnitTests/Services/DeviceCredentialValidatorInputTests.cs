@@ -68,6 +68,32 @@ public class DeviceCredentialValidatorInputTests
             () => DeviceCredentialValidationResult.Invalid(DeviceCredentialValidationOutcome.Valid));
     }
 
+    // FS-06 §6.2 (additive extension) — a pure, database-free check that the factory itself carries
+    // the two new fields through correctly.
+    [Fact]
+    public void Result_Valid_CarriesBranchIdAndDeviceRecordId()
+    {
+        var branchId = Guid.NewGuid();
+        var deviceRecordId = Guid.NewGuid();
+
+        var result = DeviceCredentialValidationResult.Valid(branchId, deviceRecordId);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(DeviceCredentialValidationOutcome.Valid, result.Outcome);
+        Assert.Equal(branchId, result.BranchId);
+        Assert.Equal(deviceRecordId, result.DeviceRecordId);
+    }
+
+    [Fact]
+    public void Result_Invalid_NeverCarriesBranchIdOrDeviceRecordId()
+    {
+        var result = DeviceCredentialValidationResult.Invalid(
+            DeviceCredentialValidationOutcome.UnknownDevice);
+
+        Assert.Null(result.BranchId);
+        Assert.Null(result.DeviceRecordId);
+    }
+
     [Fact]
     public void Result_ToString_CarriesOnlyTheOutcome_NoSecretMaterial()
     {

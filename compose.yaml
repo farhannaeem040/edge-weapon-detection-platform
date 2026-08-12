@@ -88,6 +88,29 @@ services:
       # are missing while no Admin exists.
       BootstrapAdmin__CredentialIdentifier: ${ADMIN_IDENTIFIER:-admin}
       BootstrapAdmin__Password: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      # FS-07: a named volume (below), not the container's writable layer, so the Data Protection
+      # key ring — and therefore every already-protected Device secret — survives a full
+      # `docker compose up -d`/`--force-recreate` of this container, not merely a process restart
+      # within the same one. Mounted only into this service (Phase 5) — no other service ever
+      # needs to unprotect a Device secret.
+      DataProtection__KeyPath: /var/lib/weapon-detection/dataprotection-keys
+      # FS-08 §8: a second, separate named volume (below) from dataprotection-keys — snapshot
+      # evidence JPEGs are a distinct durability concern from the Data Protection key ring and must
+      # survive a full `docker compose up -d`/`--force-recreate` of this container the same way.
+      # Mounted only into this service — no other service ever reads/writes a snapshot file.
+      AlertSnapshots__StoragePath: /var/lib/weapon-detection/alert-snapshots
+      # FS-09 §11: Branch-level daily Alert quota (default 15/Branch/day). No volume needed — quota
+      # state lives in SQL Server (BranchDailyAlertQuotas/SuppressedDetectionEvents), not the
+      # filesystem. Set AlertQuota__Enabled=false to fully disable enforcement (IP-11 §4 Rollback).
+      AlertQuota__Enabled: "true"
+      # Operator-configurable via the protected .env (see .env.example). The literal default stays
+      # 15 — the approved production policy — so an environment that never sets the variable keeps
+      # exactly the previous behaviour. AlertQuotaOptionsValidator still bounds the effective value
+      # to 1..10000 at startup, so a typo cannot silently disable the quota.
+      AlertQuota__MaximumPerBranchPerDay: "${ALERT_QUOTA_MAXIMUM_PER_BRANCH_PER_DAY:-15}"
+    volumes:
+      - dataprotection-keys:/var/lib/weapon-detection/dataprotection-keys
+      - alert-snapshots:/var/lib/weapon-detection/alert-snapshots
     depends_on:
       # The Backend does not migrate on startup, and its Admin bootstrap needs an existing schema,
       # so it must not start until the migration job has succeeded.
@@ -121,3 +144,8 @@ networks:
 
 volumes:
   sqlserver-data:
+  # FS-07: Data Protection key ring persistence for the Backend service only (mounted above).
+  dataprotection-keys:
+  # FS-08: Alert snapshot evidence storage for the Backend service only (mounted above) — a
+  # separate volume from dataprotection-keys, never shared.
+  alert-snapshots:

@@ -119,7 +119,7 @@ public class BranchCameraSchemaSqlServerTests : IClassFixture<BranchCameraSchema
         using var context = BranchCameraSchemaSqlServerFixture.CreateContext();
         var branch = AddBranch(context);
 
-        var camera = new Camera(branch.BranchId, "Entrance Camera", RtspUrl);
+        var camera = new Camera(branch.BranchId, "Entrance Camera", RtspUrl, $"cam-{Guid.NewGuid():N}");
         context.Cameras.Add(camera);
         context.SaveChanges();
 
@@ -138,7 +138,7 @@ public class BranchCameraSchemaSqlServerTests : IClassFixture<BranchCameraSchema
         using var context = BranchCameraSchemaSqlServerFixture.CreateContext();
 
         // A BranchId that corresponds to no Branch row.
-        var orphan = new Camera(Guid.NewGuid(), "Orphan Camera", RtspUrl);
+        var orphan = new Camera(Guid.NewGuid(), "Orphan Camera", RtspUrl, $"cam-{Guid.NewGuid():N}");
         context.Cameras.Add(orphan);
 
         var exception = Assert.Throws<DbUpdateException>(() => context.SaveChanges());
@@ -153,9 +153,11 @@ public class BranchCameraSchemaSqlServerTests : IClassFixture<BranchCameraSchema
         using var context = BranchCameraSchemaSqlServerFixture.CreateContext();
         var branch = AddBranch(context);
 
-        context.Cameras.Add(new Camera(branch.BranchId, "Entrance Camera", RtspUrl));
-        context.Cameras.Add(new Camera(branch.BranchId, "Till Camera", "rtsp://camera.example.invalid:554/stream2"));
-        context.Cameras.Add(new Camera(branch.BranchId, "Stockroom Camera", "rtsp://camera.example.invalid:554/stream3"));
+        // FS-11 §2: distinct SourceOrder per camera — the filtered unique index only allows one
+        // enabled camera per (BranchId, SourceOrder).
+        context.Cameras.Add(new Camera(branch.BranchId, "Entrance Camera", RtspUrl, $"cam-{Guid.NewGuid():N}", sourceOrder: 0));
+        context.Cameras.Add(new Camera(branch.BranchId, "Till Camera", "rtsp://camera.example.invalid:554/stream2", $"cam-{Guid.NewGuid():N}", sourceOrder: 1));
+        context.Cameras.Add(new Camera(branch.BranchId, "Stockroom Camera", "rtsp://camera.example.invalid:554/stream3", $"cam-{Guid.NewGuid():N}", sourceOrder: 2));
 
         context.SaveChanges();
 
@@ -171,7 +173,7 @@ public class BranchCameraSchemaSqlServerTests : IClassFixture<BranchCameraSchema
         using var context = BranchCameraSchemaSqlServerFixture.CreateContext();
         var branch = AddBranch(context);
 
-        var camera = new Camera(branch.BranchId, "Entrance Camera", RtspUrl);
+        var camera = new Camera(branch.BranchId, "Entrance Camera", RtspUrl, $"cam-{Guid.NewGuid():N}");
         context.Cameras.Add(camera);
         context.SaveChanges();
 

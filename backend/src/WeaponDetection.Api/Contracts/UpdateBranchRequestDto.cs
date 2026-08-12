@@ -47,4 +47,11 @@ public sealed record UpdateCameraDto(
 
     [NotBlank]
     [MaxLength(Camera.RtspUrlMaxLength)]
-    string RtspUrl);
+    string RtspUrl,
+
+    // FS-12 §3. Optional on the wire, and the reason is the asymmetry between the two mutations this
+    // DTO expresses: adding a Camera (CameraId null) requires an explicit key, while editing one may
+    // legitimately omit it. Sending a key that differs from the stored value is rejected with
+    // CAMERA_KEY_IMMUTABLE rather than ignored.
+    [MaxLength(Camera.CameraKeyMaxLength)]
+    string? CameraKey = null);

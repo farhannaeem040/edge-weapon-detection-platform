@@ -37,6 +37,13 @@ public class DeviceControllerTests
             Guid deviceId,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+
+        public Task<DeviceNetworkUpdate?> SetNetworkConfigurationAsync(
+            Guid branchId,
+            string? jetsonHost,
+            int? rtspOutputPort,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     [Fact]

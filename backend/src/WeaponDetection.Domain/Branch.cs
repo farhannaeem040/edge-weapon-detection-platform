@@ -13,11 +13,19 @@ public class Branch
     public const int NameMaxLength = 200;
     public const int AddressMaxLength = 500;
     public const int ContactDetailsMaxLength = 500;
+    public const int TimeZoneIdMaxLength = 100;
 
     public Guid BranchId { get; private set; }
     public string Name { get; private set; }
     public string Address { get; private set; }
     public string ContactDetails { get; private set; }
+
+    // The IANA/Windows timezone identifier used to resolve the Branch-local daily Alert quota day
+    // (FS-09 §4). Null for every Branch until an Admin sets one — the quota day then falls back to
+    // UTC (documented, not a silent server-timezone assumption). No Admin UI sets this field in this
+    // increment (FS-09 §14 OI-13); UpdateTimeZone exists so a future feature can add one without
+    // another schema change.
+    public string? TimeZoneId { get; private set; }
 
     // Required by EF Core for materialization; never used by application code.
     private Branch()
@@ -49,6 +57,45 @@ public class Branch
         Address = Require(address, AddressMaxLength, "Branch address", nameof(address));
         ContactDetails = Require(
             contactDetails, ContactDetailsMaxLength, "Branch contact details", nameof(contactDetails));
+    }
+
+    // Sets or clears the Branch's timezone identifier (FS-09 §4). A non-null value must resolve via
+    // TimeZoneInfo.FindSystemTimeZoneById — an unresolvable identifier is rejected here rather than
+    // stored and only discovered invalid later when a quota day is resolved. Passing null clears it,
+    // reverting the Branch to the UTC quota-day fallback.
+    public void UpdateTimeZone(string? timeZoneId)
+    {
+        if (timeZoneId is null)
+        {
+            TimeZoneId = null;
+            return;
+        }
+
+        var trimmed = timeZoneId.Trim();
+
+        if (trimmed.Length == 0)
+        {
+            TimeZoneId = null;
+            return;
+        }
+
+        if (trimmed.Length > TimeZoneIdMaxLength)
+        {
+            throw new ArgumentException(
+                $"Branch timezone id must not exceed {TimeZoneIdMaxLength} characters.", nameof(timeZoneId));
+        }
+
+        try
+        {
+            TimeZoneInfo.FindSystemTimeZoneById(trimmed);
+        }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            throw new ArgumentException(
+                $"'{trimmed}' is not a recognized timezone identifier.", nameof(timeZoneId), ex);
+        }
+
+        TimeZoneId = trimmed;
     }
 
     // Trims first, then length-checks, so trailing whitespace can never push an otherwise valid

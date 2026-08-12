@@ -53,8 +53,18 @@ public class DeviceCredentialValidationController : ControllerBase
         // device, revoked/ReactivationRequired, missing stored secret, wrong secret — collapses to one
         // uniform 401/INVALID_DEVICE_CREDENTIALS. The typed outcome is never placed on the wire, in a
         // header, or in a log (FS-02 §10.5).
-        return result.IsValid
-            ? Ok(ApiResponse.Ok(null))
-            : Unauthorized(DeviceCredentialFailure.Response());
+        if (result.IsValid)
+        {
+            return Ok(ApiResponse.Ok(null));
+        }
+
+        // FS-07: a storage-unavailable outcome is a server-side failure, not a confirmed-invalid
+        // credential — it must never be collapsed into the same 401 a real revocation produces.
+        if (result.Outcome == DeviceCredentialValidationOutcome.CredentialStorageUnavailable)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, DeviceAuthenticationUnavailable.Response());
+        }
+
+        return Unauthorized(DeviceCredentialFailure.Response());
     }
 }

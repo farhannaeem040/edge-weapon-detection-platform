@@ -36,6 +36,7 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
     public static readonly string JwtSigningKey = new('k', 32);
 
     private readonly string _connectionString;
+    private readonly string _alertSnapshotStoragePath;
     private bool _cleanedUp;
 
     protected SqlServerApiHostFactory(string databaseNamePrefix)
@@ -43,6 +44,12 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
         _connectionString =
             $"Server=localhost\\SQLEXPRESS;Database={databaseNamePrefix}_{Guid.NewGuid():N};" +
             "Trusted_Connection=True;TrustServerCertificate=True;";
+
+        // FS-08 §8: AlertSnapshots:StoragePath is required (unlike DataProtection:KeyPath, there is
+        // no built-in fallback location), so every host built from this factory needs one — a fresh
+        // temp directory per instance, cleaned up in Dispose below.
+        _alertSnapshotStoragePath = Path.Combine(
+            Path.GetTempPath(), "wd-alert-snapshots-test-" + Guid.NewGuid().ToString("N"));
 
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", _connectionString);
         Environment.SetEnvironmentVariable("BootstrapAdmin__CredentialIdentifier", AdminIdentifier);
@@ -52,6 +59,7 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
         Environment.SetEnvironmentVariable("Jwt__SigningKey", JwtSigningKey);
         Environment.SetEnvironmentVariable(
             "Jwt__AccessTokenLifetimeMinutes", AccessTokenLifetimeMinutes.ToString());
+        Environment.SetEnvironmentVariable("AlertSnapshots__StoragePath", _alertSnapshotStoragePath);
 
         var options = new DbContextOptionsBuilder<WeaponDetectionDbContext>()
             .UseSqlServer(_connectionString)
@@ -94,6 +102,12 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
             Environment.SetEnvironmentVariable("Jwt__Audience", null);
             Environment.SetEnvironmentVariable("Jwt__SigningKey", null);
             Environment.SetEnvironmentVariable("Jwt__AccessTokenLifetimeMinutes", null);
+            Environment.SetEnvironmentVariable("AlertSnapshots__StoragePath", null);
+
+            if (Directory.Exists(_alertSnapshotStoragePath))
+            {
+                Directory.Delete(_alertSnapshotStoragePath, recursive: true);
+            }
         }
 
         base.Dispose(disposing);

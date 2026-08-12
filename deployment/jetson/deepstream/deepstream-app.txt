@@ -66,9 +66,13 @@ gie-unique-id=1
 nvbuf-memory-type=0
 # The ONLY line a profile switch changes (see deploy-engine.sh / README "Switching the active
 # profile"). Everything else in this file is profile-agnostic.
-config-file=/opt/weapon-detection/config/deepstream/profiles/yolov4-fp16/infer-config.txt
+# FS-13/IP-15: switched from profiles/yolov4-fp16 to profiles/yolo26-fp16 (custom YOLO26 gun/knife
+# detector). profiles/yolov4-fp16 remains installed and untouched as the rollback profile.
+config-file=/opt/weapon-detection/config/deepstream/profiles/yolo26-fp16/infer-config.txt
 
 [tracker]
+# FS-13 §5: re-enabled as part of the YOLO26 migration, reversing the live device's T-93 A/B
+# disablement (deployment/jetson/deepstream/README.md) so YOLO26 detections carry tracking IDs.
 enable=1
 tracker-width=640
 tracker-height=384

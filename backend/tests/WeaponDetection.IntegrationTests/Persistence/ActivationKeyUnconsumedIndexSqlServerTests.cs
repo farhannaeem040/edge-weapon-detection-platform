@@ -140,6 +140,27 @@ public class ActivationKeyUnconsumedIndexSqlServerTests
             // Bring the database up to the migration *before* the unique index, where two Unconsumed
             // keys for one device are still permitted, and seed that duplicate state.
             migrator.Migrate(PreviousMigration);
+
+            // FS-09: AddBranchAndDevice below inserts via the current (HEAD) EF model, which includes
+            // Branch.TimeZoneId — a column this deliberately-frozen, pre-quota schema snapshot does not
+            // have yet. TimeZoneId is unrelated to the ActivationKey unique-index guard under test
+            // here, so it is added directly rather than migrating further forward (which would also
+            // bring in the guard migration this test exists to exercise below).
+            context.Database.ExecuteSqlRaw("ALTER TABLE Branches ADD TimeZoneId nvarchar(100) NULL;");
+
+            // FS-12: same situation, same reason. The HEAD EF model now also carries
+            // Device.JetsonHost/RtspOutputPort, which this frozen pre-quota snapshot predates. Both
+            // are unrelated to the ActivationKey unique-index guard under test, so they are added
+            // directly rather than migrating further forward.
+            context.Database.ExecuteSqlRaw(
+                "ALTER TABLE Devices ADD JetsonHost nvarchar(255) NULL, RtspOutputPort int NULL;");
+
+            // FS-11 §11: same reasoning for Device.AnnotatedOutputBaseUrl — annotated-output
+            // discovery metadata added long after this frozen snapshot, and equally unrelated to the
+            // ActivationKey unique-index guard under test.
+            context.Database.ExecuteSqlRaw(
+                "ALTER TABLE Devices ADD AnnotatedOutputBaseUrl nvarchar(512) NULL;");
+
             var device = AddBranchAndDevice(context);
             var keyA = UnconsumedKey(device.DeviceRecordId);
             var keyB = UnconsumedKey(device.DeviceRecordId);

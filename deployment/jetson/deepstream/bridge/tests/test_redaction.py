@@ -2,7 +2,7 @@
 
 Uses a fabricated, credential-bearing sample RTSP URI (never a real device credential) to prove the
 Bridge's configuration-parsing error paths never echo it. ``config.py`` stores the URI verbatim in
-``BridgeConfig.source.uri`` (it must — that value is what ``pipeline.py`` passes to
+``BridgeConfig.sources[0].uri`` (it must — that value is what ``pipeline.py`` passes to
 ``uridecodebin``), but no error message, log call, or exception string may ever include it.
 """
 
@@ -83,7 +83,7 @@ def test_successful_parse_still_stores_the_uri_for_pipeline_construction(tmp_pat
 
     config = load_bridge_config(app_config)
 
-    assert config.source.uri == _CREDENTIAL_BEARING_URI
+    assert config.sources[0].uri == _CREDENTIAL_BEARING_URI
 
 
 def test_missing_config_file_error_never_leaks_arbitrary_path_content(tmp_path: Path) -> None:

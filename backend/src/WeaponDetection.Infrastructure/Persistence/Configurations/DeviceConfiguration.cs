@@ -56,6 +56,26 @@ public class DeviceConfiguration : IEntityTypeConfiguration<Device>
             .IsRequired(false)
             .HasMaxLength(Device.LastKnownAddressMaxLength);
 
+        // FS-11 §11 — the Device's advertised annotated-output RTSP base. Discovery metadata only,
+        // NULL until an Admin configures it, and never a credential (Device.SetAnnotatedOutputBaseUrl
+        // rejects any base carrying user info).
+        // FS-12 §5 (Option A — transitional): retained as a read-fallback only. New writes go to
+        // JetsonHost/RtspOutputPort below; this column stays populated so a rollback to the previous
+        // build keeps composing working URLs. A later feature drops it.
+        builder.Property(d => d.AnnotatedOutputBaseUrl)
+            .IsRequired(false)
+            .HasMaxLength(Device.AnnotatedOutputBaseUrlMaxLength);
+
+        // FS-12 §4 — the structured, authoritative network configuration. Nullable because a Device
+        // is created reserved, before its Jetson's reachable address is known. Never named for
+        // Tailscale: the POC's Tailscale IP is just one of the values this column legitimately holds.
+        builder.Property(d => d.JetsonHost)
+            .IsRequired(false)
+            .HasMaxLength(Device.JetsonHostMaxLength);
+
+        builder.Property(d => d.RtspOutputPort)
+            .IsRequired(false);
+
         // Cascade, mirroring Camera: a Device is reserved *for* a Branch and has no meaning
         // without it. Configured from the dependent side, as elsewhere in this model.
         builder.HasOne<Branch>()

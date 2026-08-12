@@ -75,12 +75,19 @@ public sealed record NewBranchRequest(
     string Name,
     string Address,
     string ContactDetails,
+    // FS-12 §4 — the reserved Device's network location, captured at branch creation because that
+    // Device is the RTSP host for every one of the Branch's annotated Camera outputs.
+    string JetsonHost,
+    int? RtspOutputPort,
     IReadOnlyList<NewCameraRequest> Cameras);
 
 // One camera configuration in a branch-creation request. Only a name and an RTSP URL are carried:
 // the same two fields ARCH-001/FS-02 attach to a Camera at creation time. Enablement is not a
 // creation-time input (Camera defaults to enabled).
-public sealed record NewCameraRequest(string Name, string RtspUrl);
+// FS-12 §3 adds the administrator-entered CameraKey. It is a required, positional member: a Camera
+// created without an explicit public key is not a state this feature permits, and one derived from
+// Name would reintroduce the mutable-label-as-identity problem FS-11 removed.
+public sealed record NewCameraRequest(string Name, string RtspUrl, string CameraKey);
 
 // The Application-layer branch-update request (FS-03 §5.1, §10.1). Like NewBranchRequest it is
 // independent of any API DTO or EF type. BranchId identifies the target; the Cameras collection is
@@ -96,7 +103,11 @@ public sealed record UpdateBranchRequest(
 // already exists and is being edited (update in place), or null when it is being added (a new
 // identity is generated on add). This is the already-public identifier the read DTOs return
 // (FS-03 §1.3) — no new identifier is introduced. Name/RtspUrl are validated exactly as at creation.
-public sealed record CameraMutation(Guid? CameraId, string Name, string RtspUrl);
+// FS-12 §3: `CameraKey` is required when adding a Camera (CameraId is null) and must be either
+// omitted or byte-identical to the stored key when updating one — any attempt to change it is
+// rejected with CAMERA_KEY_IMMUTABLE. Nullable rather than required so an edit-only client that
+// never sends the key keeps working unchanged.
+public sealed record CameraMutation(Guid? CameraId, string Name, string RtspUrl, string? CameraKey = null);
 
 // The outcome of an update attempt. Exactly one of the three states holds:
 //
@@ -169,11 +180,23 @@ public sealed record BranchView(
 // Application layer returns the domain-accurate value; deciding what is safe to serialize to a
 // client is an API-presentation concern, so the API layer redacts any embedded credentials before
 // putting a camera on the wire (T-16 security constraint, ARCH-001 §15.6).
+//
+// FS-11 §11: `OutputPath` is the relative annotated-output mount derived from the immutable
+// CameraId, and `OutputStreamUrl` is that path composed against the owning Device's configured
+// AnnotatedOutputBaseUrl — null when the Device has no base configured (never invented from the
+// request host). Neither carries any credential: the base URL is validated to exclude user info,
+// and the path is a pure GUID.
 public sealed record CameraView(
     Guid CameraId,
+    // FS-12 §2 — the administrator-defined public mount identifier, carried alongside (never
+    // instead of) the immutable CameraId.
+    string CameraKey,
     string Name,
     string RtspUrl,
-    bool Enabled);
+    bool Enabled,
+    int SourceOrder,
+    string OutputPath,
+    string? OutputStreamUrl);
 
 // The Device as summarised within a branch. DeviceId is null until first activation; ActivationStatus
 // is Unactivated at branch creation. LastKnownAddress is null until first operational contact.
@@ -181,4 +204,12 @@ public sealed record CameraView(
 public sealed record DeviceSummaryView(
     Guid? DeviceId,
     DeviceActivationStatus ActivationStatus,
-    string? LastKnownAddress);
+    string? LastKnownAddress,
+    // FS-12 §4: the structured network configuration. Client-facing discovery metadata only — never
+    // a credential, and deliberately never part of the Agent's pipeline configurationVersion, so
+    // changing either value cannot restart the Bridge.
+    string? JetsonHost,
+    int? RtspOutputPort,
+    // FS-12 §2.1: computed from the two fields above (legacy column as fallback), not independent
+    // persisted state.
+    string? AnnotatedOutputBaseUrl);

@@ -28,8 +28,24 @@ function placeholderBranch(overrides: Partial<Branch> = {}): Branch {
     address: '1 Example Street, Placeholder City',
     contactDetails: 'placeholder@example.invalid',
     cameras: [
-      { cameraId: FIRST_CAMERA_ID, name: 'Front Entrance', rtspUrl: FIRST_RTSP_URL, enabled: true },
-      { cameraId: SECOND_CAMERA_ID, name: 'Loading Bay', rtspUrl: SECOND_RTSP_URL, enabled: true },
+      {
+        cameraId: FIRST_CAMERA_ID,
+        cameraKey: 'front-entrance',
+        name: 'Front Entrance',
+        rtspUrl: FIRST_RTSP_URL,
+        enabled: true,
+        sourceOrder: 0,
+        outputPath: `cameras/${FIRST_CAMERA_ID}`,
+      },
+      {
+        cameraId: SECOND_CAMERA_ID,
+        cameraKey: 'cam-key-25',
+        name: 'Loading Bay',
+        rtspUrl: SECOND_RTSP_URL,
+        enabled: true,
+        sourceOrder: 1,
+        outputPath: `cameras/${SECOND_CAMERA_ID}`,
+      },
     ],
     device: { activationStatus: 'Unactivated' },
     ...overrides,
@@ -246,12 +262,12 @@ describe('BranchEditComponent', () => {
       load();
 
       // Edit the first camera in place, remove the second, add a third.
-      cameras().at(0).patchValue({ name: 'Front Door', rtspUrl: FIRST_RTSP_URL });
+      cameras().at(0).patchValue({ name: 'Front Door', rtspUrl: FIRST_RTSP_URL, cameraKey: 'cam-key-27' });
       element().querySelectorAll<HTMLButtonElement>('.camera__remove')[1].click();
       fixture.detectChanges();
       query('.branch-edit__add-camera')?.click();
       fixture.detectChanges();
-      cameras().at(1).patchValue({ name: 'Roof', rtspUrl: NEW_RTSP_URL });
+      cameras().at(1).patchValue({ name: 'Roof', rtspUrl: NEW_RTSP_URL, cameraKey: 'roof-camera' });
       form().patchValue({ name: '  Alpha Branch Renamed  ' });
       fixture.detectChanges();
 
@@ -263,7 +279,7 @@ describe('BranchEditComponent', () => {
       expect(body.name).toBe('Alpha Branch Renamed');
       expect(body.cameras).toEqual([
         { cameraId: FIRST_CAMERA_ID, name: 'Front Door', rtspUrl: FIRST_RTSP_URL },
-        { name: 'Roof', rtspUrl: NEW_RTSP_URL },
+        { name: 'Roof', rtspUrl: NEW_RTSP_URL, cameraKey: 'roof-camera' },
       ]);
       // The removed camera is simply absent, and the new one carries no id at all.
       expect(JSON.stringify(body)).not.toContain(SECOND_CAMERA_ID);

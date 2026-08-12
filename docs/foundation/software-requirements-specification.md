@@ -117,6 +117,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | FR-DET-010 | The Operator shall be able to trigger a remote siren command on the alert's associated Jetson device. |
 | FR-DET-011 | The Operator shall be able to download an alert's snapshot image. |
 | FR-DET-012 | The Operator shall be able to stop an active remote siren command on the alert's associated Jetson device. |
+| FR-DET-013 | The system shall enforce a configurable, Backend-authoritative maximum number of full Alerts created per Branch per branch-local calendar day (default 15); detections beyond the limit shall not create an Alert and shall be reported to the originating Jetson Agent as a distinct, non-error, terminal outcome. *(Added 2026-07-29 — Branch daily Alert quota; reason: prevent DetectionEvent synchronisation from flooding the central Backend under multi-device/multi-camera load. See FS-09.)* |
 
 **Acceptance Criteria**: A detection at or above the configured threshold produces exactly one alert visible on the dashboard with all required fields populated; a detection below threshold produces no alert; an operator can transition an alert from New to Acknowledged or False Positive and the change persists; a siren command issued by the operator is delivered to the correct device; a siren-stop command issued by the operator is delivered to the correct device and halts an active siren activation; snapshot download returns the correct image for the alert.
 
@@ -210,6 +211,7 @@ Each requirement is uniquely identified as `FR-<CATEGORY>-<NNN>`.
 | BR-006 | Full video recordings remain local to the Jetson device at all times; only snapshot images and metadata are ever transmitted to the server. |
 | BR-007 | The final decision on whether a detection constitutes a genuine security threat rests solely with the human operator; the AI system's role is limited to detection and alert generation. |
 | BR-008 | The Jetson Agent shall only accept and execute commands originating from its registered central server; requests from any other source shall be rejected. |
+| BR-009 | The Branch daily Alert quota (FR-DET-013) applies across every Device and every Camera belonging to a Branch; it is never a per-Device or per-Camera limit. *(Added 2026-07-29 — see FS-09.)* |
 
 ---
 

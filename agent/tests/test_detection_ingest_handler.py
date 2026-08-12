@@ -25,7 +25,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -42,6 +42,7 @@ from weapon_detection_agent.detection.ingest_handler import (
     _FrameRejected,
 )
 from weapon_detection_agent.detection.protocol import (
+    FRAME_KIND_DETECTION,
     FRAME_LENGTH_BYTEORDER,
     FRAME_LENGTH_PREFIX_BYTES,
     MAX_FRAME_BYTES,
@@ -161,6 +162,7 @@ def _handler(
     repository: DetectionEventRepository,
     device_id: str = DEVICE_ID,
     camera_id: str = CAMERA_ID,
+    camera_id_resolver: Callable[[int], UUID | None] | None = None,
     class_names: Mapping[int, str] = CLASS_NAMES,
     min_confidence: float = 0.5,
     queue_capacity: int = 10,
@@ -173,6 +175,7 @@ def _handler(
         queue_capacity=queue_capacity,
         device_id_provider=lambda: device_id,
         camera_id=camera_id,
+        camera_id_resolver=camera_id_resolver,
         class_names=class_names,
         min_confidence=min_confidence,
         cooldown_tracker=cooldown_tracker
@@ -375,12 +378,12 @@ def test_oversized_frame_is_rejected_before_reading_payload(tmp_path: Path) -> N
             socket_path=tmp_path / "detection.sock",
             repository=DetectionEventRepository(_ready_db(tmp_path)),
         )
-        oversized_prefix = (MAX_FRAME_BYTES + 1).to_bytes(
-            FRAME_LENGTH_PREFIX_BYTES, FRAME_LENGTH_BYTEORDER
-        )
-        # No payload bytes supplied at all — proves rejection happens from the prefix alone, never
+        oversized_header = FRAME_KIND_DETECTION.to_bytes(1, FRAME_LENGTH_BYTEORDER) + (
+            MAX_FRAME_BYTES + 1
+        ).to_bytes(FRAME_LENGTH_PREFIX_BYTES, FRAME_LENGTH_BYTEORDER)
+        # No payload bytes supplied at all — proves rejection happens from the header alone, never
         # attempting to read (MAX_FRAME_BYTES + 1) bytes that were never sent.
-        reader = _FakeStreamReader([oversized_prefix])
+        reader = _FakeStreamReader([oversized_header])
 
         with pytest.raises(_FrameRejected) as excinfo:
             await handler._read_message(reader)  # type: ignore[arg-type]
@@ -1242,5 +1245,90 @@ def test_connect_then_immediate_stop_never_leaks_across_many_iterations(tmp_path
         socket_path = tmp_path / "stress.sock"
         for index in range(_STRESS_ITERATIONS):
             await asyncio.wait_for(_one_iteration(repo, socket_path, index), timeout=10.0)
+
+    asyncio.run(_scenario())
+
+
+# --- camera_id_resolver (FS-11 §9, IP-13 T-238) --------------------------------------------------
+
+
+def test_camera_id_resolver_used_when_provided(tmp_path: Path) -> None:
+    resolved_camera_id = uuid4()
+
+    async def _scenario() -> None:
+        db = _ready_db(tmp_path)
+        repo = DetectionEventRepository(db)
+        handler = _handler(
+            socket_path=tmp_path / "detection.sock",
+            repository=repo,
+            camera_id_resolver=lambda source_id: resolved_camera_id if source_id == 0 else None,
+        )
+
+        await handler._process(_valid_payload(source_id=0))
+
+        rows = repo.list_recent(10)
+        assert len(rows) == 1
+        assert rows[0].camera_id == str(resolved_camera_id)
+
+    asyncio.run(_scenario())
+
+
+def test_camera_id_resolver_unresolved_source_id_is_rejected_not_persisted(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        db = _ready_db(tmp_path)
+        repo = DetectionEventRepository(db)
+        handler = _handler(
+            socket_path=tmp_path / "detection.sock",
+            repository=repo,
+            camera_id_resolver=lambda source_id: None,  # every source_id is unknown
+        )
+
+        await handler._process(_valid_payload(source_id=0))
+
+        assert repo.list_recent(10) == []
+
+    asyncio.run(_scenario())
+
+
+def test_camera_id_resolver_not_provided_uses_static_camera_id(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        db = _ready_db(tmp_path)
+        repo = DetectionEventRepository(db)
+        handler = _handler(
+            socket_path=tmp_path / "detection.sock", repository=repo, camera_id=CAMERA_ID
+        )
+
+        await handler._process(_valid_payload(source_id=0))
+
+        rows = repo.list_recent(10)
+        assert len(rows) == 1
+        assert rows[0].camera_id == CAMERA_ID
+
+    asyncio.run(_scenario())
+
+
+def test_camera_id_resolver_malformed_source_id_is_rejected(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        db = _ready_db(tmp_path)
+        repo = DetectionEventRepository(db)
+        called = False
+
+        def _resolver(source_id: int) -> UUID | None:
+            nonlocal called
+            called = True
+            return uuid4()
+
+        handler = _handler(
+            socket_path=tmp_path / "detection.sock",
+            repository=repo,
+            camera_id_resolver=_resolver,
+        )
+
+        payload = _valid_payload()
+        payload["source_id"] = "not-an-int"
+        await handler._process(payload)
+
+        assert called is False
+        assert repo.list_recent(10) == []
 
     asyncio.run(_scenario())

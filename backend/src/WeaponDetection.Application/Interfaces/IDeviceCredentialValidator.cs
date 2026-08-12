@@ -32,26 +32,55 @@ public enum DeviceCredentialValidationOutcome
     DeviceNotActivated,     // Unactivated (defensive: an unactivated device has no external DeviceId)
     MissingStoredSecret,    // inconsistent state: Activated but no stored protected secret
     SecretMismatch,
+
+    // FS-07: the stored secret exists but cannot currently be decrypted by the server's Data
+    // Protection key ring (e.g. the key ring was lost across a container recreation). Distinct
+    // from every outcome above: this means the server cannot currently answer the question, not
+    // that the presented credential is wrong. The API layer maps this to 503, never the uniform
+    // 401 a confirmed-revocation signal — conflating the two would let a transient server-side
+    // failure be mistaken for (or mask) an actual credential revocation.
+    CredentialStorageUnavailable,
 }
 
 // The immutable result. It exposes the boolean verdict and the typed outcome (for tests); it holds no
 // credential material. ToString renders only the outcome name — there is nothing sensitive to redact.
+//
+// BranchId/DeviceRecordId (FS-06 §6.2, additive) are populated only on a Valid result, from the same
+// Device row the validator already loaded for the credential check — never a second, independent
+// lookup, which could theoretically resolve a different device if a row changed between two queries.
+// They are null on every Invalid result and on any Valid result minted before this feature existed
+// (there are none; the only factory is this type's own Valid()). Existing callers that read only
+// IsValid (DeviceCredentialValidationController) are unaffected by these additive fields.
 public sealed class DeviceCredentialValidationResult
 {
-    private DeviceCredentialValidationResult(DeviceCredentialValidationOutcome outcome) =>
+    private DeviceCredentialValidationResult(
+        DeviceCredentialValidationOutcome outcome, Guid? branchId, Guid? deviceRecordId)
+    {
         Outcome = outcome;
+        BranchId = branchId;
+        DeviceRecordId = deviceRecordId;
+    }
 
     public DeviceCredentialValidationOutcome Outcome { get; }
 
     public bool IsValid => Outcome == DeviceCredentialValidationOutcome.Valid;
 
-    public static DeviceCredentialValidationResult Valid() =>
-        new(DeviceCredentialValidationOutcome.Valid);
+    // The authenticated device's Branch — non-null only when IsValid. Callers other than the
+    // credential-validation endpoint (e.g. AlertSyncService, FS-06 §6.3) use this to scope
+    // Branch-owned lookups without a second Device query.
+    public Guid? BranchId { get; }
+
+    // The authenticated device's internal primary key. Never serialized to any wire response
+    // (FS-02 §1.3) — carried here only for callers that need to address the same Device row.
+    public Guid? DeviceRecordId { get; }
+
+    public static DeviceCredentialValidationResult Valid(Guid branchId, Guid deviceRecordId) =>
+        new(DeviceCredentialValidationOutcome.Valid, branchId, deviceRecordId);
 
     public static DeviceCredentialValidationResult Invalid(DeviceCredentialValidationOutcome outcome) =>
         outcome == DeviceCredentialValidationOutcome.Valid
             ? throw new ArgumentException("Valid is not a failure outcome.", nameof(outcome))
-            : new DeviceCredentialValidationResult(outcome);
+            : new DeviceCredentialValidationResult(outcome, null, null);
 
     public override string ToString() => $"{nameof(DeviceCredentialValidationResult)} {{ Outcome = {Outcome} }}";
 }

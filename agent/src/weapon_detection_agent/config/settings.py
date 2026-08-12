@@ -167,7 +167,7 @@ class AgentSettings(BaseSettings):
     # Which model profile is nominally active (IP-06 T-71 amendment). Observability/future-phase use
     # only (e.g. a later metadata-extraction phase needing a profile's labels file) — deliberately
     # never read by DeepStreamProcessManager, which only ever sees deepstream_config_path.
-    deepstream_model_profile: str = "yolov4-fp16"
+    deepstream_model_profile: str = "yolo26-fp16"
 
     # --- Detection event bridge (IP-07 T-81, FS-05 §9). DetectionIngestHandler reads all six of
     # these; none are read by DeepStreamProcessManager or the pyds pipeline child (which receives
@@ -199,6 +199,113 @@ class AgentSettings(BaseSettings):
     # The Unix domain socket DetectionIngestHandler listens on and the pyds pipeline child writes
     # to (ADR-005). Lives under the runtime/ directory this feature is the first writer for (T-82).
     detection_socket_path: Path = Path("/opt/weapon-detection/runtime/detection.sock")
+
+    # --- Detection event Backend sync (IP-08, FS-06 §10). DetectionEventSyncWorker reads all five
+    # of these; the per-request timeout reuses http_timeout_seconds rather than adding a duplicate.
+
+    # The rollout kill switch for this feature, mirroring detection_events_enabled exactly. Defaults
+    # to False: a fresh or freshly-updated deployment constructs no DetectionEventSyncWorker and
+    # sends no Backend traffic until an operator deliberately opts in (FS-06 §10/§11 — production
+    # enablement is explicitly out of scope for this feature's own completion).
+    detection_sync_enabled: bool = False
+
+    # How long the worker sleeps when the outbox is empty (or nothing sendable is pending) before
+    # checking again. Must be positive.
+    detection_sync_interval_seconds: float = Field(default=1.0, gt=0)
+
+    # The bounded batch size drained per POST /api/v1/sync/events request. Must be within the
+    # closed [1, 100] range the Backend's own request-size bound (IP-08 T-97) is built around.
+    detection_sync_batch_size: int = Field(default=25, ge=1, le=100)
+
+    # The first backoff delay after a whole-batch failure (network/timeout/5xx/401/malformed
+    # response, FS-06 §9). Must be positive; doubles on each consecutive failure, capped below.
+    detection_sync_initial_backoff_seconds: float = Field(default=1.0, gt=0)
+
+    # The backoff cap. Must be at least detection_sync_initial_backoff_seconds (enforced below) —
+    # otherwise the "doubling" backoff would immediately be clamped below its own starting point.
+    detection_sync_max_backoff_seconds: float = Field(default=60.0, gt=0)
+
+    # --- Server-driven Device Camera configuration (FS-11 §11, IP-13 T-234).
+    # DeviceConfigurationCoordinator reads all four; the Backend poll reuses http_timeout_seconds
+    # rather than adding a duplicate.
+
+    # The rollout kill switch, mirroring detection_sync_enabled exactly. Defaults False: a fresh or
+    # freshly-updated deployment starts no DeviceConfigurationCoordinator and keeps the pre-FS-11
+    # static deepstream-app.txt/WDA_DETECTION_CAMERA_ID pipeline unchanged until an operator
+    # deliberately opts in (FS-11 §11 — production enablement is a separate, explicitly-approved
+    # step).
+    device_config_enabled: bool = False
+
+    # How often the coordinator polls the Backend for a configuration change once Operational. Must
+    # be positive.
+    device_config_refresh_seconds: float = Field(default=30.0, gt=0)
+
+    # The maximum enabled-Camera count this Agent will accept in one configuration (FS-11 §7) — a
+    # bound against a malformed/hostile response, not a hardware claim about how many streams this
+    # Jetson can actually decode.
+    device_config_max_cameras: int = Field(default=8, ge=1)
+
+    # How old a cached configuration may be before the coordinator refuses to apply it at startup
+    # without a fresh Backend fetch first. 0 means no forced expiry (FS-11 §5/§15: an edge Device
+    # may be offline indefinitely and must keep running its last-known-good pipeline).
+    device_config_cache_max_age_seconds: int = Field(default=0, ge=0)
+
+    # --- Snapshot evidence capture/upload (IP-10 T-146, FS-08 §13). Both kill switches default
+    # False: Stage 1 of the rollout ships with the protocol/plumbing present but inert (FS-08 §13).
+
+    # Gates whether DetectionIngestHandler ever writes a captured JPEG to the spool or creates a
+    # SnapshotOutbox row. Independent of detection_events_enabled's own gate — see the cross-field
+    # rule below requiring detection_events_enabled=True whenever this is True.
+    snapshot_capture_enabled: bool = False
+
+    # Gates whether SnapshotUploadWorker is constructed at all (FS-08 §11's two-layer kill switch,
+    # mirroring detection_sync_enabled). Independent of snapshot_capture_enabled: an operator could
+    # in principle capture without uploading, though production rollout flips both together (§13).
+    snapshot_upload_enabled: bool = False
+
+    # The spool root a captured JPEG is written under (FS-08 §5) — temp-file + fsync + atomic-rename
+    # to `<EventId>.jpg`. Never created by settings loading (no filesystem I/O here).
+    snapshot_spool_path: Path = Path("/opt/weapon-detection/snapshots")
+
+    # The nvjpegenc-equivalent JPEG quality recorded here for documentation/future use; the Agent
+    # itself never encodes an image (the Bridge does) — this value is not read by any Agent code
+    # path today, kept only so the full FS-08/task-brief settings list is complete and validated.
+    snapshot_jpeg_quality: int = Field(default=85, ge=1, le=100)
+
+    # The maximum accepted size of one captured JPEG file (FS-08 §5 validation bound), and the size
+    # used to derive detection/protocol.MAX_SNAPSHOT_FRAME_BYTES's headroom. Must be positive.
+    snapshot_max_file_bytes: int = Field(default=5_242_880, gt=0)
+
+    # The disk-quota enforcement bound (T-149): capture (not detection, not metadata sync) is
+    # skipped once the spool's total size would exceed this. Must be at least
+    # snapshot_max_file_bytes so a single legitimate file can always fit under an otherwise-empty
+    # quota.
+    snapshot_max_spool_bytes: int = Field(default=1_073_741_824, gt=0)
+
+    # The bounded batch size SnapshotUploadWorker drains per iteration (mirrors
+    # detection_sync_batch_size). Must be positive.
+    snapshot_upload_batch_size: int = Field(default=5, gt=0)
+
+    # How long the upload worker sleeps when nothing is upload-ready before checking again. Must be
+    # positive.
+    snapshot_upload_interval_seconds: float = Field(default=2.0, gt=0)
+
+    # The first backoff delay after an upload failure (mirrors detection_sync_initial_backoff_
+    # seconds). Must be positive.
+    snapshot_upload_initial_backoff_seconds: float = Field(default=1.0, gt=0)
+
+    # The upload backoff cap. Must be at least snapshot_upload_initial_backoff_seconds (enforced
+    # below).
+    snapshot_upload_max_backoff_seconds: float = Field(default=60.0, gt=0)
+
+    # The Bridge-side snapshot candidate-frame cache TTL, in milliseconds — recorded here only for
+    # the full settings list's completeness (FS-08 §9 describes the Bridge's own cache, a separate
+    # process/venv this Agent settings model does not configure). Not read by any Agent code path.
+    snapshot_frame_ttl_milliseconds: int = Field(default=750, gt=0)
+
+    # The Bridge-side snapshot candidate-frame cache's maximum retained entries — same "recorded for
+    # completeness, Bridge-only" note as snapshot_frame_ttl_milliseconds above.
+    snapshot_max_retained_frames: int = Field(default=4, gt=0)
 
     @field_validator("backend_base_url")
     @classmethod
@@ -312,6 +419,61 @@ class AgentSettings(BaseSettings):
 
         if problems:
             raise ValueError("; ".join(problems))
+        return self
+
+    @model_validator(mode="after")
+    def _validate_detection_sync_backoff_bounds(self) -> AgentSettings:
+        """The backoff cap must never be tighter than the first backoff delay (FS-06 §10).
+
+        A ``max`` below ``initial`` would make the very first retry immediately clamp below its own
+        starting point, defeating the exponential-backoff shape entirely. Checked unconditionally
+        (not gated on ``detection_sync_enabled``) so a later flip of that kill switch can never be
+        undermined by an already-invalid stored/inherited value — the same posture
+        ``_validate_detection_camera_id`` already takes.
+        """
+        if self.detection_sync_max_backoff_seconds < self.detection_sync_initial_backoff_seconds:
+            raise ValueError(
+                "WDA_DETECTION_SYNC_MAX_BACKOFF_SECONDS must be greater than or equal to "
+                "WDA_DETECTION_SYNC_INITIAL_BACKOFF_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_snapshot_upload_backoff_bounds(self) -> AgentSettings:
+        """The snapshot upload backoff cap must never be tighter than the first delay (FS-08 §11),
+        the same rule ``_validate_detection_sync_backoff_bounds`` enforces for metadata sync."""
+        if self.snapshot_upload_max_backoff_seconds < self.snapshot_upload_initial_backoff_seconds:
+            raise ValueError(
+                "WDA_SNAPSHOT_UPLOAD_MAX_BACKOFF_SECONDS must be greater than or equal to "
+                "WDA_SNAPSHOT_UPLOAD_INITIAL_BACKOFF_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_snapshot_max_spool_bytes_fits_one_file(self) -> AgentSettings:
+        """The spool quota must be able to hold at least one file at the maximum permitted size —
+        otherwise capture would be unconditionally skipped by the T-149 quota check even on an empty
+        spool, which is always a misconfiguration, not a real quota."""
+        if self.snapshot_max_spool_bytes < self.snapshot_max_file_bytes:
+            raise ValueError(
+                "WDA_SNAPSHOT_MAX_SPOOL_BYTES must be greater than or equal to "
+                "WDA_SNAPSHOT_MAX_FILE_BYTES"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_snapshot_capture_requires_detection_events(self) -> AgentSettings:
+        """Snapshot capture needs the detection-ingest pipeline it hangs off of (FS-08 §12).
+
+        Mirrors ``_validate_detection_events_require_a_compatible_pipeline``'s posture: skipped
+        entirely when ``snapshot_capture_enabled`` is ``False`` (the default), so a disabled feature
+        is never inconsistent with anything.
+        """
+        if self.snapshot_capture_enabled and not self.detection_events_enabled:
+            raise ValueError(
+                "WDA_SNAPSHOT_CAPTURE_ENABLED=true requires WDA_DETECTION_EVENTS_ENABLED=true "
+                "(snapshot capture rides on the detection ingest connection)"
+            )
         return self
 
 

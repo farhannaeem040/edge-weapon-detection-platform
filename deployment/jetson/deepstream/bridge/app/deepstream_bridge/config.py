@@ -28,6 +28,7 @@ to add it.
 from __future__ import annotations
 
 import configparser
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,6 +93,10 @@ _MAX_CONFIG_INTERVAL = 3600
 # work unmodified.
 _SUPPORTED_SOURCE_TYPES = frozenset({"2", "3", "4"})
 
+# FS-11 §8, IP-13 T-242: matches a [sourceN] section name and captures N — the same naming scheme
+# deepstream-app.txt has always used for its single [source0] section, extended here to any count.
+_SOURCE_SECTION_PATTERN = re.compile(r"^source(\d+)$")
+
 # nvurisrcbin's own `select-rtp-protocol` enum (confirmed via gst-inspect-1.0 on the real Jetson,
 # IP-07 T-91 incident follow-up) has exactly two values: 0 = "rtp-multi" (UDP + UDP Multicast + TCP,
 # the element's own default) and 4 = "rtp-tcp" (TCP only). deepstream-app.txt's own
@@ -100,6 +105,22 @@ _SUPPORTED_SOURCE_TYPES = frozenset({"2", "3", "4"})
 # value (0/1/2/7/unset) maps to nvurisrcbin's default (0), a safe superset rather than a guess at a
 # value nvurisrcbin doesn't expose.
 _RTP_PROTOCOL_TCP_ONLY = 4
+
+# `[bridge-snapshot]` defaults (IP-10 T-137, FS-08 §3/§9). `enabled` defaults False — the two-layer
+# kill switch (this section plus the Agent's own WDA_SNAPSHOT_CAPTURE_ENABLED, FS-08 §13) means a
+# default deployment builds no tee/valve/snapshot branch at all (task item: "zero behavioral change
+# to the existing RTSP/fakesink path"). `frame_ttl_ms`/`max_retained_frames` bound the candidate
+# frame-number/message-id tracking and the JPEG-bytes cache alike (snapshot.py) — generous enough to
+# outlive one Agent DB-write-plus-acknowledgement round trip, small enough that a stuck Agent cannot
+# grow either structure unbounded. `jpeg_quality` matches FS-08 §5's own default ("quality ~85").
+_DEFAULT_SNAPSHOT_ENABLED = False
+_DEFAULT_SNAPSHOT_FRAME_TTL_MS = 3000
+_MAX_SNAPSHOT_FRAME_TTL_MS = 60000
+_DEFAULT_SNAPSHOT_MAX_RETAINED_FRAMES = 32
+_MAX_SNAPSHOT_MAX_RETAINED_FRAMES = 1000
+_DEFAULT_SNAPSHOT_JPEG_QUALITY = 85
+_MIN_SNAPSHOT_JPEG_QUALITY = 1
+_MAX_SNAPSHOT_JPEG_QUALITY = 100
 
 
 @dataclass(frozen=True)
@@ -124,7 +145,22 @@ class SourceConfig:
     element, matching what ``deepstream-app`` itself uses internally.
     """
 
+    # FS-11 §8, IP-13 T-242: the ``N`` in this source's ``[sourceN]`` section — the DeepStream
+    # `source_id`/`nvstreammux` `sink_%u` pad index this source occupies. Never derived from list
+    # position; always the section's own literal index, so a sparse/reordered config (as the Agent's
+    # generator may produce when SourceOrder values are non-contiguous) still maps correctly.
+    source_index: int
     uri: str
+
+    # FS-11 §11: this source's immutable Backend CameraId and its annotated-output RTSP mount, both
+    # written into the section by the Agent's generator. `output_path` is what this source's own
+    # output branch is published on; empty means "no per-camera output configured for this source"
+    # (the pre-FS-11 §11 single-shared-output behaviour), never "publish it somewhere else".
+    # `camera_id` is carried for logging/diagnostics only — detection identity still travels via
+    # `source_id` in the batched metadata, exactly as before.
+    camera_id: str
+    output_path: str
+
     gpu_id: int
     latency_ms: int
     select_rtp_protocol: int
@@ -241,15 +277,40 @@ class RtspOutConfig:
 
 
 @dataclass(frozen=True)
-class BridgeConfig:
-    """The fully resolved, Bridge-specific view of one DeepStream application config."""
+class SnapshotConfig:
+    """``[bridge-snapshot]`` (IP-10 T-137, FS-08 §3/§9/§13). ``enabled=False`` (the default, and
+    the only reachable value unless the section explicitly sets ``enable=1``) means ``pipeline.py``
+    builds no tee/valve/snapshot branch at all — the existing RTSP-out/fakesink branch is attached
+    directly to ``nvdsosd``, byte-for-byte as before this feature existed.
 
-    source: SourceConfig
+    ``frame_ttl_ms``/``max_retained_frames`` size both :class:`~deepstream_bridge.snapshot
+    .CandidateFrameTracker` and :class:`~deepstream_bridge.snapshot.SnapshotCandidateCache`.
+    ``jpeg_quality`` is passed to ``nvjpegenc``'s own ``quality`` property.
+    """
+
+    enabled: bool
+    frame_ttl_ms: int
+    max_retained_frames: int
+    jpeg_quality: int
+
+
+@dataclass(frozen=True)
+class BridgeConfig:
+    """The fully resolved, Bridge-specific view of one DeepStream application config.
+
+    ``sources`` (FS-11 §8, IP-13 T-242) holds one :class:`SourceConfig` per parsed ``[sourceN]``
+    section, ordered by ``source_index`` ascending — always at least one (:func:`_parse_sources`
+    requires it). The single-camera case (the only case that existed before this feature) is simply
+    a one-element tuple; no separate code path exists for it.
+    """
+
+    sources: "tuple[SourceConfig, ...]"
     streammux: StreammuxConfig
     infer: InferConfig
     tracker: TrackerConfig | None
     osd: OsdConfig
     rtsp_out: RtspOutConfig
+    snapshot: SnapshotConfig
 
 
 def load_bridge_config(config_path: Path) -> BridgeConfig:
@@ -267,20 +328,22 @@ def load_bridge_config(config_path: Path) -> BridgeConfig:
     if not read_files:
         raise BridgeConfigurationError(f"config file not found or unreadable: {config_path}")
 
-    source = _parse_source(parser, config_path)
+    sources = _parse_sources(parser)
     streammux = _parse_streammux(parser)
     infer = _parse_infer(parser, config_path)
     tracker = _parse_tracker(parser)
     osd = _parse_osd(parser)
     rtsp_out = _parse_rtsp_out(parser)
+    snapshot = _parse_snapshot(parser)
 
     return BridgeConfig(
-        source=source,
+        sources=sources,
         streammux=streammux,
         infer=infer,
         tracker=tracker,
         osd=osd,
         rtsp_out=rtsp_out,
+        snapshot=snapshot,
     )
 
 
@@ -296,22 +359,64 @@ def _require_key(section: configparser.SectionProxy, key: str, section_name: str
     return section[key]
 
 
-def _parse_source(parser: configparser.ConfigParser, config_path: Path) -> SourceConfig:
-    section = _require_section(parser, "source0")
+def _source_index_of(section_name: str) -> int:
+    """The ``N`` in a ``[sourceN]`` section name. Only ever called on a name already confirmed to
+    match ``_SOURCE_SECTION_PATTERN``, so the match can never be ``None`` here."""
+    match = _SOURCE_SECTION_PATTERN.match(section_name)
+    assert match is not None  # noqa: S101 - caller-guaranteed precondition, not user input
+    return int(match.group(1))
+
+
+def _parse_sources(parser: configparser.ConfigParser) -> "tuple[SourceConfig, ...]":
+    """Parse every ``[sourceN]`` section present (FS-11 §8, IP-13 T-242) into a
+    :class:`SourceConfig` tuple, ordered by ``N`` ascending. At least one must exist — a Bridge
+    config with no source section at all is a configuration error, not an empty pipeline.
+    """
+    source_sections = sorted(
+        (name for name in parser.sections() if _SOURCE_SECTION_PATTERN.match(name)),
+        key=_source_index_of,
+    )
+    if not source_sections:
+        raise BridgeConfigurationError(
+            "no [sourceN] section found; at least one source (e.g. [source0]) is required"
+        )
+
+    sources = tuple(_parse_one_source(parser, name) for name in source_sections)
+
+    # FS-11 §11: two sources sharing one mount would publish one camera's annotated frames on the
+    # other camera's URL. Rejected as a whole config — never "last one wins".
+    configured_outputs = [s.output_path for s in sources if s.output_path]
+    if len(set(configured_outputs)) != len(configured_outputs):
+        raise BridgeConfigurationError(
+            "two [sourceN] sections declare the same output-path; each source's annotated output "
+            "mount must be unique"
+        )
+
+    return sources
+
+
+def _parse_one_source(parser: configparser.ConfigParser, section_name: str) -> SourceConfig:
+    section = parser[section_name]
+    source_index = _source_index_of(section_name)
     source_type = section.get("type", "3")
     if source_type not in _SUPPORTED_SOURCE_TYPES:
         raise BridgeConfigurationError(
-            f"[source0] type={source_type} is not supported; the Bridge reproduces URI-based "
-            f"sources only (type in {sorted(_SUPPORTED_SOURCE_TYPES)}), driven entirely by the "
-            "uri= key via nvurisrcbin"
+            f"[{section_name}] type={source_type} is not supported; the Bridge reproduces "
+            f"URI-based sources only (type in {sorted(_SUPPORTED_SOURCE_TYPES)}), driven "
+            "entirely by the uri= key via nvurisrcbin"
         )
-    uri = _require_key(section, "uri", "source0")
+    uri = _require_key(section, "uri", section_name)
 
     raw_protocol = section.getint("select-rtp-protocol", fallback=0)
     select_rtp_protocol = _RTP_PROTOCOL_TCP_ONLY if raw_protocol == _RTP_PROTOCOL_TCP_ONLY else 0
 
     return SourceConfig(
+        source_index=source_index,
         uri=uri,
+        # Absent in a pre-FS-11 §11 config (and in the committed static template) — an empty
+        # output-path simply means this source gets no dedicated output branch.
+        camera_id=section.get("camera-id", fallback=""),
+        output_path=_parse_output_path(section, section_name),
         gpu_id=section.getint("gpu-id", fallback=0),
         latency_ms=section.getint("latency", fallback=100),
         select_rtp_protocol=select_rtp_protocol,
@@ -327,6 +432,45 @@ def _parse_source(parser: configparser.ConfigParser, config_path: Path) -> Sourc
         cudadec_memtype=section.getint("cudadec-memtype", fallback=2),
         file_loop=_parse_file_loop(parser),
     )
+
+
+def _parse_output_path(
+    section: configparser.SectionProxy, section_name: str
+) -> str:
+    """FS-11 §11: validate this source's annotated-output mount.
+
+    The Agent already validates the same rules before writing the config, but the Bridge re-checks
+    rather than trusting its input — a malformed mount here would either fail to register or, worse,
+    register somewhere unintended. An absent key is legal (no per-camera output); a *present but
+    unsafe* one is a hard configuration error, never silently ignored.
+    """
+    raw = section.get("output-path", fallback="").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("/") or any(
+        token in raw for token in ("..", "://", "\\", "?", "#", "//")
+    ):
+        raise BridgeConfigurationError(
+            f"[{section_name}] output-path must be a safe relative RTSP mount path"
+        )
+    if any(character < " " or character == "\x7f" for character in raw):
+        raise BridgeConfigurationError(
+            f"[{section_name}] output-path must not contain control characters"
+        )
+    # FS-12: interior whitespace cannot appear in an RTSP request URI without being escaped, so a
+    # mount registered with one is effectively unreachable. Rejected here as a *path-safety* rule,
+    # deliberately alongside traversal and control characters.
+    #
+    # Note what is NOT checked here: the CameraKey format itself (lowercase, hyphens, length,
+    # reserved words). That is FS-12 §3 domain policy, owned by the Backend and re-checked by the
+    # Agent. The Bridge stays generic — it accepts any *safe relative path*, so a future feature that
+    # changes the key grammar needs no Bridge change at all.
+    if any(character.isspace() for character in raw):
+        raise BridgeConfigurationError(
+            f"[{section_name}] output-path must not contain whitespace"
+        )
+    return raw
 
 
 def _parse_file_loop(parser: configparser.ConfigParser) -> bool:
@@ -498,5 +642,69 @@ def _parse_rtsp_out(parser: configparser.ConfigParser) -> RtspOutConfig:
         ),
         rtph264pay_config_interval=_parse_config_interval(
             section, "rtph264pay-config-interval", _DEFAULT_RTPH264PAY_CONFIG_INTERVAL
+        ),
+    )
+
+
+def _parse_bounded_int(
+    section: configparser.SectionProxy,
+    key: str,
+    default: int,
+    min_value: int,
+    max_value: int,
+    section_name: str,
+) -> int:
+    """Shared validation for the ``[bridge-snapshot]`` integer keys — never silently clamps, same
+    discipline as ``_parse_positive_frame_interval``/``_parse_config_interval`` above."""
+    raw = section.get(key, fallback=None)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise BridgeConfigurationError(
+            f"[{section_name}] {key} must be an integer, got: {raw!r}"
+        ) from None
+    if not (min_value <= value <= max_value):
+        raise BridgeConfigurationError(
+            f"[{section_name}] {key} must be between {min_value} and {max_value}, got: {value}"
+        )
+    return value
+
+
+def _parse_snapshot(parser: configparser.ConfigParser) -> SnapshotConfig:
+    if not parser.has_section("bridge-snapshot"):
+        return SnapshotConfig(
+            enabled=_DEFAULT_SNAPSHOT_ENABLED,
+            frame_ttl_ms=_DEFAULT_SNAPSHOT_FRAME_TTL_MS,
+            max_retained_frames=_DEFAULT_SNAPSHOT_MAX_RETAINED_FRAMES,
+            jpeg_quality=_DEFAULT_SNAPSHOT_JPEG_QUALITY,
+        )
+    section = parser["bridge-snapshot"]
+    return SnapshotConfig(
+        enabled=section.getboolean("enable", fallback=_DEFAULT_SNAPSHOT_ENABLED),
+        frame_ttl_ms=_parse_bounded_int(
+            section,
+            "frame-ttl-ms",
+            _DEFAULT_SNAPSHOT_FRAME_TTL_MS,
+            1,
+            _MAX_SNAPSHOT_FRAME_TTL_MS,
+            "bridge-snapshot",
+        ),
+        max_retained_frames=_parse_bounded_int(
+            section,
+            "max-retained-frames",
+            _DEFAULT_SNAPSHOT_MAX_RETAINED_FRAMES,
+            1,
+            _MAX_SNAPSHOT_MAX_RETAINED_FRAMES,
+            "bridge-snapshot",
+        ),
+        jpeg_quality=_parse_bounded_int(
+            section,
+            "jpeg-quality",
+            _DEFAULT_SNAPSHOT_JPEG_QUALITY,
+            _MIN_SNAPSHOT_JPEG_QUALITY,
+            _MAX_SNAPSHOT_JPEG_QUALITY,
+            "bridge-snapshot",
         ),
     )

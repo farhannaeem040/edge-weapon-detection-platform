@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -65,20 +66,46 @@ from weapon_detection_agent.detection.errors import (
     DetectionSocketPathConflictError,
 )
 from weapon_detection_agent.detection.protocol import (
-    FRAME_LENGTH_BYTEORDER,
-    FRAME_LENGTH_PREFIX_BYTES,
+    FRAME_HEADER_BYTES,
+    FRAME_KIND_ACKNOWLEDGEMENT,
+    FRAME_KIND_DETECTION,
+    FRAME_KIND_SNAPSHOT,
     MAX_FRAME_BYTES,
-    SUPPORTED_SCHEMA_VERSION,
+    MAX_SNAPSHOT_FRAME_BYTES,
+    SNAPSHOT_PROTOCOL_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    decode_frame_header,
+    decode_snapshot_message,
+    encode_frame,
 )
-from weapon_detection_agent.detection.validation import DetectionRejection, validate_detection
+from weapon_detection_agent.detection.snapshot_capture import (
+    SnapshotValidationError,
+    compute_sha256,
+    reconcile_snapshot_spool,
+    spool_usage_bytes,
+    validate_snapshot_bytes,
+    write_snapshot_atomic,
+)
+from weapon_detection_agent.detection.validation import (
+    DetectionRejection,
+    DetectionRejectionReason,
+    normalize_v2_payload,
+    validate_detection,
+)
 from weapon_detection_agent.persistence.detection_event_repository import DetectionEventRepository
-from weapon_detection_agent.persistence.errors import DetectionEventAlreadyExistsError
+from weapon_detection_agent.persistence.errors import (
+    DetectionEventAlreadyExistsError,
+    SnapshotOutboxAlreadyExistsError,
+)
 
 if TYPE_CHECKING:
     from weapon_detection_agent.config.paths import AgentPaths
     from weapon_detection_agent.config.settings import AgentSettings
     from weapon_detection_agent.persistence.device_identity_repository import (
         DeviceIdentityRepository,
+    )
+    from weapon_detection_agent.persistence.snapshot_outbox_repository import (
+        SnapshotOutboxRepository,
     )
 
 _LOGGER = logging.getLogger("weapon_detection_agent.detection.ingest_handler")
@@ -144,6 +171,37 @@ class _FrameRejected(Exception):
         self.reason = reason
 
 
+@dataclasses.dataclass(frozen=True)
+class _DetectionQueueItem:
+    """One queued detection message, paired with the connection it arrived on.
+
+    ``writer`` is carried alongside the payload (IP-10 T-139, FS-08 §4) so the consumer task can
+    send the acknowledgement back over the *same* connection after persistence — the connection that
+    sent the message is not otherwise recoverable once the item is sitting in the shared queue.
+    """
+
+    payload: Mapping[str, Any]
+    writer: asyncio.StreamWriter
+
+
+@dataclasses.dataclass(frozen=True)
+class _SnapshotQueueItem:
+    """One queued snapshot frame's correlator + raw JPEG bytes (IP-10 T-140, FS-08 §5).
+
+    A ``FRAME_KIND_SNAPSHOT`` wire frame's body is not JSON — it is a 2-byte-length-prefixed UTF-8
+    ``eventId`` sub-header followed by raw JPEG bytes (:func:`~weapon_detection_agent.detection.
+    protocol.decode_snapshot_message`), already split apart by the time this item is queued.
+    """
+
+    event_id: str
+    data: bytes
+
+
+# Emit the spool-quota-exceeded warning on the first skip, then only every Nth skip thereafter —
+# mirrors _QUEUE_FULL_LOG_INTERVAL's bounded/aggregated logging discipline (T-149).
+_SPOOL_QUOTA_LOG_INTERVAL = 50
+
+
 class DetectionIngestHandler:
     """The Agent-side Unix domain socket server for raw DeepStream Bridge detection messages.
 
@@ -175,21 +233,38 @@ class DetectionIngestHandler:
         queue_capacity: int,
         device_id_provider: DeviceIdentityProvider,
         camera_id: str,
+        camera_id_resolver: Callable[[int], UUID | None] | None = None,
         class_names: Mapping[int, str],
         min_confidence: float,
         cooldown_tracker: DetectionCooldownTracker,
         repository: DetectionEventRepository,
         clock: Callable[[], datetime] = _utc_now,
         event_id_factory: Callable[[], UUID] = uuid4,
+        snapshot_capture_enabled: bool = False,
+        snapshot_repository: SnapshotOutboxRepository | None = None,
+        snapshot_spool_path: Path | str | None = None,
+        snapshot_max_file_bytes: int = 5_242_880,
+        snapshot_max_spool_bytes: int = 1_073_741_824,
     ) -> None:
         if queue_capacity <= 0:
             raise ValueError("queue_capacity must be positive")
+        if snapshot_capture_enabled and (
+            snapshot_repository is None or snapshot_spool_path is None
+        ):
+            raise ValueError(
+                "snapshot_repository and snapshot_spool_path are required when "
+                "snapshot_capture_enabled is True"
+            )
 
         self._socket_path = Path(socket_path)
         self._queue_capacity = queue_capacity
         self._device_id_provider = device_id_provider
         self._device_id: str | None = None  # resolved lazily — see _resolve_device_id
         self._camera_id = camera_id
+        # FS-11 §9: when set (server-driven Camera configuration mode), resolves the Bridge-reported
+        # numeric source_id to an immutable Camera.CameraId for each detection, in place of the
+        # static self._camera_id above. None in the pre-FS-11/feature-disabled static mode.
+        self._camera_id_resolver = camera_id_resolver
         self._class_names = class_names
         self._min_confidence = min_confidence
         self._cooldown = cooldown_tracker
@@ -197,8 +272,18 @@ class DetectionIngestHandler:
         self._clock = clock
         self._event_id_factory = event_id_factory
 
+        # --- Snapshot evidence capture (IP-10 T-139/T-140, FS-08 §4/§5) -----------------------
+        self._snapshot_capture_enabled = snapshot_capture_enabled
+        self._snapshot_repository = snapshot_repository
+        self._snapshot_spool_path = (
+            Path(snapshot_spool_path) if snapshot_spool_path is not None else None
+        )
+        self._snapshot_max_file_bytes = snapshot_max_file_bytes
+        self._snapshot_max_spool_bytes = snapshot_max_spool_bytes
+        self._spool_quota_skip_count = 0
+
         self._server: asyncio.Server | None = None
-        self._queue: asyncio.Queue[Mapping[str, Any]] | None = None
+        self._queue: asyncio.Queue[_DetectionQueueItem | _SnapshotQueueItem] | None = None
         self._consumer_task: asyncio.Task[None] | None = None
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._dropped_count = 0
@@ -249,6 +334,11 @@ class DetectionIngestHandler:
 
         self._resolve_device_id()
         self._ensure_socket_path_ready()
+
+        if self._snapshot_capture_enabled:
+            assert self._snapshot_repository is not None  # noqa: S101 -- enforced by __init__
+            assert self._snapshot_spool_path is not None  # noqa: S101 -- enforced by __init__
+            reconcile_snapshot_spool(self._snapshot_repository, self._snapshot_spool_path)
 
         self._dropped_count = 0
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
@@ -352,7 +442,13 @@ class DetectionIngestHandler:
         try:
             while True:
                 try:
-                    payload = await self._read_message(reader)
+                    # Bounded by the larger of the two content caps up front (the frame's `kind`,
+                    # which decides which cap actually applies, is not known until the header is
+                    # parsed) — a detection frame claiming a length over MAX_FRAME_BYTES is rejected
+                    # as oversized separately, below, once its kind is known.
+                    frame = await self._read_frame(
+                        reader, MAX_SNAPSHOT_FRAME_BYTES, allow_clean_eof=True
+                    )
                 except _FrameRejected as exc:
                     _LOGGER.warning(
                         "detection_connection_rejected",
@@ -361,9 +457,47 @@ class DetectionIngestHandler:
                     return
                 except asyncio.IncompleteReadError:
                     return  # client disconnected mid-frame; a normal, safe occurrence
-                if payload is None:
+                if frame is None:
                     return  # clean EOF between messages
-                self._enqueue(payload)
+
+                kind, body = frame
+
+                if kind == FRAME_KIND_SNAPSHOT:
+                    try:
+                        event_id, data = decode_snapshot_message(body)
+                    except (UnicodeDecodeError, IndexError, ValueError):
+                        _LOGGER.warning(
+                            "detection_connection_rejected",
+                            extra={"component": self.name, "reason": "malformed_snapshot_frame"},
+                        )
+                        return
+                    self._enqueue(_SnapshotQueueItem(event_id=event_id, data=data))
+                    continue
+
+                if kind != FRAME_KIND_DETECTION:
+                    _LOGGER.warning(
+                        "detection_connection_rejected",
+                        extra={"component": self.name, "reason": "unexpected_frame_kind"},
+                    )
+                    return
+
+                if len(body) > MAX_FRAME_BYTES:
+                    _LOGGER.warning(
+                        "detection_connection_rejected",
+                        extra={"component": self.name, "reason": "oversized_frame"},
+                    )
+                    return
+
+                try:
+                    payload = self._parse_detection_body(body)
+                except _FrameRejected as exc:
+                    _LOGGER.warning(
+                        "detection_connection_rejected",
+                        extra={"component": self.name, "reason": exc.reason},
+                    )
+                    return
+
+                self._enqueue(_DetectionQueueItem(payload=payload, writer=writer))
         finally:
             writer.close()
             with contextlib.suppress(Exception):
@@ -371,32 +505,26 @@ class DetectionIngestHandler:
             _LOGGER.debug("detection_connection_closed", extra={"component": self.name})
 
     async def _read_message(self, reader: asyncio.StreamReader) -> Mapping[str, Any] | None:
-        """Read exactly one length-prefixed frame, or ``None`` on a clean between-message EOF.
+        """Read exactly one ``FRAME_KIND_DETECTION`` frame's JSON body, or ``None`` on a clean
+        between-message EOF.
 
-        Raises :class:`_FrameRejected` for any protocol violation (oversized/zero-length frame,
-        malformed UTF-8/JSON, non-object JSON, unsupported schema version) and lets
-        ``asyncio.IncompleteReadError`` propagate for a disconnect mid-frame — both are handled by
-        the caller, which closes only this connection.
+        Kept as its own method (rather than inlined into :meth:`_handle_connection`) because the
+        portable frame-level unit tests exercise it directly against a fake reader, with no queue or
+        connection involved. Raises :class:`_FrameRejected` for any protocol violation (unexpected
+        frame kind, oversized/zero-length frame, malformed UTF-8/JSON, non-object JSON, unsupported
+        schema version) and lets ``asyncio.IncompleteReadError`` propagate for a mid-frame
+        disconnect.
         """
-        try:
-            prefix = await reader.readexactly(FRAME_LENGTH_PREFIX_BYTES)
-        except asyncio.IncompleteReadError as exc:
-            if exc.partial == b"":
-                return None  # a clean disconnect between messages, not an error
-            raise  # disconnected mid-prefix
+        frame = await self._read_frame(reader, MAX_FRAME_BYTES, allow_clean_eof=True)
+        if frame is None:
+            return None
+        kind, body = frame
+        if kind != FRAME_KIND_DETECTION:
+            raise _FrameRejected("unexpected_frame_kind")
+        return self._parse_detection_body(body)
 
-        length = int.from_bytes(prefix, FRAME_LENGTH_BYTEORDER)
-        if length <= 0:
-            raise _FrameRejected("zero_length_frame")
-        if length > MAX_FRAME_BYTES:
-            # Rejected from the length prefix alone — the payload itself is never read/allocated.
-            raise _FrameRejected("oversized_frame")
-
-        try:
-            body = await reader.readexactly(length)
-        except asyncio.IncompleteReadError as exc:
-            raise _FrameRejected("incomplete_payload") from exc
-
+    @staticmethod
+    def _parse_detection_body(body: bytes) -> Mapping[str, Any]:
         try:
             text = body.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -410,19 +538,48 @@ class DetectionIngestHandler:
         if not isinstance(parsed, dict):
             raise _FrameRejected("invalid_json_shape")
 
-        if parsed.get("schema_version") != SUPPORTED_SCHEMA_VERSION:
+        schema_version = parsed.get("schema_version", parsed.get("schemaVersion"))
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             raise _FrameRejected("unsupported_schema_version")
 
         return parsed
 
+    async def _read_frame(
+        self, reader: asyncio.StreamReader, max_bytes: int, *, allow_clean_eof: bool = False
+    ) -> tuple[int, bytes] | None:
+        """Read exactly one frame — its 1-byte kind, 4-byte length, and body — bounded by
+        ``max_bytes``. Returns ``(kind, body)``, or ``None`` on a clean between-message EOF when
+        ``allow_clean_eof`` is set.
+        """
+        try:
+            header = await reader.readexactly(FRAME_HEADER_BYTES)
+        except asyncio.IncompleteReadError as exc:
+            if allow_clean_eof and exc.partial == b"":
+                return None
+            raise
+
+        kind, length = decode_frame_header(header)
+        if length <= 0:
+            raise _FrameRejected("zero_length_frame")
+        if length > max_bytes:
+            # Rejected from the header alone — the body itself is never read/allocated.
+            raise _FrameRejected("oversized_frame")
+
+        try:
+            body = await reader.readexactly(length)
+        except asyncio.IncompleteReadError as exc:
+            raise _FrameRejected("incomplete_payload") from exc
+
+        return kind, body
+
     # --- Queue / backpressure (item 9) ------------------------------------------------------------
 
-    def _enqueue(self, payload: Mapping[str, Any]) -> None:
+    def _enqueue(self, item: _DetectionQueueItem | _SnapshotQueueItem) -> None:
         queue = self._queue
         if queue is None:
             return  # stopping; nothing left to hand work to
         try:
-            queue.put_nowait(payload)
+            queue.put_nowait(item)
         except asyncio.QueueFull:
             self._dropped_count += 1
             if self._dropped_count == 1 or self._dropped_count % _QUEUE_FULL_LOG_INTERVAL == 0:
@@ -437,25 +594,90 @@ class DetectionIngestHandler:
         assert self._queue is not None  # set immediately before this task is created
         queue = self._queue
         while True:
-            payload = await queue.get()
+            item = await queue.get()
             try:
-                await self._process(payload)
+                if isinstance(item, _SnapshotQueueItem):
+                    self._process_snapshot(item)
+                else:
+                    await self._process(item.payload, item.writer)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # A backstop only: _process already handles every expected failure internally
-                # (rejection, suppression, persistence failure). Nothing here may kill this task —
-                # a single bad item must never stop later messages from being processed.
+                # A backstop only: _process/_process_snapshot already handle every expected failure
+                # internally (rejection, suppression, persistence/capture failure). Nothing here may
+                # kill this task — a single bad item must never stop later messages from being
+                # processed.
                 _LOGGER.exception(
                     "detection_event_processing_failed", extra={"component": self.name}
                 )
 
-    async def _process(self, payload: Mapping[str, Any]) -> None:
+    async def _process(
+        self, payload: Mapping[str, Any], writer: asyncio.StreamWriter | None = None
+    ) -> None:
+        """Validate -> cooldown -> persist -> (v2 only) acknowledge one detection payload.
+
+        ``writer`` is ``None`` for direct portable-test calls that exercise this pipeline without a
+        real connection (mirrors this method's pre-FS-08 signature, which took only ``payload``) —
+        an acknowledgement is simply never sent in that case, exactly as if the message had arrived
+        as schema_version 1.
+        """
+        schema_version = payload.get("schema_version", payload.get("schemaVersion"))
+        raw_message_id = payload.get("messageId")
+        # A single narrowed (writer, message_id) pair — never two separately-Optional locals — so
+        # every acknowledgement call site below is unconditionally well-typed rather than needing a
+        # repeated `writer is not None and isinstance(message_id, str)` guard at each of the three
+        # possible outcomes (rejected/suppressed/accepted).
+        ack_target: tuple[asyncio.StreamWriter, str] | None = None
+        if (
+            writer is not None
+            and schema_version == SNAPSHOT_PROTOCOL_SCHEMA_VERSION
+            and isinstance(raw_message_id, str)
+        ):
+            ack_target = (writer, raw_message_id)
+
+        # v2's wire shape (camelCase, nested boundingBox, FS-08 §4.3) is normalized to the flat
+        # snake_case shape validate_detection has always expected — the one place schema-version-
+        # specific wire translation belongs, before any validation rule runs.
+        if schema_version == SNAPSHOT_PROTOCOL_SCHEMA_VERSION:
+            payload = normalize_v2_payload(payload)
+
+        camera_id = self._camera_id
+        if self._camera_id_resolver is not None:
+            # FS-11 §9: resolve per-message from the Bridge-reported source_id rather than trusting
+            # a single static Agent-wide camera identity. An unresolvable source_id (unknown to the
+            # currently applied configuration generation, or a malformed/missing field) is rejected
+            # safely — never forwarded as a DetectionEvent with a guessed or stale identity.
+            raw_source_id = payload.get("source_id")
+            resolved_camera_id = (
+                self._camera_id_resolver(raw_source_id)
+                if isinstance(raw_source_id, int) and not isinstance(raw_source_id, bool)
+                else None
+            )
+            if resolved_camera_id is None:
+                _LOGGER.warning(
+                    "detection_event_rejected",
+                    extra={
+                        "component": self.name,
+                        "reason": DetectionRejectionReason.UNRESOLVED_CAMERA_SOURCE.value,
+                        "field": "source_id",
+                    },
+                )
+                if ack_target is not None:
+                    ack_writer, message_id = ack_target
+                    self._send_ack(
+                        ack_writer,
+                        message_id,
+                        "rejected",
+                        error_code=DetectionRejectionReason.UNRESOLVED_CAMERA_SOURCE.value,
+                    )
+                return
+            camera_id = str(resolved_camera_id)
+
         now = self._clock()
         result = validate_detection(
             payload,
             device_id=self._resolve_device_id(),
-            camera_id=self._camera_id,
+            camera_id=camera_id,
             class_names=self._class_names,
             min_confidence=self._min_confidence,
             now=now,
@@ -471,6 +693,9 @@ class DetectionIngestHandler:
                     "field": result.field,
                 },
             )
+            if ack_target is not None:
+                ack_writer, message_id = ack_target
+                self._send_ack(ack_writer, message_id, "rejected", error_code=result.reason.value)
             return
 
         event = result
@@ -482,13 +707,18 @@ class DetectionIngestHandler:
                 "detection_event_suppressed",
                 extra={"component": self.name, "class_name": event.class_name},
             )
+            if ack_target is not None:
+                ack_writer, message_id = ack_target
+                self._send_ack(ack_writer, message_id, "suppressed")
             return
 
         try:
             self._repository.insert(event)
         except DetectionEventAlreadyExistsError:
             # Defensive-only (the cooldown decision above should make this unreachable in practice).
-            # Never commits the cooldown window: nothing new was persisted by this call.
+            # Never commits the cooldown window: nothing new was persisted by this call. No
+            # acknowledgement is sent either — the row was not durably created by *this* call
+            # (T-139 binding rule: only send an acknowledgement after this call's own persistence).
             _LOGGER.warning(
                 "detection_event_duplicate_rejected",
                 extra={"component": self.name, "event_id": str(event.event_id)},
@@ -498,7 +728,9 @@ class DetectionIngestHandler:
             # Any other persistence failure (e.g. disk full): logged without raw payload content,
             # the consumer keeps running, and — critically — the cooldown window is NOT committed,
             # so the next genuine detection for this key is not phantom-suppressed (T-86 binding
-            # rule: "accepted for cooldown" means "successfully persisted").
+            # rule: "accepted for cooldown" means "successfully persisted"). No acknowledgement is
+            # sent (T-139: only after a successful commit) — the Bridge's cache entry simply
+            # expires.
             _LOGGER.exception(
                 "detection_event_persistence_failed",
                 extra={"component": self.name, "class_name": event.class_name},
@@ -511,6 +743,144 @@ class DetectionIngestHandler:
         _LOGGER.info(
             "detection_event_persisted",
             extra={"component": self.name, "event_id": str(event.event_id)},
+        )
+
+        # The acknowledgement is sent only now — strictly after the DetectionEventRepository.insert
+        # call above has committed (T-139 binding rule, FS-08 §4.4).
+        if ack_target is not None:
+            ack_writer, message_id = ack_target
+            self._send_ack(
+                ack_writer,
+                message_id,
+                "accepted",
+                event_id=event.event_id,
+                snapshot_required=self._snapshot_capture_enabled,
+            )
+
+    # --- Acknowledgement send (IP-10 T-139, FS-08 §4.4) ---------------------------------------
+
+    def _send_ack(
+        self,
+        writer: asyncio.StreamWriter,
+        message_id: str,
+        outcome: str,
+        *,
+        event_id: UUID | None = None,
+        snapshot_required: bool = False,
+        error_code: str | None = None,
+    ) -> None:
+        """Write one framed acknowledgement back over ``writer``. Fire-and-forget, never awaited.
+
+        A cheap, bounded, best-effort send (FS-08 §4.4) — never a new synchronous dependency the
+        ingest path waits on. ``writer.write()`` only buffers; it is not flushed here (no
+        ``drain()``), so this can never block the consumer task regardless of how slow/stalled the
+        Bridge's reader is. Any failure (closed/closing writer, a transport error) is swallowed —
+        a missing/late acknowledgement is an expected, safe outcome for the Bridge (FS-08 §4.4), not
+        a fault on this side.
+        """
+        if writer.is_closing():
+            return
+        body: dict[str, Any] = {
+            "messageId": message_id,
+            "outcome": outcome,
+            "snapshotRequired": snapshot_required,
+        }
+        if event_id is not None:
+            body["eventId"] = str(event_id)
+        if error_code is not None:
+            body["errorCode"] = error_code
+        try:
+            writer.write(
+                encode_frame(json.dumps(body).encode("utf-8"), kind=FRAME_KIND_ACKNOWLEDGEMENT)
+            )
+        except Exception:
+            _LOGGER.debug("detection_ack_send_failed", extra={"component": self.name})
+
+    # --- Snapshot capture (IP-10 T-140/T-149, FS-08 §5) ----------------------------------------
+
+    def _process_snapshot(self, item: _SnapshotQueueItem) -> None:
+        if not self._snapshot_capture_enabled:
+            # Defensive only — a Bridge respecting the shared kill switch (FS-08 §13) never sends
+            # these while capture is disabled. Dropped silently, never treated as a protocol fault.
+            return
+
+        try:
+            event_id = UUID(item.event_id)
+        except ValueError:
+            _LOGGER.warning(
+                "snapshot_capture_rejected",
+                extra={"component": self.name, "reason": "malformed_event_id"},
+            )
+            return
+
+        assert self._snapshot_spool_path is not None  # noqa: S101 -- enforced by __init__
+        assert self._snapshot_repository is not None  # noqa: S101 -- enforced by __init__
+
+        usage = spool_usage_bytes(self._snapshot_spool_path)
+        if usage + len(item.data) > self._snapshot_max_spool_bytes:
+            self._spool_quota_skip_count += 1
+            if (
+                self._spool_quota_skip_count == 1
+                or self._spool_quota_skip_count % _SPOOL_QUOTA_LOG_INTERVAL == 0
+            ):
+                _LOGGER.warning(
+                    "snapshot_capture_spool_quota_exceeded",
+                    extra={
+                        "component": self.name,
+                        "skipped_count": self._spool_quota_skip_count,
+                    },
+                )
+            return  # capture only is skipped — detection/persistence is entirely unaffected
+
+        try:
+            _width, _height = validate_snapshot_bytes(
+                item.data, max_file_bytes=self._snapshot_max_file_bytes
+            )
+        except SnapshotValidationError as exc:
+            _LOGGER.warning(
+                "snapshot_capture_rejected",
+                extra={"component": self.name, "reason": exc.reason},
+            )
+            return
+
+        sha256 = compute_sha256(item.data)
+        try:
+            local_path = write_snapshot_atomic(self._snapshot_spool_path, event_id, item.data)
+        except OSError:
+            _LOGGER.exception(
+                "snapshot_capture_write_failed",
+                extra={"component": self.name, "event_id": str(event_id)[:8]},
+            )
+            return
+
+        try:
+            self._snapshot_repository.create_captured(
+                event_id=event_id,
+                local_path=local_path,
+                content_type="image/jpeg",
+                size_bytes=len(item.data),
+                sha256=sha256,
+            )
+        except SnapshotOutboxAlreadyExistsError:
+            # Idempotent: a duplicate acknowledgement/snapshot for an already-captured EventId must
+            # never write a second file record (FS-08 §4.4). The file itself was already
+            # (over)written above with identical bytes for the same EventId — harmless.
+            _LOGGER.debug("snapshot_capture_duplicate", extra={"component": self.name})
+            return
+        except Exception:
+            _LOGGER.exception(
+                "snapshot_outbox_persistence_failed",
+                extra={"component": self.name, "event_id": str(event_id)[:8]},
+            )
+            return
+
+        _LOGGER.info(
+            "snapshot_captured",
+            extra={
+                "component": self.name,
+                "event_id": str(event_id)[:8],
+                "size_bytes": len(item.data),
+            },
         )
 
 
@@ -546,6 +916,7 @@ def default_detection_components_factory(
     settings: AgentSettings,
     paths: AgentPaths,
     identity_repository: DeviceIdentityRepository,
+    camera_id_resolver: Callable[[int], UUID | None] | None = None,
 ) -> tuple[DetectionIngestHandler, ...]:
     """Build the real ``DetectionIngestHandler`` from Agent-owned dependencies (IP-07 T-87).
 
@@ -576,11 +947,27 @@ def default_detection_components_factory(
     activation dependency (it comes from ``settings.deepstream_model_profile`` alone), so — unlike
     identity — reading it at construction time is safe and matches the original task wording
     ("loaded once during construction/startup").
+
+    ``camera_id_resolver`` (FS-11 §9, IP-13 T-238) is ``None`` in the default/static mode
+    (``settings.device_config_enabled=False``) — every detection keeps using the single static
+    ``settings.detection_camera_id`` exactly as before. When server-driven Camera configuration is
+    enabled, the caller (``main.py``) passes
+    :meth:`~weapon_detection_agent.configuration.coordinator.DeviceConfigurationCoordinator.
+    resolve_camera_id` here so each detection's Camera identity is resolved per-message from the
+    Bridge-reported ``source_id`` instead.
     """
     if not settings.deepstream_enabled or not settings.detection_events_enabled:
         return ()
 
     class_names = load_class_names(resolve_class_labels_path(settings))
+
+    snapshot_repository = None
+    if settings.snapshot_capture_enabled:
+        from weapon_detection_agent.persistence.snapshot_outbox_repository import (
+            SnapshotOutboxRepository,
+        )
+
+        snapshot_repository = SnapshotOutboxRepository(paths.database_file)
 
     return (
         DetectionIngestHandler(
@@ -597,11 +984,17 @@ def default_detection_components_factory(
             queue_capacity=settings.detection_queue_capacity,
             device_id_provider=default_device_identity_provider(identity_repository),
             camera_id=settings.detection_camera_id,
+            camera_id_resolver=camera_id_resolver,
             class_names=class_names,
             min_confidence=settings.detection_min_confidence,
             cooldown_tracker=DetectionCooldownTracker(
                 cooldown_seconds=settings.detection_cooldown_seconds
             ),
             repository=DetectionEventRepository(paths.database_file),
+            snapshot_capture_enabled=settings.snapshot_capture_enabled,
+            snapshot_repository=snapshot_repository,
+            snapshot_spool_path=settings.snapshot_spool_path,
+            snapshot_max_file_bytes=settings.snapshot_max_file_bytes,
+            snapshot_max_spool_bytes=settings.snapshot_max_spool_bytes,
         ),
     )
