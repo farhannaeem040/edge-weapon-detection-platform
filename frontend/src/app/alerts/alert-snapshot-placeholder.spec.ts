@@ -28,11 +28,13 @@ describe('AlertSnapshotPlaceholderComponent', () => {
     expect(element().textContent).not.toContain('failed');
   });
 
-  it('states the operational reason without exposing internal configuration detail', () => {
+  it('never states a reason or exposes internal configuration detail', () => {
     const text = element().textContent ?? '';
-    expect(text).toContain('Snapshot capture is currently not enabled.');
-    // No environment-variable name, file path, or other implementation detail (manual-review Finding 2).
+    // No environment-variable name, file path, or other implementation detail, and no claim that
+    // capture is disabled — that would be misleading for the common case where capture is enabled
+    // and this specific Alert simply has no snapshot (FS-08 §12).
     expect(text).not.toContain('WDA_SNAPSHOT');
+    expect(text).not.toContain('currently not enabled');
     expect(text).not.toContain('/');
     expect(text).not.toContain('\\');
   });
@@ -40,6 +42,5 @@ describe('AlertSnapshotPlaceholderComponent', () => {
   it('carries the same message to assistive technology via the group aria-label', () => {
     const group = element().querySelector('.snapshot-placeholder');
     expect(group?.getAttribute('aria-label')).toContain('not available for this Alert');
-    expect(group?.getAttribute('aria-label')).toContain('currently not enabled');
   });
 });

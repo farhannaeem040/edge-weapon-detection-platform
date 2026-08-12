@@ -82,6 +82,16 @@ gpu-id=0
 enable-batch-process=1
 display-tracking-id=1
 
+[bridge-snapshot]
+# FS-08/IP-10: controls whether the Bridge builds its per-Camera post-OSD JPEG capture branch at
+# all. This is the Bridge-side half of the feature's two-layer kill switch — the Agent's
+# WDA_SNAPSHOT_CAPTURE_ENABLED only controls whether the Agent is willing to receive/spool snapshot
+# frames; it does not by itself activate anything in the Bridge's pipeline. Both must be true for
+# capture to actually happen. Left at the section's own default (disabled) unless explicitly
+# enabled here; frame-ttl-ms/max-retained-frames/jpeg-quality are left at their coded defaults
+# (3000/32/85) and are not overridden.
+enable=false
+
 [tests]
 # Loop the local video indefinitely for the Agent-managed lifecycle test (start/stop/restart
 # verification needs DeepStream to still be running when the Agent acts, not to have already hit

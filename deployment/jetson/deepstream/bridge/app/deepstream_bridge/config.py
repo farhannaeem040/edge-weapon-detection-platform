@@ -283,9 +283,9 @@ class SnapshotConfig:
     builds no tee/valve/snapshot branch at all — the existing RTSP-out/fakesink branch is attached
     directly to ``nvdsosd``, byte-for-byte as before this feature existed.
 
-    ``frame_ttl_ms``/``max_retained_frames`` size both :class:`~deepstream_bridge.snapshot
-    .CandidateFrameTracker` and :class:`~deepstream_bridge.snapshot.SnapshotCandidateCache`.
-    ``jpeg_quality`` is passed to ``nvjpegenc``'s own ``quality`` property.
+    ``frame_ttl_ms``/``max_retained_frames`` size
+    :class:`~deepstream_bridge.snapshot.SnapshotRendezvous`. ``jpeg_quality`` is passed to
+    ``nvjpegenc``'s own ``quality`` property.
     """
 
     enabled: bool
@@ -434,9 +434,7 @@ def _parse_one_source(parser: configparser.ConfigParser, section_name: str) -> S
     )
 
 
-def _parse_output_path(
-    section: configparser.SectionProxy, section_name: str
-) -> str:
+def _parse_output_path(section: configparser.SectionProxy, section_name: str) -> str:
     """FS-11 §11: validate this source's annotated-output mount.
 
     The Agent already validates the same rules before writing the config, but the Bridge re-checks
@@ -448,9 +446,7 @@ def _parse_output_path(
     if not raw:
         return ""
 
-    if raw.startswith("/") or any(
-        token in raw for token in ("..", "://", "\\", "?", "#", "//")
-    ):
+    if raw.startswith("/") or any(token in raw for token in ("..", "://", "\\", "?", "#", "//")):
         raise BridgeConfigurationError(
             f"[{section_name}] output-path must be a safe relative RTSP mount path"
         )
@@ -467,9 +463,7 @@ def _parse_output_path(
     # Agent. The Bridge stays generic — it accepts any *safe relative path*, so a future feature that
     # changes the key grammar needs no Bridge change at all.
     if any(character.isspace() for character in raw):
-        raise BridgeConfigurationError(
-            f"[{section_name}] output-path must not contain whitespace"
-        )
+        raise BridgeConfigurationError(f"[{section_name}] output-path must not contain whitespace")
     return raw
 
 

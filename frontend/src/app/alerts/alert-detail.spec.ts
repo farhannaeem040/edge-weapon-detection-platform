@@ -103,27 +103,56 @@ describe('AlertDetailComponent', () => {
     load({ success: true, data: placeholderDetail({ snapshotAvailable: false }) });
 
     expect(text()).toContain('Snapshot evidence is not available for this Alert.');
-    expect(text()).toContain('Snapshot capture is currently not enabled.');
     expect(element().querySelector('img')).toBeNull();
   });
 
-  it('issues no snapshot HTTP request of any kind, only the one Alert-detail GET', () => {
+  it('issues no snapshot HTTP request when the Alert has no snapshot', () => {
     load({ success: true, data: placeholderDetail({ snapshotAvailable: false }) });
 
     // afterEach's httpTesting.verify() would already fail on any unmatched request; this asserts the
-    // same thing explicitly for a snapshot-shaped URL (manual-review Finding 2).
+    // same thing explicitly for a snapshot-shaped URL.
     httpTesting.expectNone((req) => req.url.toLowerCase().includes('snapshot'));
   });
 
-  it('can later support an opaque non-null SnapshotReference safely (snapshotAvailable: true)', () => {
+  it('fetches and displays the snapshot image when snapshotAvailable is true', () => {
     load({ success: true, data: placeholderDetail({ snapshotAvailable: true }) });
 
-    // No placeholder, no crash, no <img>, no fabricated image — just an honest statement that
-    // retrieval isn't wired into this view yet (FS-10 §1, out of scope for this feature).
-    expect(text()).not.toContain('Snapshot evidence is not available for this Alert.');
-    expect(text()).toContain('A snapshot was captured for this Alert.');
-    expect(element().querySelector('img')).toBeNull();
+    expect(text()).toContain('Loading snapshot');
+
+    const request = httpTesting.expectOne(`${ALERTS_URL}/${PLACEHOLDER_ALERT_ID}/snapshot`);
+    expect(request.request.method).toBe('GET');
+    request.flush(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }));
+    fixture.detectChanges();
+
+    const img = element().querySelector<HTMLImageElement>('.alert-detail__snapshot-image');
+    expect(img).not.toBeNull();
+    expect(img?.src).toContain('blob:');
     expect(element().querySelector('app-alert-snapshot-placeholder')).toBeNull();
+  });
+
+  it('shows a failure state when the snapshot request errors, without crashing', () => {
+    load({ success: true, data: placeholderDetail({ snapshotAvailable: true }) });
+
+    httpTesting
+      .expectOne(`${ALERTS_URL}/${PLACEHOLDER_ALERT_ID}/snapshot`)
+      .flush(null, { status: 500, statusText: 'Internal Server Error' });
+    fixture.detectChanges();
+
+    expect(text()).toContain('Snapshot evidence could not be loaded.');
+    expect(element().querySelector('img')).toBeNull();
+  });
+
+  it('revokes the object URL when the component is destroyed', () => {
+    load({ success: true, data: placeholderDetail({ snapshotAvailable: true }) });
+    httpTesting
+      .expectOne(`${ALERTS_URL}/${PLACEHOLDER_ALERT_ID}/snapshot`)
+      .flush(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }));
+    fixture.detectChanges();
+
+    const revokeSpy = spyOn(URL, 'revokeObjectURL');
+    fixture.destroy();
+
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('shows a not-found state on a 404, distinct from a generic failure', () => {

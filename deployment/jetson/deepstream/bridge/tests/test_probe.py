@@ -43,7 +43,9 @@ def test_extract_single_object_single_frame() -> None:
     )
     batch = FakeBatchMeta(frames=[frame])
 
-    detections = extract_detections(FakePydsModule(), batch, message_id_factory=_sequential_message_ids())
+    detections = extract_detections(
+        FakePydsModule(), batch, message_id_factory=_sequential_message_ids()
+    )
 
     assert len(detections) == 1
     detection = detections[0]
@@ -279,12 +281,43 @@ def test_handle_buffer_invokes_on_candidate_once_per_detection() -> None:
         pyds_module,
         "buf",
         lambda _payload: None,
-        lambda message_id, frame_number: candidates.append((message_id, frame_number)),
+        lambda source_id, message_id, frame_number: candidates.append(
+            (source_id, message_id, frame_number)
+        ),
     )
 
     assert len(candidates) == 2
-    assert all(frame_number == 7 for _message_id, frame_number in candidates)
-    assert len({message_id for message_id, _frame_number in candidates}) == 2
+    assert all(source_id == 0 for source_id, _message_id, _frame_number in candidates)
+    assert all(frame_number == 7 for _source_id, _message_id, frame_number in candidates)
+    assert len({message_id for _source_id, message_id, _frame_number in candidates}) == 2
+
+
+def test_handle_buffer_on_candidate_matches_real_rendezvous_signature() -> None:
+    """Regression test for the arity mismatch where ``pipeline.py`` passed
+    ``SnapshotRendezvous.record_detection`` (a real 3-arg bound method: ``source_id``,
+    ``message_id``, ``frame_number``) as ``handle_buffer``'s ``on_candidate`` callback, which called
+    it with only 2 positional args — raising ``TypeError`` on the pad-probe thread on the first
+    detection whenever snapshot capture was enabled. This test calls ``handle_buffer`` with the real
+    bound method (not a fabricated stand-in lambda), exactly as ``pipeline.py``'s
+    ``_on_buffer_probe`` does, so a future arity/order regression fails here instead of only at
+    runtime on the Jetson."""
+    from deepstream_bridge.snapshot import SnapshotRendezvous
+
+    frame = FakeFrameMeta(
+        source_id=1,
+        frame_num=42,
+        source_frame_width=640,
+        source_frame_height=640,
+        objects=[FakeObjectMeta(0, 0.9, FakeRectParams(0, 0, 1, 1))],
+    )
+    batch = FakeBatchMeta(frames=[frame])
+    pyds_module = FakePydsModule(batch_meta_by_buffer={hash("buf"): batch})
+
+    rendezvous = SnapshotRendezvous(ttl_seconds=3.0, max_retained=32)
+
+    handle_buffer(pyds_module, "buf", lambda _payload: None, rendezvous.record_detection)
+
+    assert rendezvous.consume_candidate(1, 42) is True
 
 
 def test_handle_buffer_none_on_candidate_is_safe() -> None:

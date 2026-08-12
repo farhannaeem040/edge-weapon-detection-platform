@@ -1,5 +1,5 @@
 import { DatePipe, DecimalPipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 
 import { AlertStatusBadgeComponent } from '../shared/alert-status-badge';
@@ -99,13 +99,23 @@ import { AlertService } from './alert.service';
           <header class="card__header"><h3>Snapshot</h3></header>
           <div class="card__body">
             @if (alert.snapshotAvailable) {
-              <!-- FS-10 explicitly excludes snapshot capture/upload/retrieval from this feature: no
-                   image endpoint exists to fetch from, so even an Alert reporting availability shows
-                   the same honest statement rather than an <img> pointed at nothing. -->
-              <p class="alert-detail__status status-text">
-                A snapshot was captured for this Alert. Snapshot retrieval is not yet available in this
-                view.
-              </p>
+              @if (snapshotLoading()) {
+                <p class="alert-detail__status status-text">
+                  <span class="spinner" aria-hidden="true"></span> Loading snapshot…
+                </p>
+              } @else if (snapshotFailed()) {
+                <p class="alert-detail__status banner banner--error" role="alert">
+                  Snapshot evidence could not be loaded.
+                </p>
+              } @else if (snapshotUrl()) {
+                <img
+                  class="alert-detail__snapshot-image"
+                  [src]="snapshotUrl()"
+                  alt="Captured snapshot for this Alert, {{ alert.className }} detected on camera {{
+                    alert.cameraName
+                  }}"
+                />
+              }
             } @else {
               <app-alert-snapshot-placeholder />
             }
@@ -143,10 +153,20 @@ import { AlertService } from './alert.service';
       margin: 0;
       color: var(--color-text);
     }
+
+    .alert-detail__snapshot-image {
+      display: block;
+      max-width: 100%;
+      width: 100%;
+      max-height: 32rem;
+      height: auto;
+      object-fit: contain;
+      border-radius: var(--radius);
+    }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class AlertDetailComponent implements OnInit {
+export class AlertDetailComponent implements OnInit, OnDestroy {
   private readonly alertService = inject(AlertService);
   private readonly route = inject(ActivatedRoute);
 
@@ -156,6 +176,10 @@ export class AlertDetailComponent implements OnInit {
   protected readonly loading = signal(true);
   protected readonly notFound = signal(false);
   protected readonly failed = signal(false);
+
+  protected readonly snapshotUrl = signal<string | null>(null);
+  protected readonly snapshotLoading = signal(false);
+  protected readonly snapshotFailed = signal(false);
 
   ngOnInit(): void {
     const alertId = this.route.snapshot.paramMap.get(ALERT_ID_PARAM);
@@ -176,11 +200,45 @@ export class AlertDetailComponent implements OnInit {
         }
 
         this.alert.set(alert);
+
+        if (alert.snapshotAvailable) {
+          this.loadSnapshot(alertId);
+        }
       },
       error: () => {
         this.loading.set(false);
         this.failed.set(true);
       },
     });
+  }
+
+  ngOnDestroy(): void {
+    this.revokeSnapshotUrl();
+  }
+
+  private loadSnapshot(alertId: string): void {
+    this.snapshotLoading.set(true);
+    this.snapshotFailed.set(false);
+
+    this.alertService.getSnapshot(alertId).subscribe({
+      next: (blob) => {
+        this.revokeSnapshotUrl();
+        this.snapshotUrl.set(URL.createObjectURL(blob));
+        this.snapshotLoading.set(false);
+      },
+      error: () => {
+        this.revokeSnapshotUrl();
+        this.snapshotLoading.set(false);
+        this.snapshotFailed.set(true);
+      },
+    });
+  }
+
+  private revokeSnapshotUrl(): void {
+    const current = this.snapshotUrl();
+    if (current) {
+      URL.revokeObjectURL(current);
+      this.snapshotUrl.set(null);
+    }
   }
 }

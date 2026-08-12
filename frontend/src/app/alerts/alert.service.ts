@@ -42,6 +42,18 @@ export class AlertService {
         ),
       );
   }
+
+  /**
+   * The captured snapshot JPEG for an Alert (`GET /api/v1/alerts/{id}/snapshot`), FS-08 §12/IP-10
+   * T-162. `responseType: 'blob'` — this is the only binary (non-envelope) response in this
+   * service, so it does not go through `unwrap`. The `authInterceptor` attaches the bearer token
+   * the same way it does for every other request to `apiBaseUrl`; no manual header is needed here.
+   */
+  getSnapshot(alertId: string): Observable<Blob> {
+    return this.http.get(`${this.alertsUrl}/${encodeURIComponent(alertId)}/snapshot`, {
+      responseType: 'blob',
+    });
+  }
 }
 
 /**

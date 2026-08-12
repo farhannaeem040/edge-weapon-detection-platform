@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using WeaponDetection.Api.Contracts;
 using WeaponDetection.Api.Controllers;
@@ -27,6 +28,19 @@ public class AlertControllerTests
                 : GetHandler(alertId, cancellationToken);
     }
 
+    private sealed class StubAlertSnapshotRetrievalService : IAlertSnapshotRetrievalService
+    {
+        public Func<Guid, SnapshotRetrievalOutcome>? Handler { get; init; }
+
+        public Task<SnapshotRetrievalOutcome> GetSnapshotAsync(
+            Guid alertId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Handler?.Invoke(alertId) ?? SnapshotRetrievalOutcome.NotFound());
+    }
+
+    private static AlertController CreateController(
+        IAlertQueryService? queryService = null, IAlertSnapshotRetrievalService? snapshotService = null) =>
+        new(queryService ?? new StubAlertQueryService(), snapshotService ?? new StubAlertSnapshotRetrievalService());
+
     private static AlertDetailView MakeDetail(Guid alertId) =>
         new(
             alertId,
@@ -51,7 +65,7 @@ public class AlertControllerTests
         {
             GetHandler = (_, _) => Task.FromResult<AlertDetailView?>(null),
         };
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
 
         var result = await controller.GetById(Guid.NewGuid(), CancellationToken.None);
 
@@ -69,7 +83,7 @@ public class AlertControllerTests
         {
             GetHandler = (_, _) => Task.FromResult<AlertDetailView?>(MakeDetail(alertId)),
         };
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
 
         var result = await controller.GetById(alertId, CancellationToken.None);
 
@@ -93,7 +107,7 @@ public class AlertControllerTests
     public async Task List_WhenPageSizeExceedsMaximum_Returns400ValidationError()
     {
         var service = new StubAlertQueryService();
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             1, AlertListQuery.MaxPageSize + 1, null, null, null, null, null, null, null, null, null);
 
@@ -108,7 +122,7 @@ public class AlertControllerTests
     public async Task List_WhenSortByIsInvalid_Returns400ValidationError()
     {
         var service = new StubAlertQueryService();
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             null, null, null, null, null, null, null, null, null, "totallyNotAField", null);
 
@@ -123,7 +137,7 @@ public class AlertControllerTests
     public async Task List_WhenClassNameIsUnrecognized_Returns400ValidationError()
     {
         var service = new StubAlertQueryService();
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             null, null, null, null, "bazooka", null, null, null, null, null, null);
 
@@ -138,7 +152,7 @@ public class AlertControllerTests
     public async Task List_WhenStatusIsUnrecognized_Returns400ValidationError()
     {
         var service = new StubAlertQueryService();
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             null, null, null, null, null, null, null, "Resolved", null, null, null);
 
@@ -161,7 +175,7 @@ public class AlertControllerTests
                 return Task.FromResult(new AlertPageResult([], 0, 1, AlertListQuery.DefaultPageSize));
             },
         };
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             null, null, null, null, null, null, null, null, null, null, null);
 
@@ -184,7 +198,7 @@ public class AlertControllerTests
         {
             ListHandler = (_, _) => Task.FromResult(new AlertPageResult([item], 1, 1, 25)),
         };
-        var controller = new AlertController(service);
+        var controller = CreateController(queryService: service);
         var request = new AlertListRequestDto(
             null, null, null, null, null, null, null, null, null, null, null);
 
@@ -195,5 +209,60 @@ public class AlertControllerTests
         Assert.Single(dto.Items);
         Assert.Equal(1, dto.TotalCount);
         Assert.Equal(1, dto.TotalPages);
+    }
+
+    // FS-08 §12, IP-10 T-161. Controller-layer tests for GET /api/v1/alerts/{id}/snapshot against a
+    // stub IAlertSnapshotRetrievalService — HTTP-pipeline auth wiring is covered separately by
+    // AlertSnapshotRetrievalApiTests (SQL Server integration tests).
+
+    [Fact]
+    public async Task GetSnapshot_WhenNotFound_Returns404WithNotFoundContract()
+    {
+        var snapshotService = new StubAlertSnapshotRetrievalService
+        {
+            Handler = _ => SnapshotRetrievalOutcome.NotFound(),
+        };
+        var controller = CreateController(snapshotService: snapshotService);
+
+        var result = await controller.GetSnapshot(Guid.NewGuid(), CancellationToken.None);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result);
+        var envelope = Assert.IsType<ApiResponse>(notFound.Value);
+        Assert.False(envelope.Success);
+        Assert.Equal("NOT_FOUND", envelope.ErrorCode);
+    }
+
+    [Fact]
+    public async Task GetSnapshot_WhenFound_ReturnsFileWithContentType()
+    {
+        var bytes = new byte[] { 0xFF, 0xD8, 0xFF, 0xD9 };
+        var snapshotService = new StubAlertSnapshotRetrievalService
+        {
+            Handler = _ => SnapshotRetrievalOutcome.Found(bytes, "image/jpeg"),
+        };
+        var controller = CreateController(snapshotService: snapshotService);
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
+
+        var result = await controller.GetSnapshot(Guid.NewGuid(), CancellationToken.None);
+
+        var fileResult = Assert.IsType<FileContentResult>(result);
+        Assert.Equal("image/jpeg", fileResult.ContentType);
+        Assert.Equal(bytes, fileResult.FileContents);
+    }
+
+    [Fact]
+    public async Task GetSnapshot_WhenFound_SetsNoStorePrivateCacheControlHeader()
+    {
+        var snapshotService = new StubAlertSnapshotRetrievalService
+        {
+            Handler = _ => SnapshotRetrievalOutcome.Found([0xFF, 0xD8, 0xFF, 0xD9], "image/jpeg"),
+        };
+        var controller = CreateController(snapshotService: snapshotService);
+        var httpContext = new DefaultHttpContext();
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        await controller.GetSnapshot(Guid.NewGuid(), CancellationToken.None);
+
+        Assert.Equal("no-store, private", httpContext.Response.Headers.CacheControl.ToString());
     }
 }

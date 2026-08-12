@@ -4,7 +4,7 @@
 |-------|-------|
 | Feature ID | FS-08 |
 | Title | Capture one annotated post-OSD JPEG per accepted DetectionEvent and upload it durably to the matching Backend Alert |
-| Status | Draft — awaiting approval; no production capture/upload enabled |
+| Status | **Stage B PROVEN (2026-08-12) — one genuine local JPEG captured end-to-end on real hardware.** Four real defects found; three fixed with regression tests (candidate-tracker truthiness bug, missing colorspace conversion before the hardware JPEG encoder, missing `async=false` on the snapshot appsink), one documented as an unfixed follow-up (an ACK-before-JPEG-cached race causing intermittent capture — architectural gap, not a one-line fix). `WDA_SNAPSHOT_CAPTURE_ENABLED=true` left on; upload remains OFF (Stage C out of scope this run). Backend retrieval and frontend display work still not started. YOLO26/NvDCF/RTSP/DetectionEvents unaffected throughout (`NRestarts=0` for the full session). See IP-10 §5 for full evidence (dimensions, SHA-256, visual bounding-box proof). |
 | Related Architecture Sections | §13.5/§20.2 (Backend snapshot storage, completeness guarantee — frozen), §14.1 (`POST /api/v1/alerts/{id}/snapshot`, frozen endpoint/auth), ADR-008 (filesystem layout), ADR-009 (API conventions — binary/multipart exceptions), ADR-011 (filesystem snapshot storage, no SQL BLOB) |
 | Owner | Farhan Naeem |
 | Dependencies | IP-07 (Bridge/probe/transport), IP-08 (DetectionEvent sync, live in production), IP-09 (Data Protection persistence, live in production) |

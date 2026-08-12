@@ -23,7 +23,7 @@ callable, :meth:`~deepstream_bridge.transport.TransportWorker.enqueue`, uses ``q
 and never raises). The optional ``on_candidate`` callable (IP-10 T-133) is the only other side effect
 — a cheap, synchronous, in-memory bookkeeping call (never I/O) that lets ``pipeline.py``'s
 snapshot-branch valve-gating probe and acknowledgement-driven capture logic know which
-``frame_number``/``message_id`` pairs are snapshot candidates. Both callables are invoked
+``source_id``/``frame_number``/``message_id`` triples are snapshot candidates. Both callables are invoked
 synchronously on the pad-probe thread and must themselves never block or do JPEG/GStreamer work —
 that work happens later, on the appsink's own thread (``pipeline.py``, FS-08 §3/§5).
 """
@@ -55,7 +55,7 @@ _WIRE_FIELDS = (
     "bbox_height",
 )
 
-OnCandidate = Callable[[str, int], None]
+OnCandidate = Callable[[int, str, int], None]
 
 
 @dataclass(frozen=True)
@@ -183,7 +183,7 @@ def handle_buffer(
     on_candidate: Optional[OnCandidate] = None,
 ) -> None:
     """Extract every detection from one ``GstBuffer``, hand each wire message to ``enqueue``, and
-    (IP-10 T-133) report each ``(message_id, frame_number)`` pair to ``on_candidate`` so the
+    (IP-10 T-133) report each ``(source_id, message_id, frame_number)`` triple to ``on_candidate`` so the
     snapshot-branch valve-gating probe and acknowledgement-driven capture logic in ``pipeline.py``
     know which frames/messages are snapshot candidates.
 
@@ -201,7 +201,7 @@ def handle_buffer(
 
     for detection in extract_detections(pyds_module, batch_meta):
         if on_candidate is not None:
-            on_candidate(detection.message_id, detection.frame_number)
+            on_candidate(detection.source_id, detection.message_id, detection.frame_number)
         enqueue(detection.to_wire_message())
 
 

@@ -1,22 +1,20 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 
 /**
- * The Alert-detail snapshot section when no snapshot evidence is available (FS-10 §7 — snapshot
- * upload/capture is explicitly out of scope for this feature, and `snapshotAvailable` may be `false`
- * for any Alert regardless).
+ * The Alert-detail snapshot section when no snapshot evidence is available for this specific Alert
+ * (FS-08 §12/IP-10 T-163) — an older Alert predating capture, a suppressed/rejected detection that
+ * never captured a frame, or an upload that has not completed yet all render the same way here.
  *
- * This is its own component, not an inline `@else` branch in `alert-detail.ts`, precisely so a future
- * real-evidence view only has to swap this one piece. It renders **no `<img>` element at all** — never
- * a broken image, never a placeholder icon dressed up as a photo, and never any fabricated CCTV
- * imagery — only a plain, professional statement of fact plus the reason, so an Admin is never left
- * wondering whether something failed to load.
+ * This is its own component, not an inline `@else` branch in `alert-detail.ts`, precisely so the
+ * real-evidence view only has to swap this one piece. It renders **no `<img>` element at all** —
+ * never a broken image, never a placeholder icon dressed up as a photo, and never any fabricated
+ * CCTV imagery — only a plain, professional statement of fact, so an Admin is never left wondering
+ * whether something failed to load.
  *
- * The second line (manual-review Finding 2) states the *operational* reason — capture is currently
- * disabled platform-wide — without exposing how that is configured: no environment-variable name
- * (`WDA_SNAPSHOT_CAPTURE_ENABLED`), no file path, and no other internal implementation detail. It is
- * deliberately generic enough to stay true if the reason ever changes to "unresolved hardware
- * correlation" (FS-08/IP-10) rather than "disabled by configuration" — an Admin needs to know *that*
- * no evidence exists, not the mechanism.
+ * Deliberately says nothing about *why* — not "capture is disabled" (misleading for the common case
+ * where capture is enabled and this specific Alert simply has none) and no internal implementation
+ * detail (no environment-variable name, no file path). An Admin needs to know *that* no evidence
+ * exists for this Alert, not a mechanism that may not even apply to it.
  */
 @Component({
   selector: 'app-alert-snapshot-placeholder',
@@ -24,7 +22,7 @@ import { ChangeDetectionStrategy, Component } from '@angular/core';
     <div
       class="snapshot-placeholder"
       role="img"
-      aria-label="Snapshot evidence is not available for this Alert. Snapshot capture is currently not enabled."
+      aria-label="Snapshot evidence is not available for this Alert."
     >
       <svg
         class="snapshot-placeholder__icon"
@@ -44,7 +42,6 @@ import { ChangeDetectionStrategy, Component } from '@angular/core';
         />
       </svg>
       <p class="snapshot-placeholder__text">Snapshot evidence is not available for this Alert.</p>
-      <p class="snapshot-placeholder__reason">Snapshot capture is currently not enabled.</p>
     </div>
   `,
   styles: `
@@ -70,12 +67,6 @@ import { ChangeDetectionStrategy, Component } from '@angular/core';
       margin: 0;
       font-size: var(--text-sm);
       color: var(--color-text-muted);
-    }
-
-    .snapshot-placeholder__reason {
-      margin: 0;
-      font-size: var(--text-sm);
-      color: var(--color-text-faint);
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,

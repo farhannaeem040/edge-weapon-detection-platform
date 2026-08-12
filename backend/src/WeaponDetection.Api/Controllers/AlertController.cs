@@ -30,10 +30,13 @@ public class AlertController : ControllerBase
         new(StringComparer.OrdinalIgnoreCase) { "gun", "knife" };
 
     private readonly IAlertQueryService _alertQueryService;
+    private readonly IAlertSnapshotRetrievalService _snapshotRetrievalService;
 
-    public AlertController(IAlertQueryService alertQueryService)
+    public AlertController(
+        IAlertQueryService alertQueryService, IAlertSnapshotRetrievalService snapshotRetrievalService)
     {
         _alertQueryService = alertQueryService;
+        _snapshotRetrievalService = snapshotRetrievalService;
     }
 
     [HttpGet]
@@ -110,5 +113,23 @@ public class AlertController : ControllerBase
         }
 
         return Ok(AlertDetailDto.From(alert));
+    }
+
+    // FS-08 §12, IP-10 T-160: no [AllowAnonymous] here either, so this inherits the exact same
+    // default/fallback ActiveAdminSessionRequirement policy as GetById/List above — an
+    // unauthenticated or device-credentialed request is rejected before this action body runs.
+    // Never returns SnapshotReference or any filesystem path — only the JPEG bytes and their
+    // content type.
+    [HttpGet("{id:guid}/snapshot")]
+    public async Task<IActionResult> GetSnapshot(Guid id, CancellationToken cancellationToken)
+    {
+        var outcome = await _snapshotRetrievalService.GetSnapshotAsync(id, cancellationToken);
+        if (outcome.Kind == SnapshotRetrievalOutcomeKind.NotFound)
+        {
+            return NotFound(ApiResponse.Fail("NOT_FOUND", "No snapshot is available for this Alert."));
+        }
+
+        Response.Headers.CacheControl = "no-store, private";
+        return File(outcome.Content!, outcome.ContentType!);
     }
 }

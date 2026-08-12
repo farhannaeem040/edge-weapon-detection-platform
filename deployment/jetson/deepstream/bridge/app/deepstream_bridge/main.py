@@ -37,11 +37,7 @@ from deepstream_bridge.errors import (
 )
 from deepstream_bridge.pipeline import BridgePipeline
 from deepstream_bridge.protocol import DEFAULT_QUEUE_CAPACITY
-from deepstream_bridge.snapshot import (
-    CandidateFrameTracker,
-    SnapshotAcknowledgementHandler,
-    SnapshotCandidateCache,
-)
+from deepstream_bridge.snapshot import SnapshotAcknowledgementHandler, SnapshotRendezvous
 from deepstream_bridge.transport import TransportWorker
 
 _LOGGER = logging.getLogger("deepstream_bridge.main")
@@ -55,11 +51,28 @@ EXIT_PIPELINE_ERROR = 5
 _SHUTDOWN_SIGNALS: Sequence[int] = (signal.SIGTERM, signal.SIGINT)
 
 
+class _ExtraFieldsFormatter(logging.Formatter):
+    """Appends any ``extra={...}`` fields as ``key=value`` pairs so structured log calls (e.g.
+    ``snapshot.py``'s ``snapshot_rendezvous_completed``) are actually observable in this Bridge's
+    plain-text log; ``logging.basicConfig``'s default formatter silently drops ``extra`` fields."""
+
+    _STANDARD_ATTRS = frozenset(logging.makeLogRecord({}).__dict__.keys())
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        extras = {
+            key: value for key, value in record.__dict__.items() if key not in self._STANDARD_ATTRS
+        }
+        if not extras:
+            return base
+        rendered = " ".join(f"{key}={value!r}" for key, value in sorted(extras.items()))
+        return f"{base} {rendered}"
+
+
 def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(_ExtraFieldsFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -86,34 +99,30 @@ def run(argv: list[str] | None = None) -> int:
     transport = TransportWorker(socket_path=args.socket_path, queue_capacity=DEFAULT_QUEUE_CAPACITY)
 
     # IP-10 T-136: only constructed when snapshot capture is configured on — a disabled deployment
-    # (the default) never builds the candidate tracker/JPEG cache/acknowledgement handler at all,
-    # matching the pipeline's own "no tee/valve/snapshot branch" kill-switch behavior.
+    # (the default) never builds the rendezvous/acknowledgement handler at all, matching the
+    # pipeline's own "no tee/valve/snapshot branch" kill-switch behavior.
     if config.snapshot.enabled:
-        candidate_tracker = CandidateFrameTracker(
+        snapshot_rendezvous = SnapshotRendezvous(
             max_retained=config.snapshot.max_retained_frames,
-            ttl_seconds=config.snapshot.frame_ttl_ms / 1000.0,
-        )
-        snapshot_cache = SnapshotCandidateCache(
-            max_retained_frames=config.snapshot.max_retained_frames,
             ttl_seconds=config.snapshot.frame_ttl_ms / 1000.0,
         )
         transport.set_acknowledgement_callback(
             SnapshotAcknowledgementHandler(
-                candidate_tracker=candidate_tracker,
-                snapshot_cache=snapshot_cache,
+                rendezvous=snapshot_rendezvous,
                 send_snapshot=transport.enqueue_snapshot,
             )
         )
+        send_snapshot = transport.enqueue_snapshot
     else:
-        candidate_tracker = None
-        snapshot_cache = None
+        snapshot_rendezvous = None
+        send_snapshot = None
 
     try:
         pipeline = BridgePipeline(
             config=config,
             enqueue=transport.enqueue,
-            candidate_tracker=candidate_tracker,
-            snapshot_cache=snapshot_cache,
+            snapshot_rendezvous=snapshot_rendezvous,
+            send_snapshot=send_snapshot,
         )
         pipeline.build()
     except (

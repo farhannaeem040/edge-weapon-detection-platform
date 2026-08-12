@@ -135,6 +135,11 @@ public static class DependencyInjection
         // is scoped.
         services.AddScoped<IAlertSnapshotUploadService, AlertSnapshotUploadService>();
 
+        // The read counterpart for GET /api/v1/alerts/{alertId}/snapshot (FS-08 §12, IP-10 T-160).
+        // Same scoping rationale as IAlertSnapshotUploadService above (scoped DbContext + singleton
+        // IAlertSnapshotStorage).
+        services.AddScoped<IAlertSnapshotRetrievalService, AlertSnapshotRetrievalService>();
+
         return services;
     }
 }

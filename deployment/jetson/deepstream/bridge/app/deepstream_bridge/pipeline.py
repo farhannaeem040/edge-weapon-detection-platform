@@ -44,7 +44,7 @@ from deepstream_bridge.errors import (
     PipelineLinkError,
 )
 from deepstream_bridge.probe import frame_number_from_buffer, handle_buffer
-from deepstream_bridge.snapshot import CandidateFrameTracker, SnapshotCandidateCache
+from deepstream_bridge.snapshot import SendSnapshot, SnapshotRendezvous
 
 _LOGGER = logging.getLogger("deepstream_bridge.pipeline")
 
@@ -115,18 +115,18 @@ class BridgePipeline:
         *,
         config: BridgeConfig,
         enqueue: Callable[[dict[str, Any]], None],
-        candidate_tracker: Optional[CandidateFrameTracker] = None,
-        snapshot_cache: Optional[SnapshotCandidateCache] = None,
+        snapshot_rendezvous: Optional[SnapshotRendezvous] = None,
+        send_snapshot: Optional[SendSnapshot] = None,
     ) -> None:
-        if config.snapshot.enabled and (candidate_tracker is None or snapshot_cache is None):
+        if config.snapshot.enabled and (snapshot_rendezvous is None or send_snapshot is None):
             raise ValueError(
-                "candidate_tracker and snapshot_cache are required when config.snapshot.enabled"
+                "snapshot_rendezvous and send_snapshot are required when config.snapshot.enabled"
             )
 
         self._config = config
         self._enqueue = enqueue
-        self._candidate_tracker = candidate_tracker
-        self._snapshot_cache = snapshot_cache
+        self._snapshot_rendezvous = snapshot_rendezvous
+        self._send_snapshot = send_snapshot
 
         # Frame numbers the valve-gating probe let through, in the exact order their buffers enter
         # the snapshot branch (queue -> valve -> nvjpegenc -> appsink is a single synchronous push
@@ -401,9 +401,7 @@ class BridgePipeline:
         demux = self._make("nvstreamdemux", "stream-demuxer")
         pipeline.add(demux)
         if not batched_source.link(demux):
-            raise PipelineLinkError(
-                f"failed to link {batched_source.get_name()} -> nvstreamdemux"
-            )
+            raise PipelineLinkError(f"failed to link {batched_source.get_name()} -> nvstreamdemux")
 
         # Probe on the batched side of the demuxer — the identity contract, unchanged.
         self._attach_probe(demux)
@@ -528,9 +526,7 @@ class BridgePipeline:
         # keeps output N showing Camera N and nothing else.
         src_pad = demux.get_request_pad(f"src_{index}")
         if src_pad is None:
-            raise PipelineLinkError(
-                f"nvstreamdemux has no src_{index} request pad for this source"
-            )
+            raise PipelineLinkError(f"nvstreamdemux has no src_{index} request pad for this source")
         queue_sink_pad = queue_el.get_static_pad("sink")
         if src_pad.link(queue_sink_pad) != self._Gst.PadLinkReturn.OK:
             raise PipelineLinkError(f"failed to link nvstreamdemux src_{index} -> its output queue")
@@ -626,7 +622,11 @@ class BridgePipeline:
         # Minimal, non-blocking, returns immediately (task item 6) — all real work happens in
         # probe.handle_buffer, which is pure Python + injected pyds, never Gst. on_candidate (IP-10
         # T-133) is likewise a cheap, synchronous, in-memory-only call — never JPEG/GStreamer work.
-        on_candidate = self._candidate_tracker.record_detection if self._candidate_tracker else None
+        on_candidate = (
+            self._snapshot_rendezvous.record_detection
+            if self._snapshot_rendezvous is not None
+            else None
+        )
         handle_buffer(self._pyds, info.get_buffer(), self._enqueue, on_candidate)
         return self._Gst.PadProbeReturn.OK
 
@@ -636,7 +636,8 @@ class BridgePipeline:
         self, pipeline: Any, tee: Any, cfg: SnapshotConfig, *, source_index: int
     ) -> None:
         """One camera's snapshot branch: ``queue(leaky=downstream, small bounded max-size-buffers)
-        -> valve (closed by default) -> nvjpegenc (hardware, FS-08 §3 spike finding) -> appsink``.
+        -> valve (closed by default) -> nvvideoconvert -> capsfilter(NV12/NVMM) -> nvjpegenc
+        (hardware, FS-08 §3 spike finding) -> appsink``.
 
         Built once **per enabled Camera**, hanging off that camera's own post-OSD tee, so every
         element name is suffixed with the source index and every buffer that reaches it belongs to
@@ -657,6 +658,19 @@ class BridgePipeline:
         valve = self._make("valve", f"snapshot-valve{suffix}")
         valve.set_property("drop", True)
 
+        # nvdsosd's src pad can negotiate either NV12 or RGBA (gst-inspect-1.0 nvdsosd), but
+        # nvjpegenc's NVMM sink template only accepts NV12/I420 (gst-inspect-1.0 nvjpegenc). The
+        # RTSP-out branch already handles this with its own nvvideoconvert (see
+        # _attach_rtsp_out's postconv); the snapshot branch taps the tee before any such
+        # conversion, so it needs its own. Placed *after* the valve (not before) so the
+        # comparatively expensive colorspace conversion only ever runs on the rare candidate frame
+        # that gets through, never on every frame the branch sees.
+        preconv = self._make("nvvideoconvert", f"snapshot-preconv{suffix}")
+        capsfilter = self._make("capsfilter", f"snapshot-caps{suffix}")
+        capsfilter.set_property(
+            "caps", self._Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12")
+        )
+
         jpegenc = self._make("nvjpegenc", f"snapshot-jpeg-encoder{suffix}")
         jpegenc.set_property("quality", cfg.jpeg_quality)
 
@@ -665,12 +679,19 @@ class BridgePipeline:
         appsink.set_property("max-buffers", 1)
         appsink.set_property("drop", True)
         appsink.set_property("sync", False)
+        # Without this, a GstBaseSink-derived sink on a branch the valve keeps closed almost all
+        # the time never receives a buffer during the pipeline's initial PAUSED->PLAYING preroll,
+        # so it can stall waiting for that handshake to complete instead of emitting "new-sample"
+        # as soon as the first (long-delayed) real buffer finally arrives — proven live on the
+        # real Jetson: the buffer visibly reached the appsink's own sink pad (a pad probe there
+        # fired, with valid JPEG-encoded data) but "new-sample" never fired until this was added.
+        appsink.set_property("async", False)
         appsink.connect("new-sample", self._on_snapshot_new_sample, source_index)
 
-        for element in (queue_el, valve, jpegenc, appsink):
+        for element in (queue_el, valve, preconv, capsfilter, jpegenc, appsink):
             pipeline.add(element)
 
-        chain = (tee, queue_el, valve, jpegenc, appsink)
+        chain = (tee, queue_el, valve, preconv, capsfilter, jpegenc, appsink)
         for upstream, downstream in zip(chain, chain[1:]):
             if not upstream.link(downstream):
                 raise PipelineLinkError(
@@ -697,8 +718,8 @@ class BridgePipeline:
         frame_number = frame_number_from_buffer(self._pyds, info.get_buffer())
         is_candidate = (
             frame_number is not None
-            and self._candidate_tracker is not None
-            and self._candidate_tracker.consume_candidate(source_index, frame_number)
+            and self._snapshot_rendezvous is not None
+            and self._snapshot_rendezvous.consume_candidate(source_index, frame_number)
         )
         if is_candidate:
             # Record the frame number here, while NvDsBatchMeta is still attached to the buffer —
@@ -711,9 +732,7 @@ class BridgePipeline:
             # _pending_snapshot_frames' docstring in __init__.
             assert frame_number is not None  # noqa: S101 -- guaranteed by is_candidate above
             with self._pending_snapshot_frames_lock:
-                self._pending_snapshot_frames.setdefault(source_index, deque()).append(
-                    frame_number
-                )
+                self._pending_snapshot_frames.setdefault(source_index, deque()).append(frame_number)
         valve.set_property("drop", not is_candidate)
         return self._Gst.PadProbeReturn.OK
 
@@ -721,8 +740,13 @@ class BridgePipeline:
         """appsink's ``new-sample`` callback (IP-10 T-135) — runs on the snapshot branch's own
         streaming thread, never the nvdsosd sink-pad probe thread, satisfying "JPEG work never
         occurs in the pad-probe thread". Pulls the encoded JPEG sample, copies it to plain
-        ``bytes`` (never retaining the ``GstBuffer``/sample itself), and caches it. A capture
-        failure here is logged and swallowed — it must never stop the pipeline (task item)."""
+        ``bytes`` (never retaining the ``GstBuffer``/sample itself), and submits it to the
+        rendezvous. If the Agent's acknowledgement already arrived first (IP-10 the ACK-before-JPEG
+        ordering), this call itself completes the rendezvous and must send the snapshot — with the
+        rendezvous's internal lock already released by the time it returns, so ``send_snapshot`` (a
+        non-blocking enqueue, never I/O-blocking, matching ``self._enqueue``'s own contract) is safe
+        to call directly here. A capture failure is logged and swallowed — it must never stop the
+        pipeline (task item)."""
         Gst = self._Gst
         try:
             sample = appsink.emit("pull-sample")
@@ -739,7 +763,7 @@ class BridgePipeline:
             if frame_number is None:
                 _LOGGER.warning("bridge_snapshot_frame_number_unavailable")
                 return Gst.FlowReturn.OK
-            if self._snapshot_cache is None:
+            if self._snapshot_rendezvous is None:
                 return Gst.FlowReturn.OK
 
             gst_buffer = sample.get_buffer()
@@ -751,11 +775,20 @@ class BridgePipeline:
             finally:
                 gst_buffer.unmap(map_info)
 
-            self._snapshot_cache.put(frame_number, jpeg_bytes)
+            completed = self._snapshot_rendezvous.submit_jpeg(
+                source_index, frame_number, jpeg_bytes
+            )
             _LOGGER.debug(
                 "bridge_snapshot_candidate_cached",
-                extra={"frame_number": frame_number, "size_bytes": len(jpeg_bytes)},
+                extra={
+                    "frame_number": frame_number,
+                    "size_bytes": len(jpeg_bytes),
+                    "completed_immediately": completed is not None,
+                },
             )
+            if completed is not None and self._send_snapshot is not None:
+                event_id, completed_jpeg_bytes = completed
+                self._send_snapshot(event_id, completed_jpeg_bytes)
         except Exception:  # noqa: BLE001 - capture failure must never fault the pipeline
             _LOGGER.exception("bridge_snapshot_capture_failed")
         return Gst.FlowReturn.OK
@@ -832,7 +865,7 @@ class BridgePipeline:
 
         self._rtsp_server = None
         self._loop = None
-        if self._snapshot_cache is not None:
-            self._snapshot_cache.clear()
+        if self._snapshot_rendezvous is not None:
+            self._snapshot_rendezvous.clear()
         with self._pending_snapshot_frames_lock:
             self._pending_snapshot_frames.clear()
