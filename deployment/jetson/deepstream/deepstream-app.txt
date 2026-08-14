@@ -1,0 +1,99 @@
+[application]
+enable-perf-measurement=1
+perf-measurement-interval-sec=1
+
+[tiled-display]
+enable=1
+rows=1
+columns=1
+width=1280
+height=720
+gpu-id=0
+
+[source0]
+enable=1
+type=3
+# Phase 1 (IP-06): a local video file, staged via deploy-sample-video.sh before running the T-77
+# validation (never committed — see .gitignore). Phase 2 changes only this line to an RTSP uri= —
+# no Agent code change.
+uri=file:///opt/weapon-detection/samples/deepstream/input.mp4
+num-sources=1
+gpu-id=0
+cudadec-memtype=0
+
+# A non-persistent sink (fakesink) — deliberate for the Agent-managed lifecycle test: with
+# [tests] file-loop=1 below, a file/encode sink here would grow without bound and could fill the
+# Jetson's disk over an unattended run. The manually generated output_final.mkv/output_v4.mp4 from
+# the original manual proof (FS-04 §6) remain the evidence that inference itself is correct; this
+# config only needs to prove the Agent starts/stops/supervises the process correctly.
+[sink0]
+enable=1
+type=1
+sync=0
+source-id=0
+
+[osd]
+enable=1
+gpu-id=0
+border-width=3
+text-size=15
+text-color=1;1;1;1
+text-bg-color=0.3;0.3;0.3;1
+font=Serif
+show-clock=1
+clock-x-offset=800
+clock-y-offset=820
+clock-text-size=14
+clock-color=1;0;0;1
+display-text=1
+display-bbox=1
+display-mask=0
+
+[streammux]
+gpu-id=0
+live-source=0
+batch-size=1
+batched-push-timeout=40000
+width=1920
+height=1080
+enable-padding=0
+nvbuf-memory-type=0
+
+[primary-gie]
+enable=1
+gpu-id=0
+gie-unique-id=1
+nvbuf-memory-type=0
+# The ONLY line a profile switch changes (see deploy-engine.sh / README "Switching the active
+# profile"). Everything else in this file is profile-agnostic.
+# FS-13/IP-15: switched from profiles/yolov4-fp16 to profiles/yolo26-fp16 (custom YOLO26 gun/knife
+# detector). profiles/yolov4-fp16 remains installed and untouched as the rollback profile.
+config-file=/opt/weapon-detection/config/deepstream/profiles/yolo26-fp16/infer-config.txt
+
+[tracker]
+# FS-13 §5: re-enabled as part of the YOLO26 migration, reversing the live device's T-93 A/B
+# disablement (deployment/jetson/deepstream/README.md) so YOLO26 detections carry tracking IDs.
+enable=1
+tracker-width=640
+tracker-height=384
+ll-lib-file=/opt/nvidia/deepstream/deepstream-6.2/lib/libnvds_nvmultiobjecttracker.so
+ll-config-file=/opt/nvidia/deepstream/deepstream-6.2/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+gpu-id=0
+enable-batch-process=1
+display-tracking-id=1
+
+[bridge-snapshot]
+# FS-08/IP-10: controls whether the Bridge builds its per-Camera post-OSD JPEG capture branch at
+# all. This is the Bridge-side half of the feature's two-layer kill switch — the Agent's
+# WDA_SNAPSHOT_CAPTURE_ENABLED only controls whether the Agent is willing to receive/spool snapshot
+# frames; it does not by itself activate anything in the Bridge's pipeline. Both must be true for
+# capture to actually happen. Left at the section's own default (disabled) unless explicitly
+# enabled here; frame-ttl-ms/max-retained-frames/jpeg-quality are left at their coded defaults
+# (3000/32/85) and are not overridden.
+enable=false
+
+[tests]
+# Loop the local video indefinitely for the Agent-managed lifecycle test (start/stop/restart
+# verification needs DeepStream to still be running when the Agent acts, not to have already hit
+# end-of-stream and exited on its own).
+file-loop=1

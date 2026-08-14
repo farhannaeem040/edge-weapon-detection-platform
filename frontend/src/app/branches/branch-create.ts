@@ -6,6 +6,8 @@ import { ActivationKeyDisplayComponent } from './activation-key-display';
 import { BranchService } from './branch.service';
 import { CameraConfigFormComponent } from './camera-config-form';
 import {
+  DEFAULT_RTSP_OUTPUT_PORT,
+  JETSON_HOST_MAX_LENGTH,
   BRANCH_ADDRESS_MAX_LENGTH,
   BRANCH_CONTACT_DETAILS_MAX_LENGTH,
   BRANCH_NAME_MAX_LENGTH,
@@ -14,7 +16,14 @@ import {
   CreateBranchRequest,
 } from './branch.models';
 import { BRANCHES_ROUTE, branchDetailRoute } from './branch.routes';
-import { notBlank, rtspUrl } from './branch.validators';
+import {
+  cameraKey,
+  jetsonHost,
+  notBlank,
+  rtspOutputPort,
+  rtspUrl,
+  uniqueCameraKeys,
+} from './branch.validators';
 
 /**
  * Branch creation: the form, its cameras, and the one-time Activation Key disclosure that follows a
@@ -95,6 +104,52 @@ import { notBlank, rtspUrl } from './branch.validators';
                 />
                 @if (showError('contactDetails')) {
                   <span class="branch-create__error field-error" role="alert">Enter contact details.</span>
+                }
+              </label>
+            </div>
+          </section>
+
+          <section class="card">
+            <header class="card__header"><h3>Jetson device configuration</h3></header>
+            <div class="card__body branch-form__fields">
+              <label class="branch-create__field field">
+                <span class="field__label">Jetson IP or hostname</span>
+                <input
+                  class="branch-create__jetson-host"
+                  type="text"
+                  formControlName="jetsonHost"
+                  [maxlength]="jetsonHostMaxLength"
+                  autocapitalize="none"
+                  autocorrect="off"
+                  spellcheck="false"
+                  aria-describedby="jetson-host-hint"
+                />
+                <span class="branch-create__hint field-hint" id="jetson-host-hint">
+                  For this POC, enter the Jetson's Tailscale IP. In a real deployment, enter the
+                  Jetson's reachable IP address or hostname.
+                </span>
+                @if (showError('jetsonHost')) {
+                  <span class="branch-create__error field-error" role="alert">
+                    Enter a bare IP address or hostname &mdash; no scheme, port, path or credentials.
+                  </span>
+                }
+              </label>
+
+              <label class="branch-create__field field">
+                <span class="field__label">RTSP output port</span>
+                <input
+                  class="branch-create__rtsp-port"
+                  type="number"
+                  formControlName="rtspOutputPort"
+                  min="1"
+                  max="65535"
+                  step="1"
+                  inputmode="numeric"
+                />
+                @if (showError('rtspOutputPort')) {
+                  <span class="branch-create__error field-error" role="alert">
+                    Enter a whole number between 1 and 65535.
+                  </span>
                 }
               </label>
             </div>
@@ -184,6 +239,7 @@ export class BranchCreateComponent implements OnDestroy {
   protected readonly nameMaxLength = BRANCH_NAME_MAX_LENGTH;
   protected readonly addressMaxLength = BRANCH_ADDRESS_MAX_LENGTH;
   protected readonly contactDetailsMaxLength = BRANCH_CONTACT_DETAILS_MAX_LENGTH;
+  protected readonly jetsonHostMaxLength = JETSON_HOST_MAX_LENGTH;
 
   /**
    * The form starts with exactly one camera, because a branch requires at least one (FS-02 §12) and
@@ -193,7 +249,12 @@ export class BranchCreateComponent implements OnDestroy {
     name: ['', [notBlank, Validators.maxLength(BRANCH_NAME_MAX_LENGTH)]],
     address: ['', [notBlank, Validators.maxLength(BRANCH_ADDRESS_MAX_LENGTH)]],
     contactDetails: ['', [notBlank, Validators.maxLength(BRANCH_CONTACT_DETAILS_MAX_LENGTH)]],
-    cameras: this.formBuilder.array([this.buildCameraForm()]),
+    // FS-12 §4 — the reserved Device's network location. Required, because that Device is the
+    // RTSP host for every one of this Branch's annotated Camera outputs.
+    jetsonHost: ['', [notBlank, jetsonHost, Validators.maxLength(JETSON_HOST_MAX_LENGTH)]],
+    rtspOutputPort: [DEFAULT_RTSP_OUTPUT_PORT as number | null, [rtspOutputPort]],
+    // Uniqueness is a property of the set, so it is validated on the array, not the row.
+    cameras: this.formBuilder.array([this.buildCameraForm()], { validators: uniqueCameraKeys }),
   });
 
   /** True only while a create request is in flight — the guard against a double submission. */
@@ -266,14 +327,100 @@ export class BranchCreateComponent implements OnDestroy {
         this.createdBranchId = created.branchId;
         this.activationKey.set(created.activationKey);
       },
-      error: () => {
+      error: (error: unknown) => {
         // The entered values are kept: the Admin re-submits or corrects rather than retyping the
-        // branch and every camera. Nothing about the failure is logged or displayed beyond the
-        // generic message.
+        // branch and every camera. The dynamic camera array is never rebuilt here, so every
+        // CameraKey, the Jetson host and the port all survive a rejection (FS-12 task Phase 5).
         this.submitting.set(false);
-        this.failed.set(true);
+        this.applyBackendError(error);
       },
     });
+  }
+
+  /**
+   * Maps the Backend's named validation codes (FS-12 §3.1) onto the control that caused them, so the
+   * message appears against the offending camera row rather than only as a banner.
+   *
+   * Falls back to the existing generic banner for anything unrecognised — an unknown code must not
+   * silently disappear.
+   */
+  private applyBackendError(error: unknown): void {
+    const code = this.errorCodeOf(error);
+
+    const cameraKeyMessages: Record<string, string> = {
+      CAMERA_KEY_REQUIRED: 'Enter a camera key.',
+      CAMERA_KEY_INVALID:
+        'Use lowercase letters, numbers and hyphens, starting and ending with a letter or number.',
+      CAMERA_KEY_RESERVED: 'That camera key is reserved. Choose a different one.',
+      CAMERA_KEY_ALREADY_EXISTS: 'That camera key is already used in this branch.',
+      CAMERA_KEY_IMMUTABLE: 'A camera key cannot be changed after the camera is created.',
+    };
+
+    if (code !== null && code in cameraKeyMessages) {
+      // The Backend reports the rule, not which row broke it, so the message is attached to the
+      // first row the browser also considers invalid — and to every row when the Backend saw a
+      // duplicate, since a duplicate is by definition shared.
+      const message = cameraKeyMessages[code];
+      const offending =
+        code === 'CAMERA_KEY_ALREADY_EXISTS'
+          ? this.duplicateKeyControls()
+          : this.cameraForms
+              .map((form) => form.get('cameraKey'))
+              .filter((control): control is NonNullable<typeof control> => control !== null)
+              .slice(0, 1);
+
+      for (const control of offending) {
+        control.setErrors({ ...(control.errors ?? {}), cameraKeyBackend: message });
+        control.markAsTouched();
+      }
+
+      this.failed.set(offending.length === 0);
+      return;
+    }
+
+    if (code === 'JETSON_HOST_REQUIRED' || code === 'JETSON_HOST_INVALID') {
+      const control = this.form.get('jetsonHost');
+      control?.setErrors({ jetsonHost: true });
+      control?.markAsTouched();
+      this.failed.set(false);
+      return;
+    }
+
+    if (code === 'RTSP_OUTPUT_PORT_INVALID') {
+      const control = this.form.get('rtspOutputPort');
+      control?.setErrors({ rtspOutputPort: true });
+      control?.markAsTouched();
+      this.failed.set(false);
+      return;
+    }
+
+    this.failed.set(true);
+  }
+
+  /** Every camera-key control whose value is shared with another row in this form. */
+  private duplicateKeyControls() {
+    const byKey = new Map<string, NonNullable<ReturnType<typeof this.form.get>>[]>();
+
+    for (const form of this.cameraForms) {
+      const control = form.get('cameraKey');
+      const raw: unknown = control?.value;
+      if (control === null || typeof raw !== 'string' || raw.trim().length === 0) {
+        continue;
+      }
+      const key = raw.trim();
+      byKey.set(key, [...(byKey.get(key) ?? []), control]);
+    }
+
+    return [...byKey.values()].filter((controls) => controls.length > 1).flat();
+  }
+
+  /**
+   * Reads the Backend's `errorCode` from an `HttpErrorResponse` body without assuming its shape —
+   * anything unrecognised yields null and falls through to the generic banner.
+   */
+  private errorCodeOf(error: unknown): string | null {
+    const body = (error as { error?: { errorCode?: unknown } } | null)?.error;
+    return typeof body?.errorCode === 'string' ? body.errorCode : null;
   }
 
   /**
@@ -312,10 +459,28 @@ export class BranchCreateComponent implements OnDestroy {
       name: (value.name ?? '').trim(),
       address: (value.address ?? '').trim(),
       contactDetails: (value.contactDetails ?? '').trim(),
+      // FS-12 §4. The port is sent as null when blank so the Backend applies its own 8554
+      // default rather than the client inventing one.
+      jetsonHost: (value.jetsonHost ?? '').trim(),
+      rtspOutputPort:
+        value.rtspOutputPort === null || (value.rtspOutputPort as unknown) === ''
+          ? null
+          : Number(value.rtspOutputPort),
       cameras: this.cameraForms.map((cameraForm) => {
-        const camera = cameraForm.getRawValue() as { name: string; rtspUrl: string };
+        const camera = cameraForm.getRawValue() as {
+          name: string;
+          rtspUrl: string;
+          cameraKey: string;
+        };
 
-        return { name: camera.name.trim(), rtspUrl: camera.rtspUrl.trim() };
+        // Trimmed only of surrounding whitespace — never lowercased. FS-12 §3 requires an uppercase
+        // key to be *rejected*, so silently rewriting it here would submit a key the Admin never
+        // typed and show them one they never chose.
+        return {
+          name: camera.name.trim(),
+          rtspUrl: camera.rtspUrl.trim(),
+          cameraKey: camera.cameraKey.trim(),
+        };
       }),
     };
   }
@@ -323,6 +488,8 @@ export class BranchCreateComponent implements OnDestroy {
   private buildCameraForm(): FormGroup {
     return this.formBuilder.group({
       name: ['', [notBlank, Validators.maxLength(CAMERA_NAME_MAX_LENGTH)]],
+      // FS-12 §3: administrator-entered, never generated at submission time.
+      cameraKey: ['', [notBlank, cameraKey]],
       rtspUrl: ['', [notBlank, rtspUrl, Validators.maxLength(CAMERA_RTSP_URL_MAX_LENGTH)]],
     });
   }

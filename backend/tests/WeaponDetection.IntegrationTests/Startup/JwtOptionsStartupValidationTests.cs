@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,7 +23,20 @@ public class JwtOptionsStartupValidationTests
     private static IHost BuildHost(IDictionary<string, string?> jwtConfig)
     {
         var builder = Host.CreateApplicationBuilder();
-        var configuration = new ConfigurationBuilder().AddInMemoryCollection(jwtConfig).Build();
+
+        // FS-08 §8: AlertSnapshots:StoragePath is a second, independently required ValidateOnStart()
+        // option (mirroring Jwt's own registration) — supplied here with an always-valid value so
+        // these tests isolate JWT validation specifically, exactly as their names promise, rather
+        // than incidentally failing/passing on an unrelated option.
+        var config = new Dictionary<string, string?>(jwtConfig)
+        {
+            ["AlertSnapshots:StoragePath"] = Path.Combine(Path.GetTempPath(), "wd-jwt-startup-test-snapshots"),
+            // FS-14 §5: MediaGateway:BaseUrl is a third, independently required ValidateOnStart()
+            // option — supplied here with an always-valid value for the same reason as
+            // AlertSnapshots:StoragePath above.
+            ["MediaGateway:BaseUrl"] = "http://mediamtx.invalid:9997",
+        };
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(config).Build();
         builder.Services.AddInfrastructure(TestConnectionString, configuration);
 
         return builder.Build();

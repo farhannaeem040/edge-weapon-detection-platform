@@ -88,6 +88,32 @@ services:
       # are missing while no Admin exists.
       BootstrapAdmin__CredentialIdentifier: ${ADMIN_IDENTIFIER:-admin}
       BootstrapAdmin__Password: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      # FS-07: a named volume (below), not the container's writable layer, so the Data Protection
+      # key ring — and therefore every already-protected Device secret — survives a full
+      # `docker compose up -d`/`--force-recreate` of this container, not merely a process restart
+      # within the same one. Mounted only into this service (Phase 5) — no other service ever
+      # needs to unprotect a Device secret.
+      DataProtection__KeyPath: /var/lib/weapon-detection/dataprotection-keys
+      # FS-08 §8: a second, separate named volume (below) from dataprotection-keys — snapshot
+      # evidence JPEGs are a distinct durability concern from the Data Protection key ring and must
+      # survive a full `docker compose up -d`/`--force-recreate` of this container the same way.
+      # Mounted only into this service — no other service ever reads/writes a snapshot file.
+      AlertSnapshots__StoragePath: /var/lib/weapon-detection/alert-snapshots
+      # FS-09 §11: Branch-level daily Alert quota (default 15/Branch/day). No volume needed — quota
+      # state lives in SQL Server (BranchDailyAlertQuotas/SuppressedDetectionEvents), not the
+      # filesystem. Set AlertQuota__Enabled=false to fully disable enforcement (IP-11 §4 Rollback).
+      AlertQuota__Enabled: "true"
+      # Operator-configurable via the protected .env (see .env.example). The literal default stays
+      # 15 — the approved production policy — so an environment that never sets the variable keeps
+      # exactly the previous behaviour. AlertQuotaOptionsValidator still bounds the effective value
+      # to 1..10000 at startup, so a typo cannot silently disable the quota.
+      AlertQuota__MaximumPerBranchPerDay: "${ALERT_QUOTA_MAXIMUM_PER_BRANCH_PER_DAY:-15}"
+      # FS-14 §5, IP-16 T-8: the media gateway's internal control-API origin — reachable only
+      # over this compose network, never published to the host.
+      MediaGateway__BaseUrl: http://mediamtx:9997
+    volumes:
+      - dataprotection-keys:/var/lib/weapon-detection/dataprotection-keys
+      - alert-snapshots:/var/lib/weapon-detection/alert-snapshots
     depends_on:
       # The Backend does not migrate on startup, and its Admin bootstrap needs an existing schema,
       # so it must not start until the migration job has succeeded.
@@ -115,9 +141,39 @@ services:
     # Receives no secrets: no SQL password, no JWT signing key, no Admin credential.
     restart: unless-stopped
 
+  # --- Media gateway (MediaMTX) — FS-14 §5, IP-16 T-2 -----------------------------------------
+  # Formalizes the instance that already ran in production as an ad hoc `docker run` container
+  # (the Windows RTSP test-stream ingestion workflow, CLAUDE.md) into normal container management.
+  # Pinned by the exact digest that instance was already running, so this is a management change,
+  # not an upgrade. RTSP (8554) is published exactly as before; the control API (9997) and WHEP
+  # HTTP signaling (8889) are reachable only on the internal network / proxied by frontend's Nginx
+  # — never published directly. Only the WebRTC ICE/UDP media port needs direct host exposure,
+  # since RTP media cannot pass through an HTTP reverse proxy the way the WHEP signaling can.
+  mediamtx:
+    image: bluenviron/mediamtx@sha256:f37aaaf1a707c42b0aff49a3ab5d4fa57a3504ebc3f27657434a820e3b16d730
+    volumes:
+      - ./deployment/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8554:8554" # RTSP — unchanged from the pre-existing ad hoc instance.
+      - "8189:8189/udp" # WebRTC ICE/UDP media mux — must be host-reachable for browser playback.
+    networks:
+      - internal
+    restart: unless-stopped
+
 networks:
   internal:
     driver: bridge
+    # Pinned rather than Docker-assigned (FS-14 §5, IP-16 T-1/T-2): mediamtx.yml's
+    # authInternalUsers restricts its control-API to this exact subnet, so it must not drift
+    # across a network recreation the way an auto-assigned subnet could.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   sqlserver-data:
+  # FS-07: Data Protection key ring persistence for the Backend service only (mounted above).
+  dataprotection-keys:
+  # FS-08: Alert snapshot evidence storage for the Backend service only (mounted above) — a
+  # separate volume from dataprotection-keys, never shared.
+  alert-snapshots:

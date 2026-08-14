@@ -43,6 +43,14 @@ public class AuthController : ControllerBase
         return Ok(new LoginResponseDto(result.AccessToken!));
     }
 
+    // FS-14 §5, IP-16 T-3: exists solely so Nginx's `auth_request` directive has a cheap, real
+    // Admin-JWT check to delegate to for the `/media/` WHEP proxy location — MediaMTX itself has no
+    // concept of this application's sessions, so gating playback access happens here instead. No
+    // [AllowAnonymous], so it inherits the same fallback ActiveAdminSessionRequirement policy as
+    // every other protected endpoint; auth_request only inspects the status code, never the body.
+    [HttpGet("session")]
+    public IActionResult Session() => Ok();
+
     // FS-01 §9.2: a protected endpoint like any other — it carries no [AllowAnonymous], so the
     // application's fallback policy (T-10) subjects it to both checks before this action body runs.
     // That is what makes the second-logout case work without any special handling here: a token

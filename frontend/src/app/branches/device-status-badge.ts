@@ -8,12 +8,19 @@ import { DeviceActivationStatus } from './branch.models';
 type BadgeState = DeviceActivationStatus | 'Unknown';
 
 /** The statuses the Backend is contracted to send, as it serializes them (FS-02 §10.3). */
-const KNOWN_STATUSES: readonly string[] = ['Unactivated', 'Activated'];
+const KNOWN_STATUSES: readonly string[] = ['Unactivated', 'Activated', 'ReactivationRequired'];
 
-/** The visible label per state. Never the raw input — an unrecognised value is not echoed. */
+/**
+ * The visible label per state. Never the raw input — an unrecognised value is not echoed.
+ *
+ * `ReactivationRequired` reads "Reactivation required" and nothing else: it is deliberately never
+ * "Offline" (a connectivity word this platform does not model — IP-05 §13) and never "Unknown" (which
+ * is reserved for a value outside the contract). It is a known, explicit credential state.
+ */
 const LABELS: Readonly<Record<BadgeState, string>> = {
   Unactivated: 'Unactivated',
   Activated: 'Activated',
+  ReactivationRequired: 'Reactivation required',
   Unknown: 'Unknown',
 };
 
@@ -26,6 +33,9 @@ const DESCRIPTIONS: Readonly<Record<BadgeState, string>> = {
   Unactivated:
     'This branch’s Device has not been activated yet. It has no Device ID until it activates.',
   Activated: 'This branch’s Device has been activated.',
+  ReactivationRequired:
+    'This branch’s Device credential has been revoked. Its Device ID is preserved, but it must be ' +
+    'reactivated with a new Activation Key before it can operate again.',
   Unknown: 'This branch’s Device activation state could not be determined. Reload the page.',
 };
 
@@ -95,6 +105,14 @@ const DESCRIPTIONS: Readonly<Record<BadgeState, string>> = {
       border-color: #e6cf8a;
       background-color: var(--color-warning-bg, #fdf3d7);
       color: #4a3800;
+    }
+
+    /* A revoked credential is a problem awaiting operator action, so it reads as a danger tint —
+       distinct from the neutral Unactivated warning and never confusable with the Activated green. */
+    .device-status--reactivationrequired {
+      border-color: #e3b4b4;
+      background-color: var(--color-danger-bg, #fdeaea);
+      color: #7a1414;
     }
 
     .device-status--unknown {

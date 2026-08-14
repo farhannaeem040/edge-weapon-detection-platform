@@ -72,6 +72,19 @@ RUN apt-get update \
 
 COPY --from=build /app/publish ./
 
+# FS-07: pre-create the Data Protection key-ring mount point owned by the non-root runtime user,
+# before that user is switched to below. A Docker named volume takes the ownership of whatever
+# already exists at its mount path on first use; without this, the volume is created root-owned and
+# the "app" user below cannot read/write it (caught at startup by DataProtectionKeyPathValidator
+# rather than failing silently or falling back to an ephemeral location).
+RUN mkdir -p /var/lib/weapon-detection/dataprotection-keys \
+    && chown app /var/lib/weapon-detection/dataprotection-keys
+
+# FS-08 §8: identical technique, for the new, separate alert-snapshots volume mount point — pre-empts
+# the same class of bug FS-07 fixed for the Data Protection volume rather than rediscovering it.
+RUN mkdir -p /var/lib/weapon-detection/alert-snapshots \
+    && chown app /var/lib/weapon-detection/alert-snapshots
+
 # The official ASP.NET image ships a non-root user (uid 1654); the API needs no privileged access.
 USER app
 

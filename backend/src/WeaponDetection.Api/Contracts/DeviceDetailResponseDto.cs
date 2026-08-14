@@ -11,8 +11,20 @@ public sealed record DeviceDetailResponseDto(
     Guid DeviceId,
     Guid BranchId,
     string ActivationStatus,
-    string? LastKnownAddress)
+    string? LastKnownAddress,
+    // FS-12 §4 — the structured network configuration; null until configured.
+    string? JetsonHost,
+    int? RtspOutputPort,
+    // FS-12 §2.1 — computed from the pair above, not independently persisted state.
+    string? AnnotatedOutputBaseUrl)
 {
     public static DeviceDetailResponseDto From(DeviceDetailView device) =>
-        new(device.DeviceId, device.BranchId, device.ActivationStatus.ToString(), device.LastKnownAddress);
+        new(
+            device.DeviceId,
+            device.BranchId,
+            device.ActivationStatus.ToString(),
+            device.LastKnownAddress,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.AnnotatedOutputBaseUrl);
 }

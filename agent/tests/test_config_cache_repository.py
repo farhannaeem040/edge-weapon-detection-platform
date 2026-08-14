@@ -1,9 +1,9 @@
-"""Unit tests for the Config Cache repository (IP-02 T-36, §16.1; OI-2).
+"""Unit tests for the Config Cache repository (IP-02 T-36, §16.1; OI-2; FS-11 §6, IP-13 T-232).
 
-The Config Cache repository is **load-only** — IP-02 excludes a writer under OI-2 — so these tests
-seed a row directly with controlled SQL and then verify ``load()``. There are deliberately no
-replace/clear/refresh tests: those operations are not part of T-36. Every test uses a temporary root
-(``tmp_path``); none touches ``/opt`` or the network.
+The repository was **load-only** in IP-02 (OI-2 excluded a writer) — the ``load()`` tests below
+still seed a row directly with controlled SQL to keep that coverage independent of the writer. FS-11
+adds the first writer, ``save()``; its own tests exercise the round trip through the repository's
+own API. Every test uses a temporary root (``tmp_path``); none touches ``/opt`` or the network.
 """
 
 from __future__ import annotations
@@ -173,7 +173,13 @@ def test_load_creates_no_unrelated_files_or_directories(tmp_path: Path) -> None:
 
     ConfigCacheRepository(paths.database_file).load()
 
-    assert sorted(c.name for c in paths.root.iterdir()) == ["config", "database", "logs"]
+    assert sorted(c.name for c in paths.root.iterdir()) == [
+        "config",
+        "database",
+        "logs",
+        "runtime",
+        "snapshots",
+    ]
     assert [c.name for c in paths.database_dir.iterdir()] == ["agent.db"]
 
 
@@ -210,3 +216,91 @@ def test_repository_import_performs_no_io(monkeypatch: pytest.MonkeyPatch) -> No
     finally:
         if saved is not None:
             sys.modules[name] = saved
+
+
+# --- 15-20. save() (FS-11 §6, IP-13 T-232 — the first writer) -----------------------------------
+
+
+def test_save_then_load_round_trips_exactly(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = ConfigCacheRepository(db)
+
+    repo.save(FAKE_CONFIG_JSON, updated_at=UPDATED_AT)
+    loaded = repo.load()
+
+    assert loaded is not None
+    assert loaded.config_json == FAKE_CONFIG_JSON
+    assert loaded.updated_at == UPDATED_AT
+
+
+def test_save_is_an_upsert_never_a_second_row(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = ConfigCacheRepository(db)
+
+    repo.save('{"v": 1}', updated_at=UPDATED_AT)
+    repo.save('{"v": 2}', updated_at=UPDATED_AT)
+
+    with open_connection(db) as connection:
+        (count,) = connection.execute("SELECT COUNT(*) FROM ConfigCache").fetchone()
+    assert count == 1
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.config_json == '{"v": 2}'
+
+
+def test_save_replaces_a_row_seeded_outside_the_repository(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    _seed_config(db, config_json="{}", updated_at=UPDATED_AT.isoformat())
+
+    ConfigCacheRepository(db).save(FAKE_CONFIG_JSON, updated_at=UPDATED_AT)
+
+    loaded = ConfigCacheRepository(db).load()
+    assert loaded is not None
+    assert loaded.config_json == FAKE_CONFIG_JSON
+
+
+def test_save_updates_the_stored_timestamp(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = ConfigCacheRepository(db)
+    later = UPDATED_AT.replace(year=UPDATED_AT.year + 1)
+
+    repo.save('{"v": 1}', updated_at=UPDATED_AT)
+    repo.save('{"v": 2}', updated_at=later)
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.updated_at == later
+
+
+def test_save_never_logs_config_content(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    db = _ready_db(tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="weapon_detection_agent"):
+        ConfigCacheRepository(db).save(FAKE_CONFIG_JSON, updated_at=UPDATED_AT)
+
+    assert "ZZZ-config-content-must-never-appear-ZZZ" not in caplog.text
+
+
+def test_save_is_atomic_a_failed_save_leaves_the_previous_row_intact(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = ConfigCacheRepository(db)
+    repo.save(FAKE_CONFIG_JSON, updated_at=UPDATED_AT)
+
+    class _BoomConnection:
+        def __enter__(self) -> None:
+            raise sqlite3.OperationalError("boom")
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    def _boom_open():  # noqa: ANN202 - test helper
+        return _BoomConnection()
+
+    broken_repo = ConfigCacheRepository(connection_factory=_boom_open)
+    with pytest.raises(sqlite3.OperationalError):
+        broken_repo.save('{"v": "should not persist"}', updated_at=UPDATED_AT)
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.config_json == FAKE_CONFIG_JSON

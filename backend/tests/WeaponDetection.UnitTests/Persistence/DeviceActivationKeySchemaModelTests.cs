@@ -188,6 +188,22 @@ public class DeviceActivationKeySchemaModelTests
     }
 
     [Fact]
+    public void ActivationKey_HasAFilteredUniqueIndexOnDeviceRecordId_ForUnconsumedKeysOnly()
+    {
+        // IP-05 T-49 (AC-6/AC-17): at most one Unconsumed key per Device, enforced structurally. The
+        // filter confines uniqueness to the single live key, so the many historical Consumed/
+        // Invalidated keys (the non-unique composite index above serves those) never collide.
+        using var context = CreateContext();
+        var entityType = context.Model.FindEntityType(typeof(ActivationKey))!;
+
+        var index = entityType.GetIndexes().Single(i =>
+            i.Properties.Count == 1 && i.Properties[0].Name == nameof(ActivationKey.DeviceRecordId));
+
+        Assert.True(index.IsUnique);
+        Assert.Equal("[Status] = 'Unconsumed'", index.GetFilter());
+    }
+
+    [Fact]
     public void ActivationKey_ForeignKey_IsToTheInternalDeviceRecordId_CascadingOnDelete()
     {
         // Never to the external DeviceId, which is NULL when a key is first issued (FS-02 §1.3).

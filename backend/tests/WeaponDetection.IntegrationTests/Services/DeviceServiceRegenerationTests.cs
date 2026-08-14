@@ -1,7 +1,9 @@
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using WeaponDetection.Application.Exceptions;
 using WeaponDetection.Application.Interfaces;
 using WeaponDetection.Domain;
 using WeaponDetection.Infrastructure.Persistence;
@@ -24,24 +26,33 @@ namespace WeaponDetection.IntegrationTests.Services;
 // to console/log output; captured plaintext keys are only compared in memory.
 public class DeviceServiceRegenerationTests : IDisposable
 {
+    private readonly string _connectionString;
     private readonly WeaponDetectionDbContext _dbContext;
     private readonly ActivationKeyGenerator _generator = new(new Pbkdf2PasswordHasher());
     private readonly DeviceService _service;
 
     public DeviceServiceRegenerationTests()
     {
-        var connectionString =
+        _connectionString =
             $"Server=localhost\\SQLEXPRESS;Database=WeaponDetectionDeviceServiceRegenTests_{Guid.NewGuid():N};" +
             "Trusted_Connection=True;TrustServerCertificate=True;";
 
         var options = new DbContextOptionsBuilder<WeaponDetectionDbContext>()
-            .UseSqlServer(connectionString)
+            .UseSqlServer(_connectionString)
             .Options;
 
         _dbContext = new WeaponDetectionDbContext(options);
         _dbContext.Database.Migrate();
 
         _service = new DeviceService(_generator, TestDeviceSecretProtector.Create(), _dbContext);
+    }
+
+    private WeaponDetectionDbContext CreateContextOnSameDatabase()
+    {
+        var options = new DbContextOptionsBuilder<WeaponDetectionDbContext>()
+            .UseSqlServer(_connectionString)
+            .Options;
+        return new WeaponDetectionDbContext(options);
     }
 
     public void Dispose()
@@ -56,7 +67,7 @@ public class DeviceServiceRegenerationTests : IDisposable
     private async Task<(Guid BranchId, Guid DeviceRecordId, string OriginalKeyId)> SeedBranchAsync()
     {
         var branch = new Branch("Downtown Branch", "1 High Street", "ops@example.local");
-        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1");
+        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1", $"cam-{Guid.NewGuid():N}");
         var provisioning = _service.ProvisionForBranch(branch.BranchId);
 
         _dbContext.Branches.Add(branch);
@@ -231,7 +242,7 @@ public class DeviceServiceRegenerationTests : IDisposable
     }
 
     [Fact]
-    public async Task RegenerateActivationKeyAsync_InvalidatesAnAlreadyConsumedKey_RegardlessOfState()
+    public async Task RegenerateActivationKeyAsync_LeavesAnAlreadyConsumedKeyConsumed_AndAddsANewUnconsumed()
     {
         var (branchId, deviceRecordId, originalKeyId) = await SeedBranchAsync();
         await ActivateSeededDeviceAsync(branchId, originalKeyId);
@@ -243,25 +254,211 @@ public class DeviceServiceRegenerationTests : IDisposable
             .Where(k => k.DeviceRecordId == deviceRecordId)
             .ToListAsync();
 
-        // The previously Consumed key is now Invalidated (FS-02 §5.3 step 3 "regardless of its prior
-        // consumption state", AC-5); the fresh key is Unconsumed.
-        Assert.Equal(ActivationKeyStatus.Invalidated, keys.Single(k => k.ActivationKeyId == originalKeyId).Status);
+        // IP-05 T-50: only Unconsumed keys are invalidated. The already-Consumed key is historical and
+        // is left Consumed (not incorrectly altered); the fresh key is the single Unconsumed one.
+        Assert.Equal(ActivationKeyStatus.Consumed, keys.Single(k => k.ActivationKeyId == originalKeyId).Status);
         Assert.Equal(ActivationKeyStatus.Unconsumed, keys.Single(k => k.ActivationKeyId == newKeyId).Status);
+        Assert.Single(keys, k => k.Status == ActivationKeyStatus.Unconsumed);
     }
 
+    // --- IP-05 T-50: immediate credential revocation on regeneration ---------------------------
+
     [Fact]
-    public async Task RegenerateActivationKeyAsync_ForAnActivatedDevice_RetainsItsActivatedState()
+    public async Task RegenerateActivationKeyAsync_ForAnActivatedDevice_RevokesSecret_AndRequiresReactivation()
     {
         var (branchId, deviceRecordId, originalKeyId) = await SeedBranchAsync();
         var assignedDeviceId = await ActivateSeededDeviceAsync(branchId, originalKeyId);
 
         await _service.RegenerateActivationKeyAsync(branchId);
 
-        // Reactivation regenerates the key while the device is still Activated; regeneration does not
-        // deactivate it or disturb its assigned DeviceId (FS-02 §5.8, AC-7).
+        // Regenerating an activated device's key immediately revokes its shared secret and moves it to
+        // ReactivationRequired, retaining the permanent DeviceId (FS-02 §5.3 amended, AC-2/AC-3/AC-4).
         var device = await _dbContext.Devices.AsNoTracking()
             .SingleAsync(d => d.DeviceRecordId == deviceRecordId);
-        Assert.Equal(DeviceActivationStatus.Activated, device.ActivationStatus);
+        Assert.Equal(DeviceActivationStatus.ReactivationRequired, device.ActivationStatus);
+        Assert.Null(device.ProtectedSharedSecret);
         Assert.Equal(assignedDeviceId, device.DeviceId);
+
+        var unconsumed = await _dbContext.ActivationKeys.AsNoTracking()
+            .CountAsync(k => k.DeviceRecordId == deviceRecordId && k.Status == ActivationKeyStatus.Unconsumed);
+        Assert.Equal(1, unconsumed);
+    }
+
+    [Fact]
+    public async Task RegenerateActivationKeyAsync_ForAReactivationRequiredDevice_StaysReactivationRequired_AndReplacesTheUnconsumedKey()
+    {
+        var (branchId, deviceRecordId, originalKeyId) = await SeedBranchAsync();
+        var assignedDeviceId = await ActivateSeededDeviceAsync(branchId, originalKeyId);
+
+        // First regeneration takes the device Activated -> ReactivationRequired and leaves one
+        // Unconsumed key; the second regenerates while already ReactivationRequired.
+        var first = await _service.RegenerateActivationKeyAsync(branchId);
+        var (firstKeyId, _) = SplitPlaintext(first!.PlaintextActivationKey);
+        var second = await _service.RegenerateActivationKeyAsync(branchId);
+        var (secondKeyId, _) = SplitPlaintext(second!.PlaintextActivationKey);
+
+        var device = await _dbContext.Devices.AsNoTracking()
+            .SingleAsync(d => d.DeviceRecordId == deviceRecordId);
+        Assert.Equal(DeviceActivationStatus.ReactivationRequired, device.ActivationStatus);
+        Assert.Null(device.ProtectedSharedSecret);
+        Assert.Equal(assignedDeviceId, device.DeviceId);
+
+        var keys = await _dbContext.ActivationKeys.AsNoTracking()
+            .Where(k => k.DeviceRecordId == deviceRecordId)
+            .ToListAsync();
+        Assert.Equal(ActivationKeyStatus.Invalidated, keys.Single(k => k.ActivationKeyId == firstKeyId).Status);
+        Assert.Equal(ActivationKeyStatus.Unconsumed, keys.Single(k => k.ActivationKeyId == secondKeyId).Status);
+        Assert.Single(keys, k => k.Status == ActivationKeyStatus.Unconsumed);
+    }
+
+    [Fact]
+    public async Task RegenerateActivationKeyAsync_ForAnUnactivatedDevice_StaysUnactivated_WithExactlyOneUnconsumedKey()
+    {
+        var (branchId, deviceRecordId, _) = await SeedBranchAsync();
+
+        // Succeeds without throwing — RequireReactivation() (which throws on an Unactivated device) is
+        // deliberately not called for an Unactivated device (T-50 item 8); the device is untouched.
+        var result = await _service.RegenerateActivationKeyAsync(branchId);
+        Assert.NotNull(result);
+
+        var device = await _dbContext.Devices.AsNoTracking()
+            .SingleAsync(d => d.DeviceRecordId == deviceRecordId);
+        Assert.Equal(DeviceActivationStatus.Unactivated, device.ActivationStatus);
+        Assert.Null(device.DeviceId);
+        Assert.Null(device.ProtectedSharedSecret);
+
+        var unconsumed = await _dbContext.ActivationKeys.AsNoTracking()
+            .CountAsync(k => k.DeviceRecordId == deviceRecordId && k.Status == ActivationKeyStatus.Unconsumed);
+        Assert.Equal(1, unconsumed);
+    }
+
+    [Fact]
+    public async Task RegenerateActivationKeyAsync_WhenPersistenceFails_RollsBackEverything_ReturnsNoKey_AndIsNotAConflict()
+    {
+        var (branchId, deviceRecordId, originalKeyId) = await SeedBranchAsync();
+        var assignedDeviceId = await ActivateSeededDeviceAsync(branchId, originalKeyId);
+
+        // A generator whose keyId collides with the existing Activation Key's primary key forces the
+        // replacement insert to fail with a PK violation (2627) — a persistence failure that is NOT
+        // the Unconsumed unique-index conflict, so it must surface as an unexpected error (not a
+        // regeneration conflict) and roll the whole operation back.
+        var collidingService = new DeviceService(
+            new FixedActivationKeyGenerator(originalKeyId),
+            TestDeviceSecretProtector.Create(),
+            _dbContext);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => collidingService.RegenerateActivationKeyAsync(branchId));
+        Assert.IsNotType<ActivationKeyRegenerationConflictException>(exception);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        // The rollback preserved everything: the device is still Activated with its secret and its
+        // DeviceId, the original key is unchanged, and no replacement row was committed.
+        using var verify = CreateContextOnSameDatabase();
+        var device = await verify.Devices.AsNoTracking().SingleAsync(d => d.DeviceRecordId == deviceRecordId);
+        Assert.Equal(DeviceActivationStatus.Activated, device.ActivationStatus);
+        Assert.NotNull(device.ProtectedSharedSecret);
+        Assert.Equal(assignedDeviceId, device.DeviceId);
+
+        var keys = await verify.ActivationKeys.AsNoTracking()
+            .Where(k => k.DeviceRecordId == deviceRecordId).ToListAsync();
+        var only = Assert.Single(keys);
+        Assert.Equal(originalKeyId, only.ActivationKeyId);
+        Assert.Equal(ActivationKeyStatus.Consumed, only.Status);
+    }
+
+    [Fact]
+    public async Task RegenerateActivationKeyAsync_TwoConcurrentRequests_ExactlyOneCommits_TheOtherConflictsWithNoKey()
+    {
+        var (branchId, deviceRecordId, originalKeyId) = await SeedBranchAsync();
+        var assignedDeviceId = await ActivateSeededDeviceAsync(branchId, originalKeyId);
+
+        // Two independent contexts/services on the same database contend for the single Unconsumed
+        // slot. The hooked service synchronizes both AFTER they have read the pre-state and BEFORE
+        // either writes, so they genuinely race on the T-49 unique index; the index — not timing —
+        // makes the outcome deterministic: exactly one commits, the other rolls back with a conflict.
+        using var barrier = new Barrier(2);
+
+        async Task<(ActivationKeyRegenerationResult? Result, Exception? Error)> Regenerate()
+        {
+            await using var context = CreateContextOnSameDatabase();
+            var service = new BarrierHookedDeviceService(
+                barrier,
+                new ActivationKeyGenerator(new Pbkdf2PasswordHasher()),
+                TestDeviceSecretProtector.Create(),
+                context);
+            try
+            {
+                var result = await service.RegenerateActivationKeyAsync(branchId);
+                return (result, null);
+            }
+            catch (Exception ex)
+            {
+                return (null, ex);
+            }
+        }
+
+        var outcomes = await Task.WhenAll(Task.Run(Regenerate), Task.Run(Regenerate));
+
+        var winners = outcomes.Where(o => o.Result is not null).ToList();
+        var losers = outcomes.Where(o => o.Error is not null).ToList();
+        var winner = Assert.Single(winners);
+        var loser = Assert.Single(losers);
+
+        // The loser rolled back with the typed conflict and returned no plaintext key or secret text.
+        Assert.IsType<ActivationKeyRegenerationConflictException>(loser.Error);
+        Assert.Null(loser.Result);
+        Assert.DoesNotContain("secret", loser.Error!.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        // Exactly one Unconsumed key survives, and it is the winner's — its disclosed secret verifies
+        // against the single committed row's stored hash.
+        using var verify = CreateContextOnSameDatabase();
+        var live = await verify.ActivationKeys.AsNoTracking()
+            .Where(k => k.DeviceRecordId == deviceRecordId && k.Status == ActivationKeyStatus.Unconsumed)
+            .ToListAsync();
+        var liveKey = Assert.Single(live);
+        var (winnerKeyId, winnerSecret) = SplitPlaintext(winner.Result!.PlaintextActivationKey);
+        Assert.Equal(winnerKeyId, liveKey.ActivationKeyId);
+        Assert.True(_generator.VerifySecret(winnerSecret, liveKey.SecretHash));
+
+        // Final device state: ReactivationRequired, secret revoked, permanent DeviceId unchanged.
+        var device = await verify.Devices.AsNoTracking().SingleAsync(d => d.DeviceRecordId == deviceRecordId);
+        Assert.Equal(DeviceActivationStatus.ReactivationRequired, device.ActivationStatus);
+        Assert.Null(device.ProtectedSharedSecret);
+        Assert.Equal(assignedDeviceId, device.DeviceId);
+    }
+
+    // A generator that returns a caller-chosen keyId, so a test can force a primary-key collision on
+    // the replacement insert. No real credential material — placeholder values only.
+    private sealed class FixedActivationKeyGenerator : IActivationKeyGenerator
+    {
+        private readonly string _keyId;
+
+        public FixedActivationKeyGenerator(string keyId) => _keyId = keyId;
+
+        public GeneratedActivationKey Generate() =>
+            new(_keyId, $"{_keyId}.placeholder-secret", "placeholder-secret-hash");
+
+        public bool VerifySecret(string secret, string secretHash) => false;
+    }
+
+    // Overrides the regeneration write-barrier hook so two concurrent regenerations synchronize after
+    // reading the pre-state and before writing, producing a deterministic race on the T-49 index.
+    private sealed class BarrierHookedDeviceService : DeviceService
+    {
+        private readonly Barrier _barrier;
+
+        public BarrierHookedDeviceService(
+            Barrier barrier,
+            IActivationKeyGenerator generator,
+            IDeviceSecretProtector protector,
+            WeaponDetectionDbContext dbContext)
+            : base(generator, protector, dbContext) => _barrier = barrier;
+
+        protected override Task OnBeforeRegenerationWriteAsync(CancellationToken cancellationToken)
+        {
+            _barrier.SignalAndWait(cancellationToken);
+            return Task.CompletedTask;
+        }
     }
 }

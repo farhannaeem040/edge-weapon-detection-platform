@@ -12,6 +12,7 @@ through a representation, and it is never exposed through an HTTP endpoint.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
@@ -20,6 +21,9 @@ from weapon_detection_agent.config.paths import AgentPaths
 from weapon_detection_agent.config.settings import AgentSettings
 from weapon_detection_agent.persistence.config_cache_repository import ConfigCacheRepository
 from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
+
+if TYPE_CHECKING:
+    from weapon_detection_agent.runtime.supervisor import AgentRuntimeSupervisor
 
 # The single attribute name the runtime is published under on ``app.state``.
 RUNTIME_STATE_ATTR = "runtime"
@@ -30,17 +34,20 @@ class AgentRuntime:
     """The successfully initialized Agent runtime (published on ``app.state.runtime``).
 
     Every field is safe to hold and to represent: ``settings`` redacts its Activation Key via
-    ``SecretStr``; the repositories hold only a database path; ``activation`` is a secret-free
-    result (outcome, public device/branch ids, timestamps). ``config_cache_repository`` is here so a
-    later feature can read the cache — this milestone loads it once at startup (may be empty, OI-2)
-    but stores nothing in it.
+    ``SecretStr``; the repositories hold only a database path. ``activation`` is a secret-free
+    result (outcome, public device/branch ids, timestamps) present only when startup activated
+    (Branch A/B, IP-05 T-61) — ``None`` for the validate-only and locked branches (C/D).
+    ``supervisor`` owns the operational-state coordinator and the monitor task; it holds no secret.
+    ``config_cache_repository`` is here so a later feature can read the cache — this milestone loads
+    it once at startup (may be empty, OI-2) but stores nothing in it.
     """
 
     settings: AgentSettings
     paths: AgentPaths
     identity_repository: DeviceIdentityRepository
     config_cache_repository: ConfigCacheRepository
-    activation: ActivationServiceResult
+    activation: ActivationServiceResult | None = None
+    supervisor: AgentRuntimeSupervisor | None = None
 
 
 def get_runtime(app: FastAPI) -> AgentRuntime | None:

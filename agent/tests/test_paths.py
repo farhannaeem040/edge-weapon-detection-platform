@@ -22,6 +22,7 @@ from weapon_detection_agent.config.paths import (
     DEFERRED_DIRECTORIES,
     LOGS_DIR_MODE,
     ROOT_MODE,
+    RUNTIME_DIR_MODE,
     modes_enforceable,
     resolve_paths,
 )
@@ -63,9 +64,11 @@ def test_derived_paths_are_correct(tmp_path: Path) -> None:
     assert paths.config_dir == tmp_path / "config"
     assert paths.database_dir == tmp_path / "database"
     assert paths.logs_dir == tmp_path / "logs"
+    assert paths.runtime_dir == tmp_path / "runtime"
     assert paths.database_file == tmp_path / "database" / "agent.db"
     assert paths.activation_key_file == tmp_path / "config" / "activation-key"
     assert paths.log_file == tmp_path / "logs" / "agent.log"
+    assert paths.detection_socket_file == tmp_path / "runtime" / "detection.sock"
 
 
 def test_resolve_paths_accepts_a_string_root(tmp_path: Path) -> None:
@@ -87,6 +90,7 @@ def test_provision_creates_all_managed_directories(tmp_path: Path) -> None:
     assert paths.config_dir.is_dir()
     assert paths.database_dir.is_dir()
     assert paths.logs_dir.is_dir()
+    assert paths.runtime_dir.is_dir()
 
 
 def test_provision_creates_missing_parent_directories(tmp_path: Path) -> None:
@@ -107,20 +111,20 @@ def test_provision_creates_no_files(tmp_path: Path) -> None:
     assert not paths.log_file.exists()
 
 
-def test_provision_creates_only_the_four_managed_directories(tmp_path: Path) -> None:
+def test_provision_creates_only_the_managed_directories(tmp_path: Path) -> None:
     root = tmp_path / "weapon-detection"
     resolve_paths(root).provision()
 
     entries = sorted(child.name for child in root.iterdir())
 
-    assert entries == ["config", "database", "logs"]
+    assert entries == ["config", "database", "logs", "runtime", "snapshots"]
 
 
 @pytest.mark.parametrize("excluded", DEFERRED_DIRECTORIES)
 def test_provision_does_not_create_deferred_directories(tmp_path: Path, excluded: str) -> None:
     paths = resolve_paths(tmp_path).provision()
 
-    # snapshots/, recordings/, models/, pipeline/, runtime/ have no writer in this milestone.
+    # recordings/, models/, pipeline/ have no writer in this milestone.
     assert not (paths.root / excluded).exists()
 
 
@@ -137,6 +141,7 @@ def test_provision_is_idempotent(tmp_path: Path) -> None:
     assert paths.config_dir.is_dir()
     assert paths.database_dir.is_dir()
     assert paths.logs_dir.is_dir()
+    assert paths.runtime_dir.is_dir()
 
 
 def test_provision_preserves_a_populated_directory(tmp_path: Path) -> None:
@@ -161,6 +166,7 @@ def test_provision_applies_adr_008_modes(tmp_path: Path) -> None:
     assert _mode_of(paths.config_dir) == CONFIG_DIR_MODE
     assert _mode_of(paths.database_dir) == DATABASE_DIR_MODE
     assert _mode_of(paths.logs_dir) == LOGS_DIR_MODE
+    assert _mode_of(paths.runtime_dir) == RUNTIME_DIR_MODE
 
 
 @requires_posix_modes
@@ -179,7 +185,9 @@ def test_config_and_database_dirs_are_not_group_or_world_accessible(tmp_path: Pa
     paths = resolve_paths(tmp_path).provision()
 
     # The secret-bearing directories must expose nothing to group or other (ARCH-001 §13.3).
-    for secret_dir in (paths.config_dir, paths.database_dir):
+    # runtime/ joins this list at IP-07 T-82 — it holds the detection event Unix domain socket,
+    # a co-located-process IPC channel scoped no more openly than the credential directories.
+    for secret_dir in (paths.config_dir, paths.database_dir, paths.runtime_dir):
         mode = _mode_of(secret_dir)
         assert mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
 
@@ -201,7 +209,14 @@ def test_managed_directories_lists_root_first(tmp_path: Path) -> None:
 
     # Root must precede its children so it exists before they are created.
     assert directories[0] == paths.root
-    assert set(directories) == {paths.root, paths.config_dir, paths.database_dir, paths.logs_dir}
+    assert set(directories) == {
+        paths.root,
+        paths.config_dir,
+        paths.database_dir,
+        paths.logs_dir,
+        paths.runtime_dir,
+        paths.snapshots_dir,
+    }
 
 
 def test_no_filesystem_access_on_import() -> None:

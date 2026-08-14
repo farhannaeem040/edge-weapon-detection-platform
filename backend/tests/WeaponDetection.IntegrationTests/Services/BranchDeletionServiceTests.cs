@@ -51,8 +51,8 @@ public class BranchDeletionServiceTests : IDisposable
     private async Task<Guid> CreateBranchAsync()
     {
         var result = await _branchService.CreateBranchAsync(new NewBranchRequest(
-            "Downtown", "1 High Street", "ops@example.invalid",
-            [new NewCameraRequest("Camera 1", "rtsp://camera.example.invalid:554/s1")]));
+            "Downtown", "1 High Street", "ops@example.invalid", "100.98.226.80", 8554,
+            [new NewCameraRequest("Camera 1", "rtsp://camera.example.invalid:554/s1", $"cam-{Guid.NewGuid():N}")]));
         return result.Branch.BranchId;
     }
 

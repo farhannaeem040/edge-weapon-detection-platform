@@ -5,12 +5,33 @@ import { Observable, catchError, map, of, throwError } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { ApiEnvelope } from '../auth/auth.service';
 import {
+  DeviceNetworkUpdate,
   Branch,
   CreateBranchRequest,
   CreatedBranch,
   RegeneratedActivationKey,
+  SetDeviceNetworkRequest,
   UpdateBranchRequest,
 } from './branch.models';
+
+/** The Backend's `errorCode` for a lost concurrent-regeneration race (IP-05 §3, T-50/T-52). */
+export const ACTIVATION_KEY_REGENERATION_CONFLICT = 'ACTIVATION_KEY_REGENERATION_CONFLICT';
+
+/**
+ * The typed outcome of a regeneration that lost the race to a concurrent one (IP-05 §3): the Backend
+ * answers `409` with `errorCode: ACTIVATION_KEY_REGENERATION_CONFLICT`, having rolled back and
+ * committed **no** key. It is modelled as its own error — distinct from a generic failure and from a
+ * `404` — so the view can render safe retry guidance without ever displaying a key it never received,
+ * and without assuming whether the competing request succeeded. It carries no key, secret, or id: a
+ * losing request is handed nothing that was never committed (matching the Backend exception's own
+ * safe-to-log contract), so this type has nothing to surface.
+ */
+export class ActivationKeyRegenerationConflictError extends Error {
+  constructor() {
+    super('A concurrent Activation Key regeneration won the race; no key was issued to this request.');
+    this.name = 'ActivationKeyRegenerationConflictError';
+  }
+}
 
 /**
  * The Dashboard's client for the Branch endpoints (IP-01 T-26/T-27/T-28, consuming T-16/T-18).
@@ -191,13 +212,80 @@ export class BranchService {
 
           return activationKey;
         }),
-        catchError((error: unknown) =>
-          error instanceof HttpErrorResponse && error.status === 404
-            ? of(null)
-            : throwError(() => error),
-        ),
+        catchError((error: unknown) => {
+          if (error instanceof HttpErrorResponse) {
+            // A documented not-found outcome (FS-02 §13), reported as null rather than a fault.
+            if (error.status === 404) {
+              return of(null);
+            }
+
+            // A lost concurrent-regeneration race (IP-05 §3): the Backend rolled back and committed no
+            // key, so this must never reach the success path. It is raised as its own typed error so
+            // the view can show safe retry guidance with no key, distinct from a generic failure. The
+            // 409 status is the signal; the errorCode is asserted when present but is not required, so
+            // a body-less 409 is still handled safely rather than leaking into the generic error.
+            const errorCode = conflictErrorCode(error);
+            if (error.status === 409 && (errorCode === null || errorCode === ACTIVATION_KEY_REGENERATION_CONFLICT)) {
+              return throwError(() => new ActivationKeyRegenerationConflictError());
+            }
+          }
+
+          return throwError(() => error);
+        }),
       );
   }
+
+  /**
+   * Sets (or clears, with `null`) the annotated-output base URL advertised for a branch's Device
+   * (FS-12 §4) — `PUT /api/v1/devices/{branchId}/network`.
+   *
+   * Addressed by *branch* id, matching `regenerateActivationKey`: it is the only always-present,
+   * client-visible handle to a branch's single Device, and it works before the Device has activated.
+   *
+   * This is discovery metadata only. It never touches device identity, credentials, activation
+   * state, cameras, or camera output paths, and by contract it does not change the Agent's pipeline
+   * configuration version — so it cannot restart the Bridge.
+   *
+   * Returns the stored (normalised) value, or `null` for a documented not-found branch.
+   */
+  setDeviceNetwork(
+    branchId: string,
+    jetsonHost: string | null,
+    rtspOutputPort: number | null,
+  ): Observable<DeviceNetworkUpdate | null> {
+    const request: SetDeviceNetworkRequest = { jetsonHost, rtspOutputPort };
+
+    return this.http
+      .put<ApiEnvelope<DeviceNetworkUpdate>>(
+        `${this.devicesUrl}/${encodeURIComponent(branchId)}/network`,
+        request,
+      )
+      .pipe(
+        map((envelope) => unwrap(envelope)),
+        catchError((error: unknown) => {
+          if (error instanceof HttpErrorResponse && error.status === 404) {
+            return of(null);
+          }
+
+          return throwError(() => error);
+        }),
+      );
+  }
+}
+
+/**
+ * Reads the `errorCode` from an error envelope body if one is present, without trusting its shape:
+ * an HTTP error's `error` is whatever the server sent (or a parse failure), so it is probed
+ * defensively and any non-string is treated as absent.
+ */
+function conflictErrorCode(error: HttpErrorResponse): string | null {
+  const body: unknown = error.error;
+  if (body !== null && typeof body === 'object' && 'errorCode' in body) {
+    const code = (body as { errorCode?: unknown }).errorCode;
+    return typeof code === 'string' ? code : null;
+  }
+
+  return null;
 }
 
 /**

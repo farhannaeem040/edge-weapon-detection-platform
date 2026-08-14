@@ -26,6 +26,12 @@ public class BranchConfiguration : IEntityTypeConfiguration<Branch>
             .IsRequired()
             .HasMaxLength(Branch.ContactDetailsMaxLength);
 
+        // FS-09 §4/§14: nullable, no backfill — every pre-existing Branch keeps TimeZoneId=NULL and
+        // resolves its daily Alert quota day in UTC until an Admin sets one.
+        builder.Property(b => b.TimeZoneId)
+            .IsRequired(false)
+            .HasMaxLength(Branch.TimeZoneIdMaxLength);
+
         // No unique index on Name (or any other Branch column): IP-01 §4 lists no constraint for
         // Branch, and neither FS-02 nor ARCH-001 forbids two branches sharing a name. Adding one
         // would invent a business rule no approved document states.

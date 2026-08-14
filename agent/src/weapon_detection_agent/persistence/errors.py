@@ -31,3 +31,36 @@ class InvalidIdentityStateError(RepositoryError):
 class InvalidConfigCacheStateError(RepositoryError):
     """The stored configuration cache is in a state that should not occur — more than one row, or an
     unparseable stored timestamp."""
+
+
+class DetectionEventAlreadyExistsError(RepositoryError):
+    """A detection event insert used an ``event_id`` that already has a stored row.
+
+    The repository never overwrites an already-persisted detection event (IP-07 T-85) — a duplicate
+    is a defensive, expected-to-be-unreachable condition (the cooldown tracker should prevent it in
+    practice), surfaced clearly rather than silently replacing a real security event.
+    """
+
+
+class InvalidDetectionEventStateError(RepositoryError):
+    """A stored detection event row is in a state that should not occur — an unparseable stored
+    timestamp or an invalid ``event_id`` — so it cannot be reconstructed as a trustworthy
+    :class:`~weapon_detection_agent.detection.models.DetectionEvent`."""
+
+
+class SnapshotOutboxAlreadyExistsError(RepositoryError):
+    """A ``SnapshotOutbox`` create-captured-row call used an ``event_id`` that already has a row.
+
+    The repository never overwrites an already-captured snapshot row (FS-08 §6/IP-10 T-142) — one
+    file per accepted ``EventId``, enforced by the ``EventId`` primary key.
+    """
+
+
+class SnapshotOutboxAlertConflictError(RepositoryError):
+    """``associate_alert_id`` was called with an ``AlertId`` that conflicts with the one already
+    stored for that ``EventId``.
+
+    Idempotent re-association with the *same* ``AlertId`` is a no-op; naming a *different* one is
+    treated as an integrity issue (mirrors FS-06 §5.2's ``EVENT_DATA_CONFLICT`` discipline) and is
+    never silently overwritten.
+    """

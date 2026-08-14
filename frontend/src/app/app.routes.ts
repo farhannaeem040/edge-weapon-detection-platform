@@ -1,38 +1,49 @@
 import { Routes } from '@angular/router';
 
+import { AlertDetailComponent } from './alerts/alert-detail';
+import { AlertListComponent } from './alerts/alert-list';
 import { BranchCreateComponent } from './branches/branch-create';
 import { BranchDetailComponent } from './branches/branch-detail';
 import { BranchEditComponent } from './branches/branch-edit';
 import { BranchListComponent } from './branches/branch-list';
 import { LoginComponent } from './auth/login';
-import { DashboardComponent } from './shared/dashboard';
+import { DashboardSummaryComponent } from './dashboard/dashboard-summary';
+import { GlobalMonitoringComponent } from './monitoring/global-monitoring';
 import { ShellComponent } from './shared/shell';
 import { authGuard } from './core/auth.guard';
 
 /**
- * Application routes (IP-01 T-23, T-24, T-26, T-27; shell added by the Stitch redesign).
+ * Application routes (IP-01 T-23, T-24, T-26, T-27; shell added by the Stitch redesign; dashboard
+ * graduated to a real feature by FS-10/IP-12 T-212).
  *
  * `/login` is public — it is what issues a session, so it cannot require one (FS-01 §9.1, AC-4).
- * `/dashboard` and the branch views are protected; `authGuard` keeps them from rendering without a
- * local session, as a UX control only (FS-01 §10 — the Backend enforces the real boundary, and it
- * rejects the underlying `GET /api/v1/branches` calls independently of anything decided here).
+ * Everything else is protected; `authGuard` keeps it from rendering without a local session, as a UX
+ * control only (FS-01 §10 — the Backend enforces the real boundary independently of anything decided
+ * here).
  *
- * The branch views now render inside `ShellComponent` (the authenticated sidebar/header frame) via a
- * parent layout route. Every path is preserved exactly — the shell route's path is empty, so
- * `/branches`, `/branches/new`, `/branches/:branchId/edit`, and `/branches/:branchId` are unchanged —
- * and `authGuard` on the parent protects all of them. `/dashboard` keeps its own standalone route
- * (it is not part of the shell's navigation; see `ShellComponent`).
+ * `/dashboard` is now a `ShellComponent` child alongside the branch views, and the landing redirect
+ * moves from `branches` to `dashboard` (FS-10 §5 target user journey: an Admin's first stop is the
+ * operational summary, not the branch list — the branch views remain fully reachable from the shell's
+ * own nav). Declared before `branches/:branchId` for the same reason `branches/new` is: literal
+ * segments must be matched before a parameterised sibling can swallow them.
  */
 export const routes: Routes = [
   { path: 'login', component: LoginComponent },
-  { path: 'dashboard', component: DashboardComponent, canActivate: [authGuard] },
   {
-    // Authenticated shell layout. The guard here runs when any child is activated, so the branch
-    // views stay behind the same UX gate they were before.
+    // Authenticated shell layout. The guard here runs when any child is activated.
     path: '',
     component: ShellComponent,
     canActivate: [authGuard],
     children: [
+      { path: 'dashboard', component: DashboardSummaryComponent },
+      { path: 'alerts', component: AlertListComponent },
+      // FS-14 §5, IP-16 UI enhancement: a global entry point into the same live-monitoring
+      // feature already reachable per-Branch (see BranchDetailComponent's own tab below).
+      { path: 'monitoring', component: GlobalMonitoringComponent },
+      // Declared before `alerts/:alertId`: an Alert id is a GUID and would never literally be "new"
+      // or another Alert route segment, but the ordering convention is kept consistent with `branches`
+      // regardless, since this feature adds no other literal segment under `alerts/`.
+      { path: 'alerts/:alertId', component: AlertDetailComponent },
       { path: 'branches', component: BranchListComponent },
       // Declared before `branches/:branchId`: the router takes the first match, and the parameterised
       // route would otherwise capture `new` as a branch id and try to fetch a branch called "new".
@@ -41,8 +52,8 @@ export const routes: Routes = [
       // detail route below, but is kept adjacent to the other write routes for readability.
       { path: 'branches/:branchId/edit', component: BranchEditComponent },
       { path: 'branches/:branchId', component: BranchDetailComponent },
-      { path: '', pathMatch: 'full', redirectTo: 'branches' },
+      { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
     ],
   },
-  { path: '**', redirectTo: 'branches' },
+  { path: '**', redirectTo: 'dashboard' },
 ];

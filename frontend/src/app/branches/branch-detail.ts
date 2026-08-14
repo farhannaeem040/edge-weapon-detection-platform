@@ -3,17 +3,23 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  computed,
   inject,
   signal,
 } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 
 import { ActivationKeyDisplayComponent } from './activation-key-display';
-import { Branch } from './branch.models';
-import { BranchService } from './branch.service';
+import { Branch, DEFAULT_RTSP_OUTPUT_PORT } from './branch.models';
+import { ActivationKeyRegenerationConflictError, BranchService } from './branch.service';
 import { BranchDeleteConfirmComponent } from './branch-delete-confirm';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
+import { LiveMonitoringComponent } from './live-monitoring';
+
+/** Query param naming the active tab (FS-14 §5, IP-16 T-12) — 'overview' is the default/absent value. */
+export const BRANCH_DETAIL_TAB_PARAM = 'tab';
+export const BRANCH_DETAIL_MONITORING_TAB = 'monitoring';
 
 /**
  * One branch in full: its details, its configured cameras, its Device's activation state (IP-01
@@ -55,6 +61,7 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
     ActivationKeyDisplayComponent,
     DeviceStatusBadgeComponent,
     BranchDeleteConfirmComponent,
+    LiveMonitoringComponent,
   ],
   template: `
     <section class="branch">
@@ -163,6 +170,38 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
           />
         }
 
+        <!-- FS-14 §5, IP-16 T-12: Branch-level tabs. Live Monitoring is a separate tab rather than
+             a new section on the existing page, per the design's "Overview | Alerts | Live
+             Monitoring" precedent — no separate tab component exists yet in this codebase, so this
+             is plain buttons + a tablist role, following this file's own .btn conventions. -->
+        <div class="branch__tabs" role="tablist" aria-label="Branch views">
+          <button
+            type="button"
+            role="tab"
+            class="branch__tab"
+            [class.branch__tab--active]="activeTab() === 'overview'"
+            [attr.aria-selected]="activeTab() === 'overview'"
+            (click)="setActiveTab('overview')"
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="branch__tab"
+            [class.branch__tab--active]="activeTab() === 'monitoring'"
+            [attr.aria-selected]="activeTab() === 'monitoring'"
+            (click)="setActiveTab('monitoring')"
+          >
+            Live Monitoring
+          </button>
+        </div>
+
+        @if (activeTab() === 'monitoring') {
+          <app-live-monitoring [branchId]="branch.branchId" />
+        }
+
+        @if (activeTab() === 'overview') {
         <div class="branch__grid">
           <section class="branch__card card">
             <header class="card__header"><h3>Branch information</h3></header>
@@ -182,12 +221,44 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 [status]="branch.device.activationStatus"
               />
 
-              @if (branch.device.activationStatus === 'Activated' && branch.device.deviceId) {
+              @if (
+                (branch.device.activationStatus === 'Activated' ||
+                  branch.device.activationStatus === 'ReactivationRequired') &&
+                branch.device.deviceId
+              ) {
+                <!-- The Device ID is shown once a Device has one. It survives a credential
+                     revocation (FS-02 §4.2): a ReactivationRequired Device keeps the same permanent
+                     Device ID, so it is still displayed here. Status is trusted, not deviceId's mere
+                     presence, so a self-contradictory payload never over-reports. -->
                 <p class="branch__device-id">Device ID: {{ branch.device.deviceId }}</p>
               } @else {
                 <!-- No placeholder, no blank field, no fabricated identifier: an unactivated Device has
                      no Device ID yet, and saying so is the honest rendering (FS-02 §10.3, AC-7). -->
                 <p class="branch__device-id-absent">Device ID: not yet assigned</p>
+              }
+
+              <!--
+                FS-12 §4 — the Jetson's network location. Displayed as two independent facts plus the
+                Backend-computed base, rather than a URL the browser assembles: composing it here
+                would mean re-implementing IPv6 bracketing and the legacy-column fallback in the
+                client. Precedence is the Backend's value, then an explicit "not configured" — never
+                a guessed address (task Phase 10).
+              -->
+              @if (branch.device.jetsonHost) {
+                <p class="branch__device-jetson-host">Jetson host: {{ branch.device.jetsonHost }}</p>
+                <p class="branch__device-rtsp-port">
+                  RTSP output port: {{ branch.device.rtspOutputPort ?? defaultRtspOutputPort }}
+                </p>
+              } @else {
+                <p class="branch__device-jetson-host-absent status-text">
+                  Jetson output network is not configured
+                </p>
+              }
+
+              @if (branch.device.annotatedOutputBaseUrl) {
+                <p class="branch__device-output-base">
+                  Annotated output base: {{ branch.device.annotatedOutputBaseUrl }}
+                </p>
               }
 
               <!-- The action is offered in both Device states. FS-02 §5.3/FR-BRN-005 restrict it to
@@ -205,18 +276,39 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                 } @else if (confirming()) {
                   <div
                     class="branch__confirm"
+                    [class.branch__confirm--destructive]="regenerationIsDestructive()"
                     role="group"
                     aria-labelledby="regenerate-confirm-heading"
                   >
                     <h4 id="regenerate-confirm-heading">Regenerate this branch's Activation Key?</h4>
 
-                    <ul class="branch__confirm-effects">
-                      <li>The current Activation Key stops working immediately and cannot be restored.</li>
-                      <li>A new Activation Key is generated and shown to you once.</li>
-                      <li>The branch's public Device ID does not change.</li>
-                      <li>An already activated Device is not deactivated and keeps running.</li>
-                      <li>The new key is required for the next activation or reactivation.</li>
-                    </ul>
+                    @if (regenerationIsDestructive()) {
+                      <!-- Activated or ReactivationRequired: regeneration is a security-first credential
+                           reset (IP-05 §1). The warning states exactly what it does — revoke now, lock
+                           the running Jetson once it detects the revocation, require a manual
+                           reactivation, and preserve the Device ID — so the Admin confirms with full
+                           knowledge (FS-02 §5.3, AC-8). -->
+                      <p class="branch__confirm-warning" role="alert">
+                        This is a destructive credential reset.
+                      </p>
+                      <ul class="branch__confirm-effects">
+                        <li>The current device credential is revoked immediately and cannot be restored.</li>
+                        <li>The running Jetson will lock itself once it detects the revocation.</li>
+                        <li>The replacement Activation Key must be provisioned on the Jetson manually.</li>
+                        <li>The branch's public Device ID is preserved.</li>
+                        <li>The new Activation Key is shown to you once and cannot be retrieved again.</li>
+                      </ul>
+                    } @else {
+                      <!-- Unactivated: there is no live credential and no running Jetson to revoke, so
+                           this is the ordinary first-activation key-generation flow, with no
+                           destructive credential-revocation warning (IP-05 P1, FS-02 §5.3). -->
+                      <ul class="branch__confirm-effects">
+                        <li>This branch's Device has not been activated, so no running device is affected.</li>
+                        <li>The current unused Activation Key stops working immediately and is replaced.</li>
+                        <li>The branch's public Device ID is unaffected.</li>
+                        <li>The new Activation Key is shown to you once and cannot be retrieved again.</li>
+                      </ul>
+                    }
 
                     <div class="branch__confirm-actions">
                       <button
@@ -231,12 +323,20 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                       <!-- Disabled while in flight: a second click must not invalidate the key the
                            first one just minted, before the Admin has even seen it. -->
                       <button
-                        class="branch__confirm-regenerate btn btn--danger"
+                        class="branch__confirm-regenerate btn"
+                        [class.btn--danger]="regenerationIsDestructive()"
+                        [class.btn--primary]="!regenerationIsDestructive()"
                         type="button"
                         [disabled]="regenerating()"
                         (click)="regenerate()"
                       >
-                        {{ regenerating() ? 'Regenerating…' : 'Regenerate key' }}
+                        {{
+                          regenerating()
+                            ? 'Regenerating…'
+                            : regenerationIsDestructive()
+                              ? 'Regenerate key'
+                              : 'Generate new key'
+                        }}
                       </button>
                     </div>
                   </div>
@@ -245,7 +345,18 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
                     Regenerate Activation Key
                   </button>
 
-                  @if (regenerateNotFound()) {
+                  @if (regenerateConflict()) {
+                    <!-- The Backend answered 409 ACTIVATION_KEY_REGENERATION_CONFLICT (IP-05 §3): a
+                         concurrent regeneration won the race and this request committed no key. No key
+                         is shown (there is none), and the message makes no claim about whether the
+                         competing request succeeded — the refreshed state above is the source of
+                         truth, and the Admin may simply try again if they still need a new key. -->
+                    <p class="branch__regenerate-status banner banner--warning" role="alert">
+                      Another regeneration for this branch was completed at the same time, so no key
+                      was issued to you. Review the branch's current state above and try again if you
+                      still need a new Activation Key.
+                    </p>
+                  } @else if (regenerateNotFound()) {
                     <p class="branch__regenerate-status banner banner--error" role="alert">
                       This branch's Device was not found. It may have been removed.
                     </p>
@@ -276,20 +387,96 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
               <ul class="branch__camera-list">
                 @for (camera of branch.cameras; track camera.cameraId) {
                   <li class="branch__camera">
-                    <span class="branch__camera-name">{{ camera.name }}</span>
-                    <span class="branch__camera-url">{{ camera.rtspUrl }}</span>
-                    <span
-                      class="branch__camera-enabled badge"
-                      [class.branch__camera-enabled--on]="camera.enabled"
-                      [class.branch__camera-enabled--off]="!camera.enabled"
-                      >{{ camera.enabled ? 'Enabled' : 'Disabled' }}</span
-                    >
+                    <div class="branch__camera-primary">
+                      <span class="branch__camera-name">
+                        <span class="branch__camera-field-label">Camera name:</span>
+                        {{ camera.name }}
+                      </span>
+                      <!--
+                        FS-12 §2: the *public* stream identifier — what an operator reads and types.
+                        The immutable cameraId is deliberately not shown as the primary identifier;
+                        it stays available below, explicitly labelled as internal.
+                      -->
+                      <span class="branch__camera-key">
+                        <span class="branch__camera-field-label">Camera key:</span>
+                        {{ camera.cameraKey }}
+                      </span>
+                      <span class="branch__camera-source-order">
+                        <span class="branch__camera-field-label">Source order:</span>
+                        {{ camera.sourceOrder }}
+                      </span>
+                      <span class="branch__camera-url">
+                        <span class="branch__camera-field-label">Input stream URL:</span>
+                        {{ camera.rtspUrl }}
+                      </span>
+                    </div>
+
+                    <span class="branch__camera-status">
+                      <span class="branch__camera-field-label">Status:</span>
+                      <span
+                        class="branch__camera-enabled badge"
+                        [class.branch__camera-enabled--on]="camera.enabled"
+                        [class.branch__camera-enabled--off]="!camera.enabled"
+                        >{{ camera.enabled ? 'Enabled' : 'Disabled' }}</span
+                      >
+                    </span>
+
+                    <!--
+                      FS-11 §11: the annotated output is a *different* stream from the input above —
+                      the same camera after inference, with detection boxes drawn on it. Shown
+                      separately and labelled so the two can never be confused. Null base URL is
+                      rendered as an explicit "not configured" state, never a guessed address.
+                    -->
+                    <span class="branch__camera-output">
+                      <span class="branch__camera-field-label">Annotated output URL:</span>
+                      @if (camera.outputStreamUrl) {
+                        {{ camera.outputStreamUrl }}
+                      } @else {
+                        <span class="branch__camera-output-missing status-text">
+                          Output base URL not configured
+                        </span>
+                      }
+                    </span>
+
+                    @if (clipboardAvailable) {
+                      <button
+                        class="branch__camera-copy btn btn--secondary"
+                        type="button"
+                        (click)="copyCameraStreamUrl(camera.cameraId, camera.rtspUrl)"
+                      >
+                        Copy input URL
+                      </button>
+                      @if (camera.outputStreamUrl) {
+                        <button
+                          class="branch__camera-copy-output btn btn--secondary"
+                          type="button"
+                          (click)="copyCameraOutputUrl(camera.cameraId, camera.outputStreamUrl)"
+                        >
+                          Copy output URL
+                        </button>
+                      }
+                    } @else {
+                      <p class="branch__camera-copy-unavailable status-text">
+                        Copying is unavailable in this browser. Select the URL above and copy it manually.
+                      </p>
+                    }
+
+                    @if (cameraCopyState(camera.cameraId) === 'copied') {
+                      <p class="branch__camera-copy-status status-text" role="status">
+                        Stream URL copied to the clipboard.
+                      </p>
+                    } @else if (cameraCopyState(camera.cameraId) === 'failed') {
+                      <p class="branch__camera-copy-status status-text--error" role="alert">
+                        The URL could not be copied. Select it above and copy it manually.
+                      </p>
+                    }
                   </li>
                 }
               </ul>
             }
           </div>
         </section>
+        }
       }
     </section>
   `,
@@ -305,6 +492,30 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       display: inline-flex;
       align-items: center;
       gap: var(--space-2);
+    }
+
+    .branch__tabs {
+      display: flex;
+      gap: var(--space-2);
+      border-bottom: 1px solid var(--color-border);
+      margin-bottom: var(--space-5);
+    }
+
+    .branch__tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: var(--space-2) var(--space-1) var(--space-3);
+      font-family: var(--font-heading);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-medium);
+      color: var(--color-text-muted);
+      cursor: pointer;
+    }
+
+    .branch__tab--active {
+      color: var(--color-text);
+      border-bottom-color: var(--color-primary, #1a56db);
     }
 
     .branch__grid {
@@ -359,6 +570,18 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       margin: 0 0 var(--space-2);
     }
 
+    /* A destructive reset is bordered and headed in the danger colour so it does not read as the
+       same benign generate-a-new-key prompt an unactivated branch shows. */
+    .branch__confirm--destructive {
+      border-color: var(--color-danger, #ba1a1a);
+    }
+
+    .branch__confirm-warning {
+      margin: 0 0 var(--space-2);
+      font-weight: var(--weight-medium);
+      color: var(--color-danger, #ba1a1a);
+    }
+
     .branch__confirm-effects {
       margin: 0 0 var(--space-4);
       padding-left: 1.2rem;
@@ -378,6 +601,12 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       margin-top: var(--space-3);
     }
 
+    .branch__camera-field-label {
+      font-weight: var(--weight-medium);
+      color: var(--color-text-faint);
+      margin-right: var(--space-1);
+    }
+
     .branch__camera-list {
       list-style: none;
       margin: 0;
@@ -386,8 +615,9 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
 
     .branch__camera {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: var(--space-4);
+      gap: var(--space-2) var(--space-4);
       padding: var(--space-3) 0;
       border-bottom: 1px solid var(--color-border);
     }
@@ -396,17 +626,30 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       border-bottom: 0;
     }
 
+    .branch__camera-primary {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+      flex: 1 1 20rem;
+      min-width: 0;
+    }
+
     .branch__camera-name {
       font-weight: var(--weight-medium);
-      min-width: 9rem;
     }
 
     .branch__camera-url {
-      flex: 1;
       font-family: var(--font-mono);
       font-size: var(--text-sm);
       color: var(--color-text-muted);
       overflow-wrap: anywhere;
+      user-select: all;
+    }
+
+    .branch__camera-status {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
     }
 
     .branch__camera-enabled--on {
@@ -421,17 +664,26 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       border-color: var(--color-border);
     }
 
+    .branch__camera-copy-status,
+    .branch__camera-copy-unavailable {
+      flex-basis: 100%;
+      margin: 0;
+    }
+
     @media (max-width: 640px) {
       .branch__camera {
         flex-direction: column;
         align-items: flex-start;
-        gap: var(--space-1);
+        gap: var(--space-2);
       }
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class BranchDetailComponent implements OnInit, OnDestroy {
+  /** Mirrors the Backend default, shown when a Device stores a host but no explicit port. */
+  protected readonly defaultRtspOutputPort = DEFAULT_RTSP_OUTPUT_PORT;
+
   private readonly branchService = inject(BranchService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
@@ -443,6 +695,29 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   protected readonly notFound = signal(false);
   protected readonly failed = signal(false);
 
+  /**
+   * FS-14 §5, IP-16 T-12/T-13: the active Branch-level tab, read from and written back to the
+   * `tab` query param — the same mechanism that lets `alert-detail.ts`'s "View Live Camera"/
+   * "View Live Inference" actions deep-link straight into the monitoring tab preselected.
+   */
+  protected readonly activeTab = signal<'overview' | 'monitoring'>('overview');
+
+  /**
+   * Whether the browser exposes `navigator.clipboard` (absent in insecure contexts and older
+   * browsers) — read once, purely to decide whether to offer each camera's copy button (mirrors
+   * `ActivationKeyDisplayComponent`'s identical check).
+   */
+  protected readonly clipboardAvailable =
+    typeof navigator !== 'undefined' && navigator.clipboard !== undefined;
+
+  /**
+   * The outcome of the most recent "Copy URL" press, per camera (a branch can have more than one) —
+   * `idle`/absent until that camera's button is pressed.
+   */
+  protected readonly cameraCopyStates = signal<ReadonlyMap<string, 'idle' | 'copied' | 'failed'>>(
+    new Map(),
+  );
+
   /** True once the Admin has asked to regenerate and before they confirm or cancel. */
   protected readonly confirming = signal(false);
 
@@ -451,6 +726,25 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
 
   protected readonly regenerateFailed = signal(false);
   protected readonly regenerateNotFound = signal(false);
+
+  /**
+   * True when the Backend answered 409 ACTIVATION_KEY_REGENERATION_CONFLICT (IP-05 §3): a concurrent
+   * regeneration won the race and this request committed no key. Rendered as safe retry guidance,
+   * separate from the generic failure and the not-found states, and never alongside a key.
+   */
+  protected readonly regenerateConflict = signal(false);
+
+  /**
+   * Whether regenerating this branch's key is a destructive credential reset — true only when the
+   * Device is `Activated` or `ReactivationRequired`, i.e. there is a live (or last-issued) credential
+   * to revoke and a Jetson that must be reactivated (FS-02 §5.3, AC-8). An `Unactivated` Device has
+   * no live credential, so its regeneration is the benign first-activation flow with no destructive
+   * warning. Derived from the loaded branch's explicit `activationStatus`, never from `deviceId`.
+   */
+  protected readonly regenerationIsDestructive = computed(() => {
+    const status = this.branch()?.device.activationStatus;
+    return status === 'Activated' || status === 'ReactivationRequired';
+  });
 
   /** True once the Admin has asked to delete and before they confirm or cancel. */
   protected readonly confirmingDelete = signal(false);
@@ -471,6 +765,10 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     const branchId = this.route.snapshot.paramMap.get(BRANCH_ID_PARAM);
     this.branchId = branchId;
+
+    if (this.route.snapshot.queryParamMap.get(BRANCH_DETAIL_TAB_PARAM) === BRANCH_DETAIL_MONITORING_TAB) {
+      this.activeTab.set('monitoring');
+    }
 
     if (!branchId) {
       // Unreachable through the router (the parameter is part of the path), but a missing id is a
@@ -514,6 +812,7 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
     // fresh confirmation would be reporting on something that is no longer happening.
     this.regenerateFailed.set(false);
     this.regenerateNotFound.set(false);
+    this.regenerateConflict.set(false);
     this.confirming.set(true);
   }
 
@@ -539,6 +838,7 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
     this.regenerating.set(true);
     this.regenerateFailed.set(false);
     this.regenerateNotFound.set(false);
+    this.regenerateConflict.set(false);
 
     // The branch id, which is what this endpoint's `{id}` means (FS-02 §1.3) — see
     // `BranchService.regenerateActivationKey`.
@@ -554,17 +854,55 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
         }
 
         // The confirmation is replaced by the disclosure. Navigation waits for the Admin
-        // (FS-02 §5.3 step 6).
+        // (FS-02 §5.3 step 6). The branch/device is re-read so the status badge reflects the new
+        // state — `ReactivationRequired` for a Device that had been Activated (FS-02 §4.1, IP-05 P1).
         this.confirming.set(false);
         this.regeneratedKey.set(activationKey);
+        this.reloadBranch();
       },
-      // Anything else — including a 401 the session-expiry interceptor has already acted on
-      // (T-25) — settles into the generic failure state, with no key displayed.
-      error: () => {
+      error: (error: unknown) => {
         this.regenerating.set(false);
         this.confirming.set(false);
+
+        if (error instanceof ActivationKeyRegenerationConflictError) {
+          // A lost concurrent-regeneration race (IP-05 §3): the Backend committed no key. Clear any
+          // stale key, show safe retry guidance, and re-read the branch so the view reflects whatever
+          // state the winning request left — without assuming it succeeded. No auto-retry.
+          this.regeneratedKey.set(null);
+          this.regenerateConflict.set(true);
+          this.reloadBranch();
+          return;
+        }
+
+        // Anything else — including a 401 the session-expiry interceptor has already acted on
+        // (T-25) — settles into the generic failure state, with no key displayed. The key is cleared
+        // explicitly so a stale disclosure from an earlier attempt can never survive a later failure.
+        this.regeneratedKey.set(null);
         this.regenerateFailed.set(true);
       },
+    });
+  }
+
+  /**
+   * Re-reads the branch after a regeneration so the status badge and Device ID reflect the new state
+   * (e.g. `Activated → ReactivationRequired`, FS-02 §4.1). It is best-effort: a failed refresh leaves
+   * the currently displayed branch and any key disclosure in place rather than tearing them down, and
+   * it never toggles the full-page loading state. This issues exactly one GET and no retry.
+   */
+  private reloadBranch(): void {
+    if (this.branchId === null) {
+      return;
+    }
+
+    this.branchService.get(this.branchId).subscribe({
+      next: (branch) => {
+        if (branch !== null) {
+          this.branch.set(branch);
+        }
+      },
+      // A failed refresh is not surfaced: the disclosed key must stay on screen, and the last known
+      // branch is a safer thing to show than an error that would discard it.
+      error: () => {},
     });
   }
 
@@ -572,13 +910,58 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
    * Ends the disclosure once the Admin says they have the key, discarding it and returning to the
    * ordinary branch view.
    *
-   * The branch is deliberately not re-read. Regeneration changes no field this view renders: the
-   * Device's `activationStatus` is untouched and its `DeviceId` is retained (FS-02 §5.3, AC-7), so a
-   * refetch would only re-render identical data. Nothing about leaving this state carries the key —
-   * there is no navigation here at all.
+   * No re-read happens here: the branch was already refreshed the moment the regeneration succeeded
+   * (see `regenerate`), so the status badge already shows the new state — `ReactivationRequired` for a
+   * Device that had been Activated (FS-02 §4.1, IP-05 P1). Leaving the disclosure only drops the key
+   * from memory; there is no navigation here, so nothing carries it anywhere.
    */
   protected completeRegeneration(): void {
     this.regeneratedKey.set(null);
+  }
+
+  /** The given camera's most recent copy outcome, or `'idle'` if its button has never been pressed. */
+  protected cameraCopyState(cameraId: string): 'idle' | 'copied' | 'failed' {
+    return this.cameraCopyStates().get(cameraId) ?? 'idle';
+  }
+
+  /**
+   * Copies one camera's stream URL to the clipboard, in response to the Admin's click on that
+   * camera's own button and never otherwise. This is operational configuration, not a secret, but
+   * both outcomes are still reported on screen so a silent failure never leaves the Admin unsure
+   * whether the copy worked (mirrors `ActivationKeyDisplayComponent.copy`).
+   */
+  protected copyCameraStreamUrl(cameraId: string, streamUrl: string): void {
+    if (!this.clipboardAvailable) {
+      return;
+    }
+
+    navigator.clipboard.writeText(streamUrl).then(
+      () => this.setCameraCopyState(cameraId, 'copied'),
+      () => this.setCameraCopyState(cameraId, 'failed'),
+    );
+  }
+
+  /**
+   * Copies the camera's *annotated output* URL (FS-11 §11) — deliberately a separate action from
+   * the input-URL copy above so an Admin cannot copy one believing it is the other.
+   */
+  protected copyCameraOutputUrl(cameraId: string, outputStreamUrl: string): void {
+    if (!this.clipboardAvailable) {
+      return;
+    }
+
+    navigator.clipboard.writeText(outputStreamUrl).then(
+      () => this.setCameraCopyState(cameraId, 'copied'),
+      () => this.setCameraCopyState(cameraId, 'failed'),
+    );
+  }
+
+  private setCameraCopyState(cameraId: string, state: 'copied' | 'failed'): void {
+    this.cameraCopyStates.update((states) => {
+      const next = new Map(states);
+      next.set(cameraId, state);
+      return next;
+    });
   }
 
   /**
@@ -635,6 +1018,17 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
         this.confirmingDelete.set(false);
         this.deleteFailed.set(true);
       },
+    });
+  }
+
+  /** Switches tabs and reflects the choice in the URL, so a reload/deep-link keeps it. */
+  protected setActiveTab(tab: 'overview' | 'monitoring'): void {
+    this.activeTab.set(tab);
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { [BRANCH_DETAIL_TAB_PARAM]: tab === 'monitoring' ? BRANCH_DETAIL_MONITORING_TAB : null },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
     });
   }
 

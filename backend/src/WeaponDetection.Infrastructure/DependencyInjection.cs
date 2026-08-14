@@ -1,13 +1,16 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using WeaponDetection.Application.Interfaces;
+using WeaponDetection.Infrastructure.Media;
 using WeaponDetection.Infrastructure.Persistence;
 using WeaponDetection.Infrastructure.Security;
 using WeaponDetection.Infrastructure.Services;
 using WeaponDetection.Infrastructure.Startup;
+using WeaponDetection.Infrastructure.Storage;
 
 namespace WeaponDetection.Infrastructure;
 
@@ -28,9 +31,29 @@ public static class DependencyInjection
         // safe and efficient as a singleton.
         services.AddSingleton<IActivationKeyGenerator, ActivationKeyGenerator>();
 
+        // FS-07: DataProtection:KeyPath is validated for shape (ValidateOnStart) and, separately,
+        // for actual filesystem usability (IDataProtectionKeyPathValidator, run explicitly from
+        // Program.cs before the host starts serving requests — mirrors JwtOptions/AdminBootstrapper).
+        services.AddSingleton<IValidateOptions<DeviceSecretDataProtectionOptions>, DeviceSecretDataProtectionOptionsValidator>();
+        services.AddOptions<DeviceSecretDataProtectionOptions>()
+            .Bind(configuration.GetSection(DeviceSecretDataProtectionOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IDataProtectionKeyPathValidator, DataProtectionKeyPathValidator>();
+
         // ASP.NET Core Data Protection's IDataProtector is thread-safe and designed for
-        // long-lived reuse — safe and efficient as a singleton.
-        services.AddDataProtection();
+        // long-lived reuse — safe and efficient as a singleton. When DataProtection:KeyPath is
+        // configured, keys persist to that directory (a mounted Docker volume in production, FS-07
+        // §3.2) so the key ring survives full container recreation, not merely a process restart
+        // within the same container — the gap that broke the production Device secret on 2026-07-28.
+        // The application name is fixed and must never change between deployments (FS-07 §3.1): it
+        // is itself an input to key derivation, so changing it would make every already-protected
+        // secret unreadable even with an intact key ring.
+        var dataProtectionBuilder = services.AddDataProtection().SetApplicationName("WeaponDetection");
+        var dataProtectionKeyPath = configuration[$"{DeviceSecretDataProtectionOptions.SectionName}:KeyPath"];
+        if (!string.IsNullOrEmpty(dataProtectionKeyPath))
+        {
+            dataProtectionBuilder.PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeyPath));
+        }
         services.AddSingleton<IDeviceSecretProtector, DataProtectionDeviceSecretProtector>();
 
         // Depends on the (scoped) DbContext, so it must be scoped itself.
@@ -61,6 +84,86 @@ public static class DependencyInjection
         // IDeviceSecretProtector registered above, resolved automatically by the container.
         services.AddScoped<IDeviceService, DeviceService>();
         services.AddScoped<IBranchService, BranchService>();
+
+        // The device-credential validation service (IP-05 T-51/T-52). Depends on the (scoped)
+        // DbContext for its read-only lookup and the (singleton) IDeviceSecretProtector to recover the
+        // stored secret for a constant-time comparison, so it is scoped.
+        services.AddScoped<IDeviceCredentialValidator, DeviceCredentialValidator>();
+
+        // FS-11 §3, IP-13 T-226: read-only Camera-configuration lookup for the authenticated Device.
+        services.AddScoped<IDeviceConfigurationService, DeviceConfigurationService>();
+
+        // FS-09 §11, IP-11 T-168: AlertQuota:MaximumPerBranchPerDay is validated for shape
+        // (ValidateOnStart) — a documented integer floor/ceiling, no filesystem/network dependency, so
+        // (unlike AlertSnapshots/DataProtection) there is no separate startup-time usability check.
+        services.AddSingleton<IValidateOptions<AlertQuotaOptions>, AlertQuotaOptionsValidator>();
+        services.AddOptions<AlertQuotaOptions>()
+            .Bind(configuration.GetSection(AlertQuotaOptions.SectionName))
+            .ValidateOnStart();
+
+        // Read-only Alert list/detail projections for the Admin Dashboard (FS-10 §6, IP-12 T-197).
+        // Depends on the (scoped) DbContext for its AsNoTracking reads, so it is scoped.
+        services.AddScoped<IAlertQueryService, AlertQueryService>();
+
+        // The bounded Admin Dashboard summary (FS-10 §6, IP-12 T-197). Depends on the (scoped)
+        // DbContext, the (already-registered) TimeProvider, and the (already-registered)
+        // AlertQuotaOptions, so it is scoped.
+        services.AddScoped<IDashboardSummaryService, DashboardSummaryService>();
+
+        // The Alert idempotent-insert engine for POST /api/v1/sync/events (FS-06 §5, IP-08 T-98/T-100),
+        // extended by FS-09/IP-11 with the branch daily Alert quota (§7). Depends on the (scoped)
+        // DbContext for its batch transaction, the (already-registered) TimeProvider for ReceivedAtUtc,
+        // and the (already-registered) AlertQuotaOptions, so it is scoped.
+        services.AddScoped<IAlertSyncService, AlertSyncService>();
+
+        // FS-08 §8, IP-10 T-151: AlertSnapshots:StoragePath is validated for shape (ValidateOnStart)
+        // and, separately, for actual filesystem usability (IAlertSnapshotStoragePathValidator, run
+        // explicitly from Program.cs before the host starts serving requests) — mirrors
+        // DeviceSecretDataProtectionOptions/DataProtectionKeyPathValidator's exact pattern above.
+        services.AddSingleton<IValidateOptions<AlertSnapshotStorageOptions>, AlertSnapshotStorageOptionsValidator>();
+        services.AddOptions<AlertSnapshotStorageOptions>()
+            .Bind(configuration.GetSection(AlertSnapshotStorageOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IAlertSnapshotStoragePathValidator, AlertSnapshotStoragePathValidator>();
+
+        // Stateless apart from the (singleton) IOptions it reads StoragePath from — safe and
+        // efficient as a singleton, mirroring IDeviceSecretProtector's registration.
+        services.AddSingleton<IAlertSnapshotStorage, FileSystemAlertSnapshotStorage>();
+
+        // The snapshot upload validation/storage/attach pipeline for POST
+        // /api/v1/alerts/{alertId}/snapshot (FS-08 §9, IP-10 T-153). Depends on the (scoped)
+        // DbContext and the (already-registered, singleton) IAlertSnapshotStorage/TimeProvider, so it
+        // is scoped.
+        services.AddScoped<IAlertSnapshotUploadService, AlertSnapshotUploadService>();
+
+        // The read counterpart for GET /api/v1/alerts/{alertId}/snapshot (FS-08 §12, IP-10 T-160).
+        // Same scoping rationale as IAlertSnapshotUploadService above (scoped DbContext + singleton
+        // IAlertSnapshotStorage).
+        services.AddScoped<IAlertSnapshotRetrievalService, AlertSnapshotRetrievalService>();
+
+        // FS-14 §5, IP-16 T-8: MediaGateway:BaseUrl validated for shape (ValidateOnStart) — no
+        // network reachability check at startup, mirroring how DataProtection/AlertSnapshots
+        // separate shape validation from a usability check (this feature has no analogous
+        // usability check since the gateway is a remote service, not local disk).
+        services.AddSingleton<IValidateOptions<MediaGatewayOptions>, MediaGatewayOptionsValidator>();
+        services.AddOptions<MediaGatewayOptions>()
+            .Bind(configuration.GetSection(MediaGatewayOptions.SectionName))
+            .ValidateOnStart();
+
+        // A typed HttpClient's base address is fixed at registration; MediaGateway:BaseUrl is read
+        // once here rather than per-request, since it never changes without a restart (identical
+        // posture to every other startup-bound configuration value in this method).
+        services.AddHttpClient<IMediaGatewayClient, MediaMtxGatewayClient>((provider, client) =>
+        {
+            var options = provider.GetRequiredService<IOptions<MediaGatewayOptions>>().Value;
+            client.BaseAddress = new Uri(options.BaseUrl!);
+        });
+
+        // The live-monitoring source-resolution/gateway-orchestration pipeline for
+        // GET /api/v1/branches/{branchId}/live-monitoring/cameras and POST /api/v1/live-streams
+        // (FS-14 §5, IP-16 T-6). Depends on the (scoped) DbContext and the (singleton, via
+        // AddHttpClient) IMediaGatewayClient/TimeProvider, so it is scoped.
+        services.AddScoped<ILiveStreamService, LiveStreamService>();
 
         return services;
     }

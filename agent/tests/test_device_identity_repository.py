@@ -30,7 +30,7 @@ from weapon_detection_agent.persistence.errors import (
     IdentityAlreadyExistsError,
     InvalidIdentityStateError,
 )
-from weapon_detection_agent.persistence.models import DeviceIdentity
+from weapon_detection_agent.persistence.models import DeviceIdentity, OperationalState
 
 # A recognisable non-credential sentinel — never a real secret (IP-02 §10 forbids committing one).
 FAKE_SECRET_A = "ZZZ-fake-secret-A-must-never-appear-ZZZ"
@@ -285,9 +285,9 @@ def test_malformed_stored_timestamp_is_rejected(tmp_path: Path) -> None:
         with transaction(connection):
             connection.execute(
                 "INSERT INTO DeviceIdentity "
-                "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt) "
-                "VALUES (1, ?, ?, ?, ?)",
-                (DEVICE_ID, FAKE_SECRET_A, "not-a-timestamp", "not-a-timestamp"),
+                "(SingletonGuard, DeviceId, ProtectedSharedSecret, ActivatedAt, LastActivatedAt, "
+                "OperationalState) VALUES (1, ?, ?, ?, ?, ?)",
+                (DEVICE_ID, FAKE_SECRET_A, "not-a-timestamp", "not-a-timestamp", "Operational"),
             )
 
     with pytest.raises(InvalidIdentityStateError):
@@ -334,6 +334,151 @@ def test_secret_absent_from_exception_messages(tmp_path: Path) -> None:
 
     assert FAKE_SECRET_A not in str(excinfo.value)
     assert FAKE_SECRET_B not in str(excinfo.value)
+
+
+# --- IP-05 T-58: OperationalState, lock, and reactivation persistence --------------------------
+
+
+def test_first_activation_stores_operational_state(tmp_path: Path) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+    repo.store(_identity())
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.OPERATIONAL
+    assert loaded.shared_secret is not None
+    assert loaded.can_authenticate is True
+
+
+def test_mark_reactivation_required_clears_secret_and_locks(tmp_path: Path) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+    repo.store(_identity(activated_at=ACTIVATED_AT, last_activated_at=LATER_AT))
+
+    repo.mark_reactivation_required()
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.REACTIVATION_REQUIRED
+    assert loaded.shared_secret is None
+    assert loaded.can_authenticate is False
+    # DeviceId and both timestamps are preserved by the lock.
+    assert loaded.device_id == DEVICE_ID
+    assert loaded.activated_at == ACTIVATED_AT
+    assert loaded.last_activated_at == LATER_AT
+
+
+def test_mark_reactivation_required_is_idempotent(tmp_path: Path) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+    repo.store(_identity(activated_at=ACTIVATED_AT, last_activated_at=LATER_AT))
+
+    repo.mark_reactivation_required()
+    repo.mark_reactivation_required()  # calling again is safe
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.REACTIVATION_REQUIRED
+    assert loaded.shared_secret is None
+    assert loaded.device_id == DEVICE_ID
+    assert loaded.activated_at == ACTIVATED_AT
+    assert loaded.last_activated_at == LATER_AT
+
+
+def test_mark_reactivation_required_without_identity_fails(tmp_path: Path) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+
+    with pytest.raises(InvalidIdentityStateError):
+        repo.mark_reactivation_required()
+
+
+def test_failed_mark_reactivation_required_rolls_back(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    DeviceIdentityRepository(db).store(_identity())
+
+    failing = DeviceIdentityRepository(connection_factory=lambda: _commit_failing_opener(db))
+    with pytest.raises(sqlite3.OperationalError):
+        failing.mark_reactivation_required()
+
+    # Unchanged: still Operational with its original secret — the failed lock left no trace.
+    loaded = DeviceIdentityRepository(db).load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.OPERATIONAL
+    assert loaded.shared_secret is not None
+    assert loaded.shared_secret.get_secret_value() == FAKE_SECRET_A
+
+
+def test_reactivation_from_locked_returns_to_operational(tmp_path: Path) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+    repo.store(_identity(activated_at=ACTIVATED_AT, last_activated_at=ACTIVATED_AT))
+    repo.mark_reactivation_required()
+
+    repo.replace_shared_secret(shared_secret=SecretStr(FAKE_SECRET_B), last_activated_at=LATER_AT)
+
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.OPERATIONAL
+    assert loaded.shared_secret is not None
+    assert loaded.shared_secret.get_secret_value() == FAKE_SECRET_B
+    assert loaded.device_id == DEVICE_ID  # Device ID retained across the lock/unlock
+    assert loaded.activated_at == ACTIVATED_AT  # original activation time preserved
+    assert loaded.last_activated_at == LATER_AT  # advanced
+
+
+def test_failed_reactivation_from_locked_stays_locked(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    repo = DeviceIdentityRepository(db)
+    repo.store(_identity(activated_at=ACTIVATED_AT, last_activated_at=ACTIVATED_AT))
+    repo.mark_reactivation_required()
+
+    failing = DeviceIdentityRepository(connection_factory=lambda: _commit_failing_opener(db))
+    with pytest.raises(sqlite3.OperationalError):
+        failing.replace_shared_secret(
+            shared_secret=SecretStr(FAKE_SECRET_B), last_activated_at=LATER_AT
+        )
+
+    # Still locked: secret NULL, ReactivationRequired, timestamps unchanged.
+    loaded = DeviceIdentityRepository(db).load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.REACTIVATION_REQUIRED
+    assert loaded.shared_secret is None
+    assert loaded.activated_at == ACTIVATED_AT
+    assert loaded.last_activated_at == ACTIVATED_AT
+
+
+def test_operational_and_locked_states_survive_reopen(tmp_path: Path) -> None:
+    db = _ready_db(tmp_path)
+    DeviceIdentityRepository(db).store(
+        _identity(activated_at=ACTIVATED_AT, last_activated_at=LATER_AT)
+    )
+
+    # Operational survives a reopen (a new repository opens a new connection).
+    loaded = DeviceIdentityRepository(db).load()
+    assert loaded is not None
+    assert loaded.operational_state is OperationalState.OPERATIONAL
+    assert loaded.shared_secret is not None
+
+    DeviceIdentityRepository(db).mark_reactivation_required()
+
+    # ReactivationRequired survives a reopen with the secret cleared and timestamps intact.
+    reloaded = DeviceIdentityRepository(db).load()
+    assert reloaded is not None
+    assert reloaded.operational_state is OperationalState.REACTIVATION_REQUIRED
+    assert reloaded.shared_secret is None
+    assert reloaded.device_id == DEVICE_ID
+    assert reloaded.activated_at == ACTIVATED_AT
+    assert reloaded.last_activated_at == LATER_AT
+
+
+def test_lock_log_carries_no_secret(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    repo = DeviceIdentityRepository(_ready_db(tmp_path))
+    repo.store(_identity())
+
+    with caplog.at_level(logging.DEBUG, logger="weapon_detection_agent"):
+        repo.mark_reactivation_required()
+
+    assert any(r.msg == "device_identity_reactivation_required" for r in caplog.records)
+    assert FAKE_SECRET_A not in caplog.text
+    for record in caplog.records:
+        assert FAKE_SECRET_A not in str(record.__dict__)
 
 
 # --- 25. Importing the repository performs no filesystem I/O -----------------------------------

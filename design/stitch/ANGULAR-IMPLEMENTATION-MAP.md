@@ -17,9 +17,13 @@
 
 ## Implementation status
 
-**Implemented** on branch `feat/ui-stitch-redesign` (frontend visual redesign only; no Backend or
-Agent change; all routes, contracts, validation, and security behaviour preserved). Summary of what
-landed against this map:
+**Round 1** implemented on branch `feat/ui-stitch-redesign` (frontend visual redesign only; no Backend
+or Agent change; all routes, contracts, validation, and security behaviour preserved).
+
+**Round 2 (FS-10/IP-12)** adds real Dashboard-summary, Alert-list, and Alert-detail content — the first
+increment with new, additive, read-only Backend endpoints (`GET /api/v1/dashboard/summary`,
+`GET /api/v1/alerts`, `GET /api/v1/alerts/{id}`) behind the existing Admin-JWT policy. See §§15–18
+below. Summary of what landed against Round 1 of this map:
 
 | Item (below) | Status |
 |--------------|--------|
@@ -215,6 +219,84 @@ Data model (`branch.models.ts`) — the only fields any styling may bind to:
 - **Preserve:** messages stay **generic** — no backend error text, status codes, or echoed field
   values (an RTSP URL or key must never leak into an error). 401 is handled globally by the
   session-expiry interceptor (redirect to `/login`); 404 → safe not-found; anything else → generic.
+
+---
+
+## 15. Dashboard summary (real data)
+
+- **Stitch source:** Operations Overview (screen 2) — stat-tile row + "Recent Critical Alerts" table +
+  the general card/panel treatment.
+- **Maps to:** new `dashboard/dashboard-summary.ts` (+html/css), replacing the old thin
+  `shared/dashboard.ts` shell entirely; `dashboard/dashboard.service.ts` calls
+  `GET /api/v1/dashboard/summary`.
+- **Apply:** a KPI-tile row (today's accepted Alerts / configured maximum, remaining capacity,
+  suppressed-today total, gun/knife breakdown), a quota **progress bar** (new `.progress` primitive,
+  §19) showing accepted-vs-maximum, the current Branch's local date + next-reset time, a small (5–10
+  row) real recent-Alerts list linking into `/alerts`, and Device/Camera count tiles.
+- **Do NOT add:** the multi-site selector, the alert-trend bar chart, Open Incidents / Avg Response
+  tiles, Site Status list, System Health meters — none has backing data (`SCREEN-INVENTORY.md` row 2).
+- **Preserve:** bounded polling (10–15s) with `takeUntilDestroyed()`, manual refresh control, a
+  last-successful-refresh timestamp, and an explicit "quota not yet available today" state (distinct
+  from a confirmed `0`) when no `BranchDailyAlertQuota` row exists yet for the current local day.
+
+## 16. Alert list
+
+- **Stitch source:** Alerts Management (screen 8) — filter bar + table layout pattern only.
+- **Maps to:** new `alerts/alert-list.ts` (+html/css), `alerts/alert.service.ts` calling
+  `GET /api/v1/alerts`.
+- **Apply:** the filter-bar visual pattern (date range, class, Branch, Camera, Status,
+  snapshot-availability — using the existing `.field`/`select`/input styling, no new form-control
+  primitives needed), the table pattern (new `.table` primitive, §19) with columns: detected time,
+  class (`weapon-class-badge`), confidence, Branch, Camera, Device, Status, snapshot indicator, open
+  action; pagination controls at the foot.
+- **Do NOT add:** severity, assignee/"Assign To", bulk-select + Confirm/False-Positive/bulk actions,
+  Export, global search, min-confidence slider (`SCREEN-INVENTORY.md` row 8 — none exist).
+- **Preserve:** server-side pagination (never load the full Alert table into the browser), filter state
+  round-tripped through the URL's query parameters, default = current Branch-local day + newest-first,
+  `track` by `alertId`, a clear-filters action, and the existing loading/empty/error state discipline
+  (`empty-state`/`banner--error` primitives, unchanged).
+
+## 17. Alert detail / snapshot placeholder
+
+- **Stitch source:** Alert Review (screen 9) — right-side metadata-panel layout pattern only.
+- **Maps to:** new `alerts/alert-detail.ts` (+html/css), route-param-driven, calling
+  `GET /api/v1/alerts/{id}`.
+- **Apply:** a metadata card (detected/received timestamps, class badge, confidence, Branch, Camera,
+  Device, Status badge, delivery latency), styled per the mockup's right-side panel card treatment.
+  Where the mockup places a live-recording player, render a **snapshot placeholder card**: a neutral
+  icon + the exact text "Snapshot evidence is not available for this Alert" whenever
+  `snapshotState !== 'available'` (every Alert in this increment) — never a broken `<img>`, never a
+  fabricated/stock CCTV image. Structure this as its own child component so a future real-evidence
+  increment only swaps this one piece.
+- **Do NOT add:** the live-recording player, HUD bounding-box overlay, Event Timeline scrubber, Audit
+  Trail & Operator Activity log, Confirm Threat / False Positive / Escalate to Site Team buttons,
+  operator-comment box, Print/Share (`SCREEN-INVENTORY.md` row 9 — none exist; no approved
+  status-transition feature exists).
+- **Preserve:** loading/notFound/failed/loaded signal states mirroring `branch-detail.ts` exactly; a
+  404 from the Backend renders a safe "Alert not found" state, never a raw error/status code.
+
+## 18. Sidebar navigation additions
+
+- **Stitch source:** left nav on screens 2/8/9 ("Overview", "Alerts").
+- **Maps to:** `shell.ts`'s existing navigation list (currently Dashboard + Branches only, per §3
+  above).
+- **Apply:** add **Alerts** as a live nav item alongside the existing Dashboard/Branches, same
+  260px-sidebar / active-item-green-left-border treatment already implemented.
+- **Do NOT add:** Live monitoring, Incidents, Cameras, Edge devices, Analytics, System health, Users
+  and access, Settings — still unbacked by any feature (`SCREEN-INVENTORY.md`).
+
+## 19. New design-token primitives (first consumers: §16/§15)
+
+- **`.table`/`.table__head`/`.table__row`** — added to `styles.css`; consumes only existing color/
+  spacing/typography tokens (`--color-border`, `--color-surface-subtle`, `--text-sm`, `--space-*`); no
+  new colors introduced.
+- **`.progress`/`.progress__bar`** — quota progress bar; fill color uses `--color-primary` under the
+  configured maximum, switches to `--color-danger`-family tokens only once the maximum is reached
+  ("Daily quota reached" state) — never conveys the exhausted state by color alone, always paired with
+  the "X / Y Alerts used" text.
+- **`.badge--gun`/`.badge--knife`/`.badge--unknown`/`.badge--suppressed`** — modifiers on the existing
+  `.badge` primitive; each badge always renders an icon **and** text label, never color-only, per the
+  task's accessibility requirement.
 
 ---
 

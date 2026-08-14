@@ -39,6 +39,14 @@ public class BranchServiceValidationTests
             throw new NotSupportedException();
 
         // Not exercised by branch-creation validation; present only to satisfy the interface.
+        public Task<DeviceNetworkUpdate?> SetNetworkConfigurationAsync(
+            Guid branchId,
+            string? jetsonHost,
+            int? rtspOutputPort,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        // Not exercised by branch-creation validation; present only to satisfy the interface.
         public Task<ActivationKeyRegenerationResult?> RegenerateActivationKeyAsync(
             Guid branchId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
@@ -59,10 +67,10 @@ public class BranchServiceValidationTests
     }
 
     private static NewCameraRequest ValidCamera() =>
-        new("Front Entrance", "rtsp://camera.example.local:554/stream1");
+        new("Front Entrance", "rtsp://camera.example.local:554/stream1", "front-entrance");
 
     private static NewBranchRequest ValidRequestWith(params NewCameraRequest[] cameras) =>
-        new("Downtown Branch", "1 High Street", "ops@example.local", cameras);
+        new("Downtown Branch", "1 High Street", "ops@example.local", "100.98.226.80", 8554, cameras);
 
     private static async Task AssertRejectedBeforePersistenceAsync<TException>(NewBranchRequest request)
         where TException : Exception
@@ -91,7 +99,7 @@ public class BranchServiceValidationTests
     [Fact]
     public async Task CreateBranchAsync_NullCameraCollection_ThrowsBeforePersistence()
     {
-        var request = new NewBranchRequest("Downtown Branch", "1 High Street", "ops@example.local", null!);
+        var request = new NewBranchRequest("Downtown Branch", "1 High Street", "ops@example.local", "100.98.226.80", 8554, null!);
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -109,7 +117,7 @@ public class BranchServiceValidationTests
     [InlineData("   ")]
     public async Task CreateBranchAsync_BlankBranchName_ThrowsBeforePersistence(string name)
     {
-        var request = new NewBranchRequest(name, "1 High Street", "ops@example.local", new[] { ValidCamera() });
+        var request = new NewBranchRequest(name, "1 High Street", "ops@example.local", "100.98.226.80", 8554, new[] { ValidCamera() });
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -119,7 +127,7 @@ public class BranchServiceValidationTests
     [InlineData("   ")]
     public async Task CreateBranchAsync_BlankBranchAddress_ThrowsBeforePersistence(string address)
     {
-        var request = new NewBranchRequest("Downtown Branch", address, "ops@example.local", new[] { ValidCamera() });
+        var request = new NewBranchRequest("Downtown Branch", address, "ops@example.local", "100.98.226.80", 8554, new[] { ValidCamera() });
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -129,7 +137,7 @@ public class BranchServiceValidationTests
     [InlineData("   ")]
     public async Task CreateBranchAsync_BlankContactDetails_ThrowsBeforePersistence(string contactDetails)
     {
-        var request = new NewBranchRequest("Downtown Branch", "1 High Street", contactDetails, new[] { ValidCamera() });
+        var request = new NewBranchRequest("Downtown Branch", "1 High Street", contactDetails, "100.98.226.80", 8554, new[] { ValidCamera() });
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -139,7 +147,7 @@ public class BranchServiceValidationTests
     [InlineData("   ")]
     public async Task CreateBranchAsync_BlankCameraName_ThrowsBeforePersistence(string cameraName)
     {
-        var request = ValidRequestWith(new NewCameraRequest(cameraName, "rtsp://camera.example.local/stream"));
+        var request = ValidRequestWith(new NewCameraRequest(cameraName, "rtsp://camera.example.local/stream", $"cam-{Guid.NewGuid():N}"));
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -149,7 +157,7 @@ public class BranchServiceValidationTests
     [InlineData("   ")]
     public async Task CreateBranchAsync_BlankCameraRtspUrl_ThrowsBeforePersistence(string rtspUrl)
     {
-        var request = ValidRequestWith(new NewCameraRequest("Front Entrance", rtspUrl));
+        var request = ValidRequestWith(new NewCameraRequest("Front Entrance", rtspUrl, $"cam-{Guid.NewGuid():N}"));
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -161,7 +169,7 @@ public class BranchServiceValidationTests
     [InlineData("not a url at all")]
     public async Task CreateBranchAsync_InvalidRtspUrl_ThrowsBeforePersistence(string rtspUrl)
     {
-        var request = ValidRequestWith(new NewCameraRequest("Front Entrance", rtspUrl));
+        var request = ValidRequestWith(new NewCameraRequest("Front Entrance", rtspUrl, $"cam-{Guid.NewGuid():N}"));
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }
@@ -171,7 +179,7 @@ public class BranchServiceValidationTests
     {
         var request = ValidRequestWith(
             ValidCamera(),
-            new NewCameraRequest("Loading Bay", "http://camera.example.local/stream"));
+            new NewCameraRequest("Loading Bay", "http://camera.example.local/stream", $"cam-{Guid.NewGuid():N}"));
 
         await AssertRejectedBeforePersistenceAsync<ArgumentException>(request);
     }

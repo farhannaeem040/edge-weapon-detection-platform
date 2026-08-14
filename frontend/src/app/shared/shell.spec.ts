@@ -12,10 +12,12 @@ import { ShellComponent } from './shell';
 const PLACEHOLDER_TOKEN = 'placeholder.token.value';
 const LOGOUT_URL = `${environment.apiBaseUrl}/auth/logout`;
 
-/** Features with no implemented route: they must never appear as navigation (SCREEN-INVENTORY.md). */
+/**
+ * Features with no implemented route: they must never appear as navigation (SCREEN-INVENTORY.md).
+ * Dashboard, Alerts, and Monitoring graduated to real navigation items with FS-10/IP-12 and
+ * FS-14/IP-16 respectively, and are asserted separately below, not here.
+ */
 const DEFERRED_NAV_LABELS = [
-  'Live monitoring',
-  'Alerts',
   'Incidents',
   'Cameras',
   'Edge devices',
@@ -63,10 +65,18 @@ describe('ShellComponent', () => {
     expect(element().textContent).toContain('LJMU AI');
   });
 
-  it('links to the branch list from the sidebar', () => {
-    const link = element().querySelector('.shell__nav-link') as HTMLAnchorElement;
-    expect(link.getAttribute('href')).toBe('/branches');
-    expect(link.textContent).toContain('Branches');
+  it('links to the dashboard, alerts, monitoring, and branch list from the sidebar', () => {
+    const links = Array.from(
+      element().querySelectorAll('.shell__nav-link'),
+    ) as HTMLAnchorElement[];
+    const hrefs = links.map((link) => link.getAttribute('href'));
+    const texts = links.map((link) => link.textContent ?? '');
+
+    expect(hrefs).toEqual(['/dashboard', '/alerts', '/monitoring', '/branches']);
+    expect(texts.some((text) => text.includes('Dashboard'))).toBeTrue();
+    expect(texts.some((text) => text.includes('Alerts'))).toBeTrue();
+    expect(texts.some((text) => text.includes('Monitoring'))).toBeTrue();
+    expect(texts.some((text) => text.includes('Branches'))).toBeTrue();
   });
 
   it('renders no navigation for deferred, unimplemented features', () => {
@@ -76,8 +86,15 @@ describe('ShellComponent', () => {
     }
   });
 
-  it('exposes exactly one primary navigation link', () => {
-    expect(element().querySelectorAll('.shell__nav-link').length).toBe(1);
+  it('exposes exactly four primary navigation links', () => {
+    expect(element().querySelectorAll('.shell__nav-link').length).toBe(4);
+  });
+
+  it('marks the Monitoring link active on the monitoring route, mirroring the other links', () => {
+    const link = Array.from(element().querySelectorAll('.shell__nav-link')).find((el) =>
+      el.textContent?.includes('Monitoring'),
+    ) as HTMLAnchorElement;
+    expect(link.classList.contains('shell__nav-link--active')).toBeFalse();
   });
 
   it('provides a router-outlet for the wrapped views', () => {

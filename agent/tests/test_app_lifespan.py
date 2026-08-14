@@ -28,6 +28,7 @@ from weapon_detection_agent.config.paths import resolve_paths
 from weapon_detection_agent.config.settings import load_settings
 from weapon_detection_agent.persistence.database import open_connection
 from weapon_detection_agent.runtime.state import get_runtime
+from weapon_detection_agent.validation.models import CredentialValidationResult
 
 DEVICE_ID = "device-test-001"
 BRANCH_ID = "branch-test-001"
@@ -67,6 +68,24 @@ class FakeBackendClient:
         self.closed = True
 
 
+class FakeValidationClient:
+    """A T-57-shaped validation client for lifespan tests — no network, Valid by default."""
+
+    def __init__(self, *, result: CredentialValidationResult | None = None) -> None:
+        self._result = result if result is not None else CredentialValidationResult.valid(200)
+        self.validate_calls = 0
+        self.closed = False
+
+    async def validate(
+        self, device_id: str, shared_secret: SecretStr
+    ) -> CredentialValidationResult:
+        self.validate_calls += 1
+        return self._result
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _result() -> ActivationResult:
     return ActivationResult(
         device_id=DEVICE_ID, shared_secret=SecretStr(FAKE_SECRET), branch_id=BRANCH_ID
@@ -86,11 +105,13 @@ def _loader(tmp_root: Path, *, key: str | None, url: str = "http://backend.local
     return _load
 
 
-def _app(tmp_root: Path, backend: object, *, key: str | None) -> FastAPI:
+def _app(tmp_root: Path, backend: object, *, key: str | None, validation: object = None) -> FastAPI:
+    vclient = validation if validation is not None else FakeValidationClient()
     return create_app(
         settings_loader=_loader(tmp_root, key=key),
         clock=lambda: T0,
         backend_client_factory=lambda settings: backend,  # type: ignore[arg-type,return-value]
+        validation_client_factory=lambda settings: vclient,  # type: ignore[arg-type,return-value]
     )
 
 
@@ -187,6 +208,8 @@ def test_first_activation_persists_identity_and_provisions_layout(tmp_path: Path
             "config",
             "database",
             "logs",
+            "runtime",
+            "snapshots",
         ]
         stored = runtime.identity_repository.load()
         assert stored is not None

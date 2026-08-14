@@ -11,6 +11,7 @@
 | Owner | Farhan Naeem |
 | Dependencies | FS-01 (Admin must be authenticated to create/manage branches and regenerate Activation Keys via the Dashboard) |
 | Supersedes | `specs/features/FS-02-branch-device-onboarding-activation.md` (restructured into implementation increments; this Final revision additionally corrects the Device identity model and the Activation Key format/lookup design — no SRS/ARCH-001 requirement changes) |
+| Amendments | **Reactivation-security amendment (IP-05, 2026-07-21):** regenerating the Activation Key of an *already activated* device now immediately and atomically **revokes** the device's current shared secret and moves it to a new `ReactivationRequired` activation state — a deliberate, security-first credential reset — instead of leaving the old secret valid until the Agent reactivates. Amends §5.3, §5.4, §5.8, §6, §7, §9, §10.2, §10.3, §11, §14 (AC-5, +AC-17, +AC-18). Corresponds to SRS FR-BRN-005 / NFR-SEC-002 and ARCH-001 §16.4 / ADR-015 (both amended). |
 
 ---
 
@@ -127,18 +128,22 @@ Activation Key generation is not a standalone workflow independent of branch cre
 
 #### 5.3 Key Regeneration
 
-1. The Admin requests regeneration/reset of a branch's Activation Key via the Dashboard.
+1. The Admin requests regeneration/reset of a branch's Activation Key via the Dashboard. For an already activated device this is a **deliberate, security-first credential reset**: it immediately revokes the device's current credentials, so the Dashboard must first present a destructive warning and obtain explicit confirmation (§7).
 2. Dashboard calls the Backend's key-regeneration API with a valid Admin session.
-3. The Backend sets the branch's current Activation Key record's status to Invalidated, regardless of its prior consumption state.
-4. The Backend generates a new `keyId`, a new `secret`, and a salted hash of the new secret, storing a new Activation Key record (`Status = Unconsumed`) associated with the same `DeviceRecordId`.
-5. The Backend returns the new complete plaintext Activation Key (`keyId.secret`).
-6. Dashboard displays the new plaintext key to the Admin; the previous plaintext key is no longer valid for activation regardless of whether it was ever used.
+3. In a **single atomic transaction**, the Backend:
+   a. sets the branch's current Activation Key record's status to Invalidated — and likewise invalidates **every** other still-`Unconsumed` key for that device — regardless of prior consumption state, so that at most one `Unconsumed` key survives;
+   b. generates a new `keyId`, a new `secret`, and a salted hash of the new secret, storing a new Activation Key record (`Status = Unconsumed`) associated with the same `DeviceRecordId`;
+   c. **if the device is currently `Activated` (or already `ReactivationRequired`), immediately revokes its current shared secret** — clearing `ProtectedSharedSecret` so the old secret can never authenticate again — and sets `ActivationStatus = ReactivationRequired`. An `Unactivated` device has no secret and no `DeviceId`, and its status is left `Unactivated`.
+4. If any step of the transaction fails, the whole operation rolls back: the prior shared secret, the activation status, and the prior valid-key state are left exactly as they were.
+5. The Backend returns the new complete plaintext Activation Key (`keyId.secret`). The device keeps its permanent `DeviceId`, its Device record, and all Branch/Camera/historical relationships throughout — none is deleted or reassigned.
+6. Dashboard displays the new plaintext key to the Admin (single-disclosure, §7); the previous plaintext key is no longer valid regardless of whether it was ever used, and — for a previously activated device — the device now shows **Reactivation required** (not Activated, and never Offline) until it reactivates with the new key.
+7. Concurrency: the "at most one `Unconsumed` key per device" invariant is enforced structurally (§19). Under concurrent regenerations, **exactly one** request commits a valid `Unconsumed` key; each competing request fails cleanly on the unique-index conflict, its transaction rolls back, and it returns **no** plaintext key (a `409 Conflict` envelope, `errorCode: ACTIVATION_KEY_REGENERATION_CONFLICT`, which the Admin may simply retry). No ordering guarantee is claimed — the surviving key is the one that committed, not "the most recent request" — but after completion exactly one valid `Unconsumed` key exists.
 
 #### 5.4 Branch/Device/Camera List and Detail Viewing
 
 1. Admin navigates to the Branch Management module.
 2. Dashboard calls the Backend to list branches (with associated device activation status) and, on selection, branch/camera/device detail.
-3. Backend returns branch, camera, and device data. For an unactivated Device, only `ActivationStatus = Unactivated` is returned (no `DeviceId`). For an activated Device, `ActivationStatus = Activated` and the persistent `DeviceId` are returned, along with last-known health/contact summary as available from other features.
+3. Backend returns branch, camera, and device data. For an unactivated Device, only `ActivationStatus = Unactivated` is returned (no `DeviceId`). For an activated Device, `ActivationStatus = Activated` and the persistent `DeviceId` are returned, along with last-known health/contact summary as available from other features. For a device whose credentials have been reset by a regeneration (§5.3), `ActivationStatus = ReactivationRequired` is returned together with the retained persistent `DeviceId`.
 4. Dashboard renders the list and detail views; the plaintext Activation Key and the internal `DeviceRecordId` are never included in these read responses (only the single-disclosure responses of §5.1/§5.3 ever contain the plaintext key, and `DeviceRecordId` is never returned to any client, per §1.3).
 
 ### Increment B Workflows
@@ -171,13 +176,13 @@ Activation Key generation is not a standalone workflow independent of branch cre
 #### 5.8 Reactivation
 
 1. A branch's device needs to be reactivated (e.g., replacement Jetson unit, factory reset, credential recovery) after having previously completed a successful first activation (§5.5).
-2. The Admin regenerates the branch's Activation Key (§5.3), which invalidates the old Activation Key record and creates a new one associated with the same `DeviceRecordId`.
+2. The Admin regenerates the branch's Activation Key (§5.3). Per §5.3 this atomically invalidates the old key(s), **revokes the device's current shared secret**, and moves the device to `ReactivationRequired` — the device cannot authenticate again until it reactivates with the new key.
 3. The Agent (new or reset) calls `POST /api/v1/activate` with the new Activation Key.
 4. The Backend validates the new key as in §5.5, steps 3–6.
-5. Because the Device record already has an assigned `DeviceId` (from the original activation), the Backend **retains** that existing `DeviceId` rather than assigning a new one.
-6. The Backend issues a **new** shared secret, atomically replacing the previous one; the previous shared secret is invalidated.
+5. Because the Device record already has an assigned `DeviceId` (from the original activation), the Backend **retains** that existing `DeviceId` rather than assigning a new one. Any result that would change the permanent `DeviceId` is rejected rather than applied.
+6. The Backend issues a **new** shared secret (the previous one was already revoked at regeneration, step 2), stores its protected form, and sets `ActivationStatus` back to `Activated`.
 7. The Backend returns the retained `DeviceId`, the new shared secret, and current configuration to the Agent.
-8. The Agent atomically replaces its locally stored shared secret with the new one; its locally stored `DeviceId` is unchanged (it matches what the Backend returns).
+8. The Agent atomically replaces its locally stored shared secret with the new one; its locally stored `DeviceId` is unchanged (it matches what the Backend returns), its original local `ActivatedAt` is preserved, and `LastActivatedAt` advances.
 9. Historical alerts and health records remain correlated to the retained `DeviceId`; reactivation does not create a new logical device identity.
 
 #### 5.9 Agent Startup After Previous Activation
@@ -194,7 +199,7 @@ Activation Key generation is not a standalone workflow independent of branch cre
 - Create a single associated `Device` record for the branch at creation time, with `DeviceRecordId` assigned, `DeviceId = NULL`, and `ActivationStatus = Unactivated`.
 - Generate a unique, two-part (`keyId.secret`) Activation Key as an integral part of branch creation, storing only `ActivationKeyId` (the `keyId`) and a salted hash of the `secret` — never the complete plaintext key or plaintext secret (FR-BRN-002, ARCH-001 §15.5, §1.4).
 - Return the complete plaintext Activation Key to the Dashboard only at the moment of generation (branch creation or regeneration); never return or re-derive the plaintext key afterward.
-- Support Admin-initiated Activation Key regeneration for a branch: invalidate the previous Activation Key record regardless of its consumption state, and generate a new `keyId`/`secret` pair (FR-BRN-005).
+- Support Admin-initiated Activation Key regeneration for a branch: in a single atomic transaction, invalidate the previous Activation Key record(s) regardless of consumption state (leaving at most one `Unconsumed` key), generate a new `keyId`/`secret` pair, and — for an already-activated device — immediately revoke the current shared secret (clearing `ProtectedSharedSecret` so it can never authenticate again) and set `ActivationStatus = ReactivationRequired`, while preserving the permanent `DeviceId`, the Device record, and all Branch/Camera/historical relationships. A failure at any step rolls the whole operation back (FR-BRN-005, NFR-SEC-002, ADR-015).
 - Provide branch/camera/device list and detail read endpoints, including device activation status and, only once activated, `DeviceId` — never `DeviceRecordId`, and never the plaintext Activation Key.
 - Reject any request that would create or self-register a branch or device from a non-Admin-authenticated caller; branch creation is reachable only via the Admin-authenticated Dashboard API (FR-BRN-006, BR-002).
 - Implement `POST /api/v1/activate` in full (parsing, lookup by `keyId`, secret verification, atomic consumption, `DeviceId` assignment/retention, shared-secret issuance, configuration return) even though it has no Angular surface — it is Backend-only work delivered within Increment A (§1.1).
@@ -219,8 +224,8 @@ Activation Key generation is not a standalone workflow independent of branch cre
 
 - Present a branch-creation form collecting branch name, address, contact details, and one or more camera RTSP configurations, and submit it to the Backend under a valid Admin session (FS-01).
 - Display the complete plaintext Activation Key returned at branch creation, clearly indicating it is shown only this once and must be recorded/transferred to the installer out-of-band.
-- Provide an Admin-facing action to regenerate/reset a branch's Activation Key, and display the newly generated plaintext key using the same single-disclosure treatment as initial generation.
-- Present branch, camera, and device list/detail state — including device activation status (Unactivated/Activated) and, only once activated, the persistent `DeviceId` — as returned by the Backend, without independently deriving or caching the plaintext Activation Key beyond the single display at generation/regeneration time.
+- Provide an Admin-facing action to regenerate/reset a branch's Activation Key. When the device is currently **`Activated` or `ReactivationRequired`**, the action must present a **destructive security warning** — that regenerating will immediately revoke the device's current credentials and the device will be unable to authenticate until the new key is securely provisioned on the Jetson — and require **explicit confirmation** before proceeding. For an `Unactivated` device (no credentials to revoke), a plain confirmation without the revocation warning is sufficient. On success, display the newly generated plaintext key using the same single-disclosure treatment as initial generation.
+- Present branch, camera, and device list/detail state — including device activation status (Unactivated / Activated / Reactivation required) and, once a `DeviceId` has been assigned, the retained persistent `DeviceId` — as returned by the Backend, without independently deriving or caching the plaintext Activation Key beyond the single display at generation/regeneration time. After a regeneration that resets an activated device, the device is shown as **Reactivation required** — never as Activated, and never as Offline (Offline is a future health state, not an activation state).
 - Never display or expect a `DeviceRecordId` value; it is an internal identifier not returned by any endpoint.
 - Contain no activation business logic beyond branch-creation submission, key display, and status presentation (NFR-MNT-001).
 
@@ -236,6 +241,16 @@ Activation Key generation is not a standalone workflow independent of branch cre
 - Never log the Activation Key, its `secret` portion, or the shared secret in plaintext.
 - A simulated Agent fulfills every bullet above identically to the real Agent, using the same endpoint, fields, and headers; it may persist `DeviceIdentity`/`ConfigCache` equivalents in whatever lightweight form suits the simulator (e.g., a local file or in-memory store), provided the Backend-facing behavior is indistinguishable from the real Agent.
 
+### 8.1 Agent revocation detection and operational lock (Amendment 2026-07-21 — IP-05 Agent-lock)
+
+> **Superseded assumption:** an earlier revision implied the Agent needed no change for the reactivation-security behaviour. That is withdrawn. **Reason:** Backend revocation prevents *future* authenticated requests, but a **running** Agent does not otherwise learn its secret was revoked. **Relationship:** realized by `specs/implementation-plans/IP-05-device-reactivation-security.md`.
+
+- The running Agent must **detect confirmed credential revocation** by periodically validating its stored `DeviceId` + shared secret against the dedicated device-authenticated endpoint (§10.5), one non-overlapping request per configured interval (`WDA_CREDENTIAL_VALIDATION_INTERVAL_SECONDS`, default 30s) while operational. This validation is **detect-only**: neither activation nor a heartbeat, and it never fetches or receives a key.
+- **Only** a `401` from that endpoint carrying `errorCode = INVALID_DEVICE_CREDENTIALS` is a confirmed revocation. On it, the Agent **atomically clears its local shared secret** and enters a **persistent locked** local state (`ReactivationRequired`), **stops the validation loop**, stops/prevents all operational functionality (future DeepStream/detection/alerts/commands/siren), retains its `DeviceId`/`ActivatedAt`/`LastActivatedAt`/identity record, and does **not** auto-activate. The locked state is persisted locally and **survives restart/reboot**. Detection when connected is bounded by one interval + request timeout.
+- On any **ambiguous/infrastructural** outcome (`403`, `404`, `408`, `429`, `5xx`, timeout, DNS, connection refused, Tailscale outage, malformed, unexpected code) the Agent does **not** lock, does **not** erase credentials, preserves offline-reliability, and retries at the next interval — so a reverse-proxy/authorization/deployment/transient error cannot permanently disable the Jetson. "Offline" is never used for revocation.
+- The Agent resumes only after an **operator manually** provisions the new Activation Key via `set-activation-key.sh` (out-of-band, single-disclosure), then performs exactly **one** `POST /api/v1/activate` (§5.8). The Agent must never download, request (using its old secret), or receive the key from any endpoint, place it in `agent.env`/argv, log it, or auto-retry activation.
+- **Honest limitation (no instantaneous remote shutdown):** if the Jetson is disconnected when the Admin regenerates the key, the Agent detects the revocation only after connectivity returns and its next validation receives a confirmed rejection — a bounded delay of one interval + timeout, not a remote kill switch.
+
 ## 9. Data Requirements
 
 | Entity/Field | Purpose | Increment Introduced |
@@ -245,7 +260,7 @@ Activation Key generation is not a standalone workflow independent of branch cre
 | `Device.DeviceRecordId` (internal PK) | Internal SQL Server primary key; created with the Device row at branch creation; never returned by any API; used only for internal foreign-key relationships (§1.3). | A |
 | `Device.DeviceId` (persistent, nullable) | `NULL` until first activation; assigned once, on first successful activation; retained unchanged through every subsequent reactivation; the only device identifier ever exposed externally or used in `X-Device-Id` (FR-BRN-007, ADR-015, §1.3). | A (column exists, null), B (first assigned) |
 | `Device.BranchId` (unique FK) | Associates the Device with its branch; enforces exactly one Device per Branch (BR-002, CON-007). | A |
-| `Device.ActivationStatus` | Unactivated / Activated; read by Increment A's list/detail views, written by Increment B's activation flow. | A (read), B (write) |
+| `Device.ActivationStatus` | Unactivated / Activated / ReactivationRequired. `ReactivationRequired` is entered when the Admin regenerates the key of an already-activated device (§5.3), which revokes the current shared secret; the device returns to `Activated` on successful reactivation (§5.8). Written by both regeneration (Increment A) and the activation flow (Increment B); read by the list/detail views. Stored as the enum name in an existing `nvarchar(32)` column (no schema change). | A, B |
 | `Device.ProtectedSharedSecret` | Backend-side recoverable-but-protected form of the current shared secret, used to authenticate Backend→Agent commands (ARCH-001 §13.3). Nullable until activation. | B |
 | `Device.LastKnownAddress` | Most recently observed network address, supporting ASM-008. Nullable until first operational contact. | B |
 | `ActivationKey.ActivationKeyId` (the `keyId`) | Non-secret lookup identifier for an Activation Key record; indexed (§1.4). | A |
@@ -284,7 +299,7 @@ All endpoints below are real, production endpoints. None is simulator-specific; 
 | Request fields | None beyond the target branch/device identifier |
 | Success response | Standard envelope; `data` contains the new complete plaintext Activation Key (`keyId.secret`) |
 | Success status code | 200 |
-| Effect | Previous Activation Key record invalidated regardless of consumption state; new Activation Key record (new `keyId`, new secret hash) generated, unconsumed |
+| Effect | In one atomic transaction: previous Activation Key record(s) invalidated regardless of consumption state (at most one `Unconsumed` key remains); new Activation Key record (new `keyId`, new secret hash) generated, unconsumed; and — for an already-activated device — the current shared secret revoked (`ProtectedSharedSecret` cleared) and `ActivationStatus` set to `ReactivationRequired`, with the permanent `DeviceId` and all relationships preserved. Rolls back atomically on failure |
 | Failure (branch/device not found) | Standard error envelope |
 | Failure status code | 404 |
 | Failure (no/invalid session) | Standard error envelope |
@@ -296,7 +311,7 @@ All endpoints below are real, production endpoints. None is simulator-specific; 
 |--------|--------|
 | Endpoint | `GET /api/v1/branches`, `GET /api/v1/branches/{id}`, `GET /api/v1/devices/{id}` (per ARCH-001 §14.1) |
 | Auth required | Valid Admin JWT + active session (FS-01) |
-| Success response | Standard envelope; `data` contains branch/camera/device details including device activation status and, only if activated, `deviceId`; never includes `DeviceRecordId` or the plaintext Activation Key |
+| Success response | Standard envelope; `data` contains branch/camera/device details including device activation status (`Unactivated` / `Activated` / `ReactivationRequired`) and, once a `DeviceId` has been assigned (activated or reactivation-required), the retained `deviceId`; never includes `DeviceRecordId` or the plaintext Activation Key |
 | Success status code | 200 |
 | Failure (not found) | Standard error envelope |
 | Failure status code | 404 |
@@ -318,6 +333,23 @@ All endpoints below are real, production endpoints. None is simulator-specific; 
 
 All responses use the uniform response envelope defined in ARCH-001 §14.3 / ADR-009. Exemption from Admin JWT authentication applies only to that specific check; the endpoint still performs full request validation (§12), Activation Key validation, standard error handling (§13), and uses the standard response envelope like any other endpoint.
 
+### 10.5 Device Credential Validation (Amendment 2026-07-21 — IP-05 Agent-lock; proposed)
+
+A dedicated, **detect-only** endpoint that lets a running Agent confirm whether its current credentials are still valid, so it can lock itself when the Admin has revoked them (§8.1). It never returns, rotates, or distributes a key or secret, is not a heartbeat, and updates no last-seen/Online-Offline state.
+
+| Aspect | Detail |
+|--------|--------|
+| Endpoint | `POST /api/v1/device/credentials/validate` (ARCH-001 §14.1 amended) |
+| Auth required | None for Admin-JWT purposes (`[AllowAnonymous]`); **device-authenticated** by the headers below |
+| Headers | `X-Device-Id: <permanent public Device ID>`, `X-Device-Secret: <current private shared secret>` |
+| Request body | None (no operational or health payload) |
+| Success | `200`; standard envelope `{"success": true, "data": null}` — no key, secret, status, config, health, Online/Offline, or replacement credential |
+| Authorized only when | the `X-Device-Id` identifies an existing Device **and** `ActivationStatus == Activated` **and** `ProtectedSharedSecret` is present **and** the presented `X-Device-Secret` cryptographically matches (state guard first, then `Unprotect` + constant-time compare) |
+| Failure | `401`; `{"success": false, "message": "The device credentials are invalid.", "errorCode": "INVALID_DEVICE_CREDENTIALS"}` — **uniform** for every reason (missing/malformed/unknown Device ID, missing/incorrect/revoked secret, missing stored protected secret, status `Unactivated`, status `ReactivationRequired`); never reveals which, never returns `ReactivationRequired` details. Should not normally return `403` |
+| Caller | The real or simulated Agent's validation loop (one request per interval) |
+
+A `ReactivationRequired` device is rejected **even if** inconsistent data leaves a secret present (status is checked first). Only a `401 INVALID_DEVICE_CREDENTIALS` from this endpoint is a confirmed-revocation signal the Agent may lock on; all other outcomes are ambiguous. The Admin Dashboard obtains explicit device status through its authenticated management read endpoints (§10.3), never from this endpoint.
+
 ## 11. Security Rules
 
 - The Activation Key is a one-time credential: consumed atomically on first successful use and never valid for a subsequent activation attempt until explicitly regenerated by the Admin (FR-BRN-004, BR-003).
@@ -326,7 +358,8 @@ All responses use the uniform response envelope defined in ARCH-001 §14.3 / ADR
 - The plaintext Activation Key, its `secret` portion, and the device shared secret are never written to application logs, on either the Backend or the Agent (ARCH-001 §15.6).
 - The device shared secret is stored by the Backend in a recoverable but protected form (required for Backend→Agent command authentication in later features) and by the Agent under restrictive local file permissions; it is never written to application logs (ARCH-001 §13.3, §15.6).
 - After successful activation, the persistent `DeviceId` and shared secret — not the Activation Key — authenticate all subsequent Agent-to-Backend operational requests (NFR-SEC-002).
-- Reactivation issues a new shared secret and invalidates the previous Activation Key record; it does not issue a new `DeviceId` for the same logical device (ARCH-001 §16.4, ADR-015, §1.3).
+- Regenerating the Activation Key of an already-activated device immediately and atomically **revokes** the device's current shared secret (clearing `ProtectedSharedSecret`, so the old secret can never authenticate again) and moves the device to `ReactivationRequired`; the device's permanent `DeviceId`, its Device record, and all relationships are preserved. Reactivation then issues a **new** shared secret and returns the device to `Activated`, still without issuing a new `DeviceId` (ARCH-001 §16.4, ADR-015, §1.3, NFR-SEC-002).
+- Because no authenticated device endpoint exists yet (Agent operational calls are a later feature), revocation is realized as the atomic clearing/replacement of the stored `ProtectedSharedSecret`. Every current and future device-authentication path must require **both** `ActivationStatus == Activated` **and** a present, valid protected shared secret; a device in `ReactivationRequired` (or `Unactivated`) must be rejected **even if** inconsistent/legacy data leaves a secret value present — status is checked first, so a stray secret can never authenticate a non-`Activated` device. The Dashboard's device status derives from Backend credential state, not from process connectivity.
 - The internal `DeviceRecordId` is never exposed in any API response, log, or Dashboard view; it exists solely as an internal relational key (§1.3).
 - No certificates, mTLS, OAuth/OIDC, HMAC signing, or key-rotation scheduling beyond the approved reactivation secret replacement is introduced by this feature (ARCH-001 §15.6, §28.2).
 - Branch creation and Activation Key regeneration are reachable only through the Admin-authenticated Dashboard API; no endpoint allows a Jetson Agent to create a branch or device record (FR-BRN-006, BR-002).
@@ -365,7 +398,7 @@ All responses use the uniform response envelope defined in ARCH-001 §14.3 / ADR
 | AC-2 | Branch creation produces a unique, two-part Activation Key, shown in complete plaintext to the Admin exactly once, at generation time. | FR-BRN-002 | A |
 | AC-3 | A Jetson Agent (real or simulated) presenting a valid, unconsumed Activation Key to `POST /api/v1/activate` receives a `DeviceId`, shared secret, and its branch/camera/operational configuration, and activates successfully. | FR-BRN-003 | A (endpoint), B (first exercised) |
 | AC-4 | An Activation Key is marked consumed after its first successful use, and a subsequent activation attempt using the same key is rejected. | FR-BRN-004 | A (endpoint), B (first exercised) |
-| AC-5 | Regenerating a branch's Activation Key invalidates the previous Activation Key record such that a subsequent activation attempt using the old key fails, regardless of whether the old key had already been consumed, and a new `keyId`/`secret` pair is issued. | FR-BRN-005 | A |
+| AC-5 | Regenerating a branch's Activation Key invalidates the previous Activation Key record(s) such that a subsequent activation attempt using an old/superseded key fails (regardless of prior consumption), leaves at most one `Unconsumed` key, and issues a new `keyId`/`secret` pair. For an already-activated device, the same atomic operation revokes the current shared secret and sets `ActivationStatus = ReactivationRequired`, preserving the permanent `DeviceId`. | FR-BRN-005, NFR-SEC-002 | A |
 | AC-6 | No API path exists by which a Jetson Agent (real or simulated) can create or self-register a new branch. | FR-BRN-006 | A |
 | AC-7 | A device's persistent `DeviceId` is assigned exactly once, on first activation, and is retained unchanged across restarts, reconnections, and a reactivation using a newly regenerated key, such that the Backend correlates all communications to the correct device. | FR-BRN-007 | A (model), B (first exercised) |
 | AC-8 | No device can be activated against a branch that does not already exist. | BR-002 | A |
@@ -377,6 +410,8 @@ All responses use the uniform response envelope defined in ARCH-001 §14.3 / ADR
 | AC-14 | Activation Key lookup is performed by indexed `keyId`, never by scanning/comparing every stored secret hash; the Backend never stores the complete plaintext key or plaintext secret in recoverable form. | NFR-SEC-002, ARCH-001 §15.5 (§1.4) | A |
 | AC-15 | A malformed Activation Key, an unknown `keyId`, and a correct `keyId` with an incorrect `secret` all produce the same externally observable rejection, with no Device record side effects. | FR-BRN-003, FR-BRN-004 (§5.6) | B |
 | AC-16 | Under concurrent activation attempts presenting the same valid, unconsumed Activation Key, exactly one attempt succeeds and no two callers are ever issued credentials from the same key. | FR-BRN-004, BR-003 (§12) | B |
+| AC-17 | Regenerating the key of an activated device is atomic: on failure the prior shared secret, activation status, and prior valid-key state are unchanged; on success the old shared secret can never authenticate again and only the newly generated key can restore the device. | FR-BRN-005, NFR-SEC-002 (§5.3) | A |
+| AC-18 | Under concurrent regeneration for the same device, exactly one request commits a valid `Unconsumed` key and every competing request fails cleanly (409, returning no plaintext key); after completion exactly one valid `Unconsumed` key exists. No last-writer-wins ordering is asserted. | FR-BRN-005 (§5.3, §19) | A |
 
 ## 15. Test Scenarios
 
@@ -465,7 +500,7 @@ The following are implementation parameters, not requirements, and are intention
 - Exact format/type of the persistent `DeviceId` (e.g., GUID vs. another externally-safe identifier scheme).
 - Exact fields comprising "contact details" for a branch.
 - Exact mechanism/timing by which the Backend updates `Device.LastKnownAddress` (e.g., derived from the activation request's originating address vs. a later operational contact).
-- Exact concurrency-control mechanism (e.g., database transaction isolation level, unique constraint) used to guarantee atomic Activation Key consumption under concurrent activation attempts (AC-16).
+- Exact concurrency-control mechanism (e.g., database transaction isolation level, unique constraint) used to guarantee atomic Activation Key consumption under concurrent activation attempts (AC-16), and — for concurrent **regeneration** (AC-18) — to guarantee at most one `Unconsumed` key per device (a filtered unique index is the approved mechanism; see IP-05).
 - Exact form of the simulated Jetson client (e.g., a script, a small standalone console app) — only its adherence to the production API contract (§1.2, §10) is a requirement of this feature.
 
 ---

@@ -1,0 +1,22 @@
+# DeepStream RTSP output — multicast loopback route (IP-06 follow-up).
+#
+# Re-applies fix-rtsp-multicast-route.sh on every boot (routes added with 'ip route add' do
+# not survive a reboot). Not DeepStream itself and not the Agent — this unit only restores a
+# host network prerequisite DeepStream's RTSP sink needs, so ARCH-CON-002/ADR-006 ("systemd
+# manages only the Agent, never DeepStream") is unaffected: DeepStream stays purely a child
+# process the Agent supervises.
+#
+# Installed to /etc/systemd/system/deepstream-rtsp-route.service by install.sh.
+
+[Unit]
+Description=DeepStream RTSP output - multicast loopback route
+After=network.target
+Before=weapon-detection-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/weapon-detection/agent/deployment/jetson/deepstream/fix-rtsp-multicast-route.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

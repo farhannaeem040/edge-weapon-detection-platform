@@ -45,14 +45,33 @@ public sealed record BranchResponseDto(
 
 // A camera as returned to a client. RtspUrl is redacted of any embedded credentials before it
 // leaves the Backend (RtspUrlSanitizer) — the stored value may contain userinfo, which is a secret.
+//
+// FS-11 §11: `OutputPath`/`OutputStreamUrl` describe this Camera's *annotated* stream — distinct
+// from `RtspUrl`, which is the camera's raw input. The output URL is null when the Device has no
+// annotated-output base configured. Unlike RtspUrl it needs no redaction: it is composed from a
+// base validated to carry no user info plus a pure-GUID path.
 public sealed record CameraResponseDto(
     Guid CameraId,
+    // FS-12 §2 — the administrator-defined public identifier. Returned alongside CameraId, never
+    // instead of it: the GUID remains the identity every Alert and DetectionEvent correlates on.
+    string CameraKey,
     string Name,
     string RtspUrl,
-    bool Enabled)
+    bool Enabled,
+    int SourceOrder,
+    string OutputPath,
+    string? OutputStreamUrl)
 {
     public static CameraResponseDto From(CameraView camera) =>
-        new(camera.CameraId, camera.Name, RtspUrlSanitizer.Redact(camera.RtspUrl), camera.Enabled);
+        new(
+            camera.CameraId,
+            camera.CameraKey,
+            camera.Name,
+            RtspUrlSanitizer.Redact(camera.RtspUrl),
+            camera.Enabled,
+            camera.SourceOrder,
+            camera.OutputPath,
+            camera.OutputStreamUrl);
 }
 
 // The Device as summarised within a branch (FS-02 §10.1/§10.3). DeviceId is present only once the
@@ -62,8 +81,22 @@ public sealed record CameraResponseDto(
 public sealed record DeviceSummaryDto(
     Guid? DeviceId,
     string ActivationStatus,
-    string? LastKnownAddress)
+    string? LastKnownAddress,
+    // FS-12 §2/§4 — the structured, authoritative network configuration. Null until an Admin
+    // configures it.
+    string? JetsonHost,
+    int? RtspOutputPort,
+    // FS-12 §2.1 — *computed* from JetsonHost/RtspOutputPort, not independently persisted state.
+    // Retained on the wire because the UI displays it as a single "annotated output base" line and
+    // should not have to recompose (and re-bracket IPv6) itself.
+    string? AnnotatedOutputBaseUrl)
 {
     public static DeviceSummaryDto From(DeviceSummaryView device) =>
-        new(device.DeviceId, device.ActivationStatus.ToString(), device.LastKnownAddress);
+        new(
+            device.DeviceId,
+            device.ActivationStatus.ToString(),
+            device.LastKnownAddress,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.AnnotatedOutputBaseUrl);
 }

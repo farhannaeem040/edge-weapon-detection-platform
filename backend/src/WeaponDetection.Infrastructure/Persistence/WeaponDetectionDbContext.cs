@@ -16,6 +16,9 @@ public class WeaponDetectionDbContext : DbContext
     public DbSet<Camera> Cameras => Set<Camera>();
     public DbSet<Device> Devices => Set<Device>();
     public DbSet<ActivationKey> ActivationKeys => Set<ActivationKey>();
+    public DbSet<Alert> Alerts => Set<Alert>();
+    public DbSet<BranchDailyAlertQuota> BranchDailyAlertQuotas => Set<BranchDailyAlertQuota>();
+    public DbSet<SuppressedDetectionEvent> SuppressedDetectionEvents => Set<SuppressedDetectionEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

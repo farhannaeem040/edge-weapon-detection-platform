@@ -54,10 +54,10 @@ public class BranchServiceTests : IDisposable
     private static NewBranchRequest CompleteRequest(int cameraCount = 1)
     {
         var cameras = Enumerable.Range(1, cameraCount)
-            .Select(i => new NewCameraRequest($"Camera {i}", $"rtsp://camera.example.local:554/stream{i}"))
+            .Select(i => new NewCameraRequest($"Camera {i}", $"rtsp://camera.example.local:554/stream{i}", $"cam-{Guid.NewGuid():N}"))
             .ToList();
 
-        return new NewBranchRequest("Downtown Branch", "1 High Street", "ops@example.local", cameras);
+        return new NewBranchRequest("Downtown Branch", "1 High Street", "ops@example.local", "100.98.226.80", 8554, cameras);
     }
 
     private static (string KeyId, string Secret) SplitPlaintext(string plaintextKey)

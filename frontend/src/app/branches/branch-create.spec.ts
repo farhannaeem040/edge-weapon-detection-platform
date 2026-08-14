@@ -27,9 +27,12 @@ function createdBranchResponse(): CreatedBranch {
     cameras: [
       {
         cameraId: '22222222-2222-2222-2222-222222222222',
+        cameraKey: 'cam-key-3',
         name: 'Front Entrance',
         rtspUrl: 'rtsp://camera.example.invalid:554/stream1',
         enabled: true,
+        sourceOrder: 0,
+        outputPath: 'cameras/00000000-0000-0000-0000-000000000000',
       },
     ],
     device: { activationStatus: 'Unactivated' },
@@ -85,8 +88,10 @@ describe('BranchCreateComponent', () => {
       name: 'Placeholder Branch',
       address: '1 Example Street, Placeholder City',
       contactDetails: 'placeholder@example.invalid',
+      jetsonHost: '100.98.226.80',
+      rtspOutputPort: 8554,
     });
-    cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL });
+    cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL, cameraKey: 'front-entrance' });
     fixture.detectChanges();
   }
 
@@ -96,6 +101,127 @@ describe('BranchCreateComponent', () => {
     );
     fixture.detectChanges();
   }
+
+  describe('FS-12 Jetson device configuration and camera keys', () => {
+    it('renders the Jetson host and RTSP port fields', () => {
+      expect(query('.branch-create__jetson-host')).not.toBeNull();
+      expect(query('.branch-create__rtsp-port')).not.toBeNull();
+    });
+
+    it('defaults the RTSP output port to 8554', () => {
+      expect(form().get('rtspOutputPort')?.value).toBe(8554);
+    });
+
+    it('requires the Jetson host', () => {
+      form().get('jetsonHost')?.setValue('');
+
+      expect(form().get('jetsonHost')?.errors).toEqual({ required: true });
+    });
+
+    it('rejects a scheme-prefixed or port-bearing host', () => {
+      const control = form().get('jetsonHost');
+
+      control?.setValue('rtsp://100.98.226.80');
+      expect(control?.errors).toEqual({ jetsonHost: true });
+
+      control?.setValue('100.98.226.80:8554');
+      expect(control?.errors).toEqual({ jetsonHost: true });
+    });
+
+    it('accepts an IPv4 address and a hostname', () => {
+      const control = form().get('jetsonHost');
+
+      control?.setValue('100.98.226.80');
+      expect(control?.errors).toBeNull();
+
+      control?.setValue('jetson-ljmu.local');
+      expect(control?.errors).toBeNull();
+    });
+
+    it('rejects an out-of-range RTSP port', () => {
+      const control = form().get('rtspOutputPort');
+
+      for (const invalid of [0, -1, 65536]) {
+        control?.setValue(invalid);
+        expect(control?.errors?.['rtspOutputPort']).withContext(String(invalid)).toBeTrue();
+      }
+    });
+
+    it('renders a camera key input on every camera row', () => {
+      expect(query('.camera__key')).not.toBeNull();
+    });
+
+    it('requires a camera key', () => {
+      cameras().at(0).get('cameraKey')?.setValue('');
+
+      expect(cameras().at(0).get('cameraKey')?.errors).toEqual({ required: true });
+    });
+
+    it('rejects a duplicate camera key across rows and reports it on both', () => {
+      (component as unknown as { addCamera(): void }).addCamera();
+      fixture.detectChanges();
+      cameras().at(0).get('cameraKey')?.setValue('front-camera');
+      cameras().at(1).get('cameraKey')?.setValue('front-camera');
+      cameras().updateValueAndValidity();
+
+      expect(cameras().errors).toEqual({ cameraKeyDuplicate: true });
+      expect(cameras().at(0).get('cameraKey')?.errors?.['cameraKeyDuplicate']).toBeTrue();
+      expect(cameras().at(1).get('cameraKey')?.errors?.['cameraKeyDuplicate']).toBeTrue();
+    });
+
+    it('preserves every entered value when an unrelated field fails validation', () => {
+      fillValidForm();
+      form().get('name')?.setValue('');
+      fixture.detectChanges();
+
+      submitForm();
+
+      // FS-12 task Phase 5: nothing is reset — the camera array, the key, the host and the port all
+      // survive so the Admin corrects one field rather than retyping the branch.
+      expect(cameras().at(0).get('cameraKey')?.value).toBe('front-entrance');
+      expect(form().get('jetsonHost')?.value).toBe('100.98.226.80');
+      expect(form().get('rtspOutputPort')?.value).toBe(8554);
+    });
+
+    it('preserves entered values and flags the row when the Backend rejects a key', () => {
+      fillValidForm();
+      submitForm();
+
+      httpTesting.expectOne(BRANCHES_URL).flush(
+        { success: false, errorCode: 'CAMERA_KEY_ALREADY_EXISTS' },
+        { status: 400, statusText: 'Bad Request' },
+      );
+      fixture.detectChanges();
+
+      expect(cameras().at(0).get('cameraKey')?.value).toBe('front-entrance');
+      expect(form().get('jetsonHost')?.value).toBe('100.98.226.80');
+    });
+
+    it('maps a Backend host rejection onto the host control', () => {
+      fillValidForm();
+      submitForm();
+
+      httpTesting.expectOne(BRANCHES_URL).flush(
+        { success: false, errorCode: 'JETSON_HOST_INVALID' },
+        { status: 400, statusText: 'Bad Request' },
+      );
+      fixture.detectChanges();
+
+      expect(form().get('jetsonHost')?.errors).toEqual({ jetsonHost: true });
+    });
+
+    it('submits no internal camera id for a new camera', () => {
+      fillValidForm();
+      submitForm();
+
+      const body = httpTesting.expectOne(BRANCHES_URL).request.body as {
+        cameras: Record<string, unknown>[];
+      };
+
+      expect(body.cameras[0]['cameraId']).toBeUndefined();
+      expect(body.cameras[0]['cameraKey']).toBe('front-entrance');
+    });
+  });
 
   describe('camera FormArray', () => {
     it('starts with exactly one camera', () => {
@@ -115,8 +241,8 @@ describe('BranchCreateComponent', () => {
     it('removes a camera while more than one remains', () => {
       query('.branch-create__add-camera')?.click();
       fixture.detectChanges();
-      cameras().at(0).patchValue({ name: 'First', rtspUrl: PLACEHOLDER_RTSP_URL });
-      cameras().at(1).patchValue({ name: 'Second', rtspUrl: SECOND_RTSP_URL });
+      cameras().at(0).patchValue({ name: 'First', rtspUrl: PLACEHOLDER_RTSP_URL, cameraKey: 'first-camera' });
+      cameras().at(1).patchValue({ name: 'Second', rtspUrl: SECOND_RTSP_URL, cameraKey: 'second-camera' });
 
       queryAll('.camera__remove')[0].click();
       fixture.detectChanges();
@@ -158,13 +284,13 @@ describe('BranchCreateComponent', () => {
     });
 
     it('requires a camera name', () => {
-      cameras().at(0).patchValue({ name: '  ', rtspUrl: PLACEHOLDER_RTSP_URL });
+      cameras().at(0).patchValue({ name: '  ', rtspUrl: PLACEHOLDER_RTSP_URL, cameraKey: 'cam-key-7' });
 
       expect(cameras().at(0).get('name')?.hasError('required')).toBeTrue();
     });
 
     it('requires an RTSP URL', () => {
-      cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: '' });
+      cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: '', cameraKey: 'cam-key-8' });
 
       expect(cameras().at(0).get('rtspUrl')?.hasError('required')).toBeTrue();
     });
@@ -190,7 +316,7 @@ describe('BranchCreateComponent', () => {
 
     it('shows a generic RTSP error that never echoes the submitted URL', () => {
       const credentialBearingUrl = 'http://someuser:somepass@camera.example.invalid/stream1';
-      cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: credentialBearingUrl });
+      cameras().at(0).patchValue({ name: 'Front Entrance', rtspUrl: credentialBearingUrl, cameraKey: 'cam-key-9' });
       cameras().at(0).get('rtspUrl')?.markAsTouched();
       fixture.detectChanges();
 
@@ -214,8 +340,15 @@ describe('BranchCreateComponent', () => {
         name: '  Placeholder Branch  ',
         address: '1 Example Street, Placeholder City',
         contactDetails: 'placeholder@example.invalid',
+        jetsonHost: '  100.98.226.80  ',
+        rtspOutputPort: 8554,
       });
-      cameras().at(0).patchValue({ name: '  Front Entrance ', rtspUrl: ` ${PLACEHOLDER_RTSP_URL} ` });
+      cameras().at(0).patchValue({
+        name: '  Front Entrance ',
+        rtspUrl: ` ${PLACEHOLDER_RTSP_URL} `,
+        // Trimmed of surrounding whitespace, never lowercased (FS-12 §3).
+        cameraKey: '  front-entrance  ',
+      });
       fixture.detectChanges();
 
       submitForm();
@@ -226,7 +359,11 @@ describe('BranchCreateComponent', () => {
         name: 'Placeholder Branch',
         address: '1 Example Street, Placeholder City',
         contactDetails: 'placeholder@example.invalid',
-        cameras: [{ name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL }],
+        jetsonHost: '100.98.226.80',
+        rtspOutputPort: 8554,
+        cameras: [
+          { name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL, cameraKey: 'front-entrance' },
+        ],
       });
 
       request.flush({ success: true, data: createdBranchResponse() });
@@ -236,15 +373,15 @@ describe('BranchCreateComponent', () => {
       fillValidForm();
       query('.branch-create__add-camera')?.click();
       fixture.detectChanges();
-      cameras().at(1).patchValue({ name: 'Back Entrance', rtspUrl: SECOND_RTSP_URL });
+      cameras().at(1).patchValue({ name: 'Back Entrance', rtspUrl: SECOND_RTSP_URL, cameraKey: 'back-entrance' });
       fixture.detectChanges();
 
       submitForm();
 
       const request = httpTesting.expectOne(BRANCHES_URL);
       expect((request.request.body as CreateBranchRequest).cameras).toEqual([
-        { name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL },
-        { name: 'Back Entrance', rtspUrl: SECOND_RTSP_URL },
+        { name: 'Front Entrance', rtspUrl: PLACEHOLDER_RTSP_URL, cameraKey: 'front-entrance' },
+        { name: 'Back Entrance', rtspUrl: SECOND_RTSP_URL, cameraKey: 'back-entrance' },
       ]);
 
       request.flush({ success: true, data: createdBranchResponse() });

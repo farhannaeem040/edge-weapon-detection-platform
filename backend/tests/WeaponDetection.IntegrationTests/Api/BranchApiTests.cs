@@ -59,7 +59,9 @@ public class BranchApiTests : IDisposable
             name,
             address = "1 High Street",
             contactDetails = "ops@example.local",
-            cameras = new[] { new { name = "Front Entrance", rtspUrl } },
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
+            cameras = new[] { new { name = "Front Entrance", rtspUrl, cameraKey = $"cam-{Guid.NewGuid():N}" } },
         };
 
     private async Task<string> LoginAsync()
@@ -209,7 +211,9 @@ public class BranchApiTests : IDisposable
             // name omitted
             address = "1 High Street",
             contactDetails = "ops@example.local",
-            cameras = new[] { new { name = "Front Entrance", rtspUrl = "rtsp://camera.example.local/stream" } },
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
+            cameras = new[] { new { name = "Front Entrance", rtspUrl = "rtsp://camera.example.local/stream", cameraKey = $"cam-{Guid.NewGuid():N}" } },
         };
 
         using var response = await SendAsync(HttpMethod.Post, BranchesRoute, token, incomplete);

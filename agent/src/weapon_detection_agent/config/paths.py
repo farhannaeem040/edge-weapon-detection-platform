@@ -11,9 +11,11 @@ two things and nothing more:
 
 Deliberately out of scope for this task (IP-02 §8):
 
-* The media/runtime directories ``snapshots/``, ``recordings/``, ``models/``, ``pipeline/`` and
-  ``runtime/`` are part of the approved ADR-008 layout but have **no writer yet**, so they are not
-  created here — the plans that introduce their writers create them (Engineering Principle 9).
+* The media directories ``snapshots/``, ``recordings/``, ``models/``, and ``pipeline/`` are part of
+  the approved ADR-008 layout but have **no writer yet**, so they are not created here — the plans
+  that introduce their writers create them (Engineering Principle 9). ``runtime/`` was in this list
+  until IP-07 T-82: the detection event bridge's Unix domain socket (ADR-005) is its first writer,
+  so it is now provisioned below like ``config/``/``database/``/``logs/``.
 * **Ownership** is not changed. Assigning the layout to the unprivileged ``weapon-detection``
   service user (D-2) is the installer's job on the Jetson (T-41); this module only sets *modes*.
 * No file is created — the database file (T-35), the activation-key file (§6.1), and the log file
@@ -37,26 +39,35 @@ from pathlib import Path
 DEFAULT_ROOT = Path("/opt/weapon-detection")
 
 # Directory modes fixed by ADR-008 / IP-02 §8. config/ and database/ are 0700 because they hold the
-# Activation Key file and the shared-secret-bearing database; the root and logs/ are 0750.
+# Activation Key file and the shared-secret-bearing database; the root and logs/ are 0750. runtime/
+# is 0700 (IP-07 T-82, FS-05 §4.5) for the same reason as config/database — it holds the detection
+# event Unix domain socket, a co-located-process IPC channel that should be no more group/world-
+# accessible than the credential-bearing directories are.
 ROOT_MODE = 0o750
 CONFIG_DIR_MODE = 0o700
 DATABASE_DIR_MODE = 0o700
 LOGS_DIR_MODE = 0o750
+RUNTIME_DIR_MODE = 0o700
+# 0750 (FS-08 §5) — snapshots/ is the spool for captured evidence JPEGs (IP-10 T-140), less
+# sensitive than the credential-bearing config/database/runtime directories (no secret lives here)
+# but still not world-readable.
+SNAPSHOTS_DIR_MODE = 0o750
 
 # Well-known file names within the layout. Their *paths* are resolved here as the single source of
 # the layout; their *contents* are written by later tasks (see the module docstring).
 DATABASE_FILENAME = "agent.db"
 ACTIVATION_KEY_FILENAME = "activation-key"
 LOG_FILENAME = "agent.log"
+DETECTION_SOCKET_FILENAME = "detection.sock"
 
 # ADR-008 directories this milestone must NOT create, because nothing writes to them yet. Named
-# explicitly so the test that asserts their absence reads against one authoritative list.
+# explicitly so the test that asserts their absence reads against one authoritative list. `runtime/`
+# was removed from this list by IP-07 T-82 (the detection event bridge is its first writer);
+# `snapshots` was removed by IP-10 T-140 (evidence capture is its first writer, FS-08 §5).
 DEFERRED_DIRECTORIES: tuple[str, ...] = (
-    "snapshots",
     "recordings",
     "models",
     "pipeline",
-    "runtime",
 )
 
 
@@ -97,6 +108,24 @@ class AgentPaths:
         return self.root / "logs"
 
     @property
+    def runtime_dir(self) -> Path:
+        """The ``runtime/`` directory (mode ``0700``) — holds the detection event Unix domain
+        socket (IP-07 T-82, ADR-005). First writer: :class:`DetectionIngestHandler`."""
+        return self.root / "runtime"
+
+    @property
+    def snapshots_dir(self) -> Path:
+        """The ``snapshots/`` directory (mode ``0750``) — the evidence-capture spool (IP-10 T-140,
+        FS-08 §5). First writer: :class:`DetectionIngestHandler`'s snapshot-capture path."""
+        return self.root / "snapshots"
+
+    @property
+    def detection_socket_file(self) -> Path:
+        """Path of the detection event Unix domain socket (``runtime/detection.sock``). Not created
+        here — bound by ``DetectionIngestHandler.start()`` (IP-07 T-86)."""
+        return self.runtime_dir / DETECTION_SOCKET_FILENAME
+
+    @property
     def database_file(self) -> Path:
         """Path of the SQLite database file (``database/agent.db``). Not created here (T-35)."""
         return self.database_dir / DATABASE_FILENAME
@@ -123,6 +152,8 @@ class AgentPaths:
             (self.config_dir, CONFIG_DIR_MODE),
             (self.database_dir, DATABASE_DIR_MODE),
             (self.logs_dir, LOGS_DIR_MODE),
+            (self.runtime_dir, RUNTIME_DIR_MODE),
+            (self.snapshots_dir, SNAPSHOTS_DIR_MODE),
         )
 
     def provision(self) -> AgentPaths:

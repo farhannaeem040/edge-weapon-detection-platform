@@ -41,6 +41,8 @@ from weapon_detection_agent.config.settings import load_settings
 from weapon_detection_agent.persistence.database import open_connection
 from weapon_detection_agent.persistence.device_identity_repository import DeviceIdentityRepository
 from weapon_detection_agent.runtime.state import get_runtime
+from weapon_detection_agent.runtime.supervisor import StartupBranch
+from weapon_detection_agent.validation.models import CredentialValidationResult
 
 DEVICE_ID = "device-sim-11111111"
 OTHER_DEVICE_ID = "device-sim-99999999"
@@ -127,6 +129,26 @@ class _SpyClient(BackendActivationClient):
         await super().aclose()
 
 
+class _FakeValidationClient:
+    """A validation client for the integration lifespan — no wire, Valid by default (T-61).
+
+    The T-57 validation wire contract is tested elsewhere; this suite exercises the activation wire,
+    so the Branch-D startup validation and the monitor use a deterministic in-memory client here.
+    """
+
+    def __init__(self, result: CredentialValidationResult | None = None) -> None:
+        self._result = result if result is not None else CredentialValidationResult.valid(200)
+        self.validate_calls = 0
+        self.closed = False
+
+    async def validate(self, device_id: str, shared_secret: object) -> CredentialValidationResult:
+        self.validate_calls += 1
+        return self._result
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def build_app(tmp_path: Path) -> Iterator[object]:
     """Yield a builder that wires the real lifespan to a SimulatedBackend over MockTransport."""
@@ -156,10 +178,14 @@ def build_app(tmp_path: Path) -> Iterator[object]:
                 log_level="INFO",
             )
 
+        def validation_factory(settings: object) -> _FakeValidationClient:
+            return _FakeValidationClient()
+
         return create_app(
             settings_loader=loader,
             clock=clock,  # type: ignore[arg-type]
             backend_client_factory=factory,  # type: ignore[arg-type]
+            validation_client_factory=validation_factory,  # type: ignore[arg-type]
         )
 
     # Expose the created spies and the Agent root to the test through the builder itself.
@@ -220,10 +246,10 @@ def test_first_activation_stores_identity_and_removes_file_key(build_app: object
     assert _config_count(paths) == 0  # ConfigCache untouched
 
 
-# --- 9. Restart without a key → no activation request ------------------------------------------
+# --- 9. Restart without a key → validate, never activate (IP-05 T-61 Branch D) -----------------
 
 
-def test_restart_without_key_makes_no_request(build_app: object) -> None:
+def test_restart_without_key_makes_no_activation_request(build_app: object) -> None:
     sim = SimulatedBackend()
     sim.register_key(KEY_1, device_id=DEVICE_ID, branch_id=BRANCH_ID)
     paths = _root_of(build_app)
@@ -231,15 +257,17 @@ def test_restart_without_key_makes_no_request(build_app: object) -> None:
 
     with TestClient(build_app(sim, key=None)):  # type: ignore[operator]
         pass
-    assert sim.request_count == 1
+    assert sim.request_count == 1  # first activation
 
-    # Second lifespan, no key present (it was consumed+deleted) → offline no-op.
+    # Second lifespan, no key present (it was consumed+deleted) → Branch D: validate, not activate.
     app2 = build_app(sim, key=None, clock=lambda: T1)  # type: ignore[operator]
     with TestClient(app2):
         runtime = get_runtime(app2)
         assert runtime is not None
-        assert runtime.activation.outcome is ActivationOutcome.ALREADY_ACTIVATED
-    assert sim.request_count == 1  # no additional request
+        assert runtime.activation is None  # no activation on restart
+        assert runtime.supervisor is not None
+        assert runtime.supervisor.startup_branch is StartupBranch.OPERATIONAL_VALIDATED
+    assert sim.request_count == 1  # no additional activation request
 
 
 # --- 10-11. Reactivation with a matching Device ID ---------------------------------------------

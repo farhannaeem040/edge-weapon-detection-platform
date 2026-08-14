@@ -61,7 +61,7 @@ public class DeviceServiceActivationTests : IDisposable
     private async Task<(Guid BranchId, Guid DeviceRecordId, string PlaintextKey)> SeedBranchAsync()
     {
         var branch = new Branch("Downtown Branch", "1 High Street", "ops@example.local");
-        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1");
+        var camera = new Camera(branch.BranchId, "Front Entrance", "rtsp://camera.example.local:554/stream1", $"cam-{Guid.NewGuid():N}");
         var provisioning = _service.ProvisionForBranch(branch.BranchId);
 
         _dbContext.Branches.Add(branch);
@@ -255,7 +255,7 @@ public class DeviceServiceActivationTests : IDisposable
     }
 
     [Fact]
-    public async Task ActivateAsync_AfterReactivation_TheRegeneratedKeyIsConsumedAndOriginalStaysInvalidated()
+    public async Task ActivateAsync_AfterReactivation_BothTheOriginalAndRegeneratedKeysAreConsumed()
     {
         var (branchId, deviceRecordId, firstKey) = await SeedBranchAsync();
         await _service.ActivateAsync(firstKey);
@@ -266,10 +266,11 @@ public class DeviceServiceActivationTests : IDisposable
             .Where(k => k.DeviceRecordId == deviceRecordId)
             .ToListAsync();
 
-        // First key: consumed by the first activation, then invalidated by regeneration → Invalidated.
-        // Second key: consumed by the reactivation → Consumed. Exactly one of each state remains.
+        // IP-05 T-50: regeneration invalidates only Unconsumed keys, so the already-Consumed first key
+        // is left Consumed (historical, not incorrectly altered); the regenerated key is then consumed
+        // by the reactivation. Both keys end Consumed, and neither is Invalidated.
         Assert.Equal(2, keys.Count);
-        Assert.Equal(ActivationKeyStatus.Invalidated, keys.Single(k => k.ActivationKeyId == KeyIdOf(firstKey)).Status);
+        Assert.Equal(ActivationKeyStatus.Consumed, keys.Single(k => k.ActivationKeyId == KeyIdOf(firstKey)).Status);
         Assert.Equal(
             ActivationKeyStatus.Consumed,
             keys.Single(k => k.ActivationKeyId == KeyIdOf(regeneration.PlaintextActivationKey)).Status);

@@ -1,6 +1,8 @@
 using System.Buffers.Text;
 using System.Security.Cryptography;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using WeaponDetection.Application.Exceptions;
 using WeaponDetection.Application.Interfaces;
 using WeaponDetection.Domain;
 using WeaponDetection.Infrastructure.Persistence;
@@ -45,6 +47,45 @@ public class DeviceService : IDeviceService
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
     }
 
+    public async Task<DeviceNetworkUpdate?> SetNetworkConfigurationAsync(
+        Guid branchId,
+        string? jetsonHost,
+        int? rtspOutputPort,
+        CancellationToken cancellationToken = default)
+    {
+        if (branchId == Guid.Empty)
+        {
+            return null;
+        }
+
+        // Tracked (not AsNoTracking) — this is the one path that mutates the Device row.
+        var device = await _dbContext.Devices
+            .SingleOrDefaultAsync(d => d.BranchId == branchId, cancellationToken);
+        if (device is null)
+        {
+            return null;
+        }
+
+        // Validation lives in the entity, so no service or controller can persist a base URL the
+        // domain would have rejected. An invalid value throws before SaveChanges, leaving the row
+        // untouched.
+        device.SetNetworkConfiguration(jetsonHost, rtspOutputPort);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        // DeviceId stays null for a Device that has not activated yet — the update still applied,
+        // which is why this is a distinct result type and not a nullable DeviceDetailView.
+        //
+        // FS-12 §9 item 10: nothing else on the Device was touched — credentials, activation status
+        // and the Cameras are all untouched, and because host/port are excluded from
+        // configurationVersion this change cannot restart the Bridge.
+        return new DeviceNetworkUpdate(
+            device.BranchId,
+            device.DeviceId,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.ComposeAnnotatedOutputBase());
+    }
+
     public async Task<DeviceDetailView?> GetDeviceByDeviceIdAsync(
         Guid deviceId,
         CancellationToken cancellationToken = default)
@@ -72,7 +113,10 @@ public class DeviceService : IDeviceService
             device.DeviceId!.Value,
             device.BranchId,
             device.ActivationStatus,
-            device.LastKnownAddress);
+            device.LastKnownAddress,
+            device.JetsonHost,
+            device.RtspOutputPort,
+            device.ComposeAnnotatedOutputBase());
     }
 
     public DeviceProvisioning ProvisionForBranch(Guid branchId)
@@ -107,12 +151,13 @@ public class DeviceService : IDeviceService
             return null;
         }
 
-        // The invalidation of the old key and the insertion of its replacement are one atomic unit:
-        // either both happen or neither does, so a failure partway through can never leave the
-        // Device with two live keys or none (FS-02 §5.3, §12; IP-01 T-17). SQL Server enforces the
-        // atomicity — hence this method's behavioural coverage is an integration test against a real
-        // database (IP-01 §9). The existence read is kept inside the transaction so it shares the
-        // same consistent snapshot as the writes.
+        // Regeneration is a single atomic unit (FS-02 §5.3, §12; IP-05 T-50): invalidating the old
+        // Unconsumed key(s), the security-first credential reset for an activated device, and the
+        // insertion of the replacement key either all commit or all roll back. A failure partway
+        // through can never leave the Device with a revoked secret and no key, two Unconsumed keys, or
+        // a changed DeviceId. SQL Server enforces the atomicity — hence the behavioural coverage is an
+        // integration test against a real database (IP-01 §9). The existence read is kept inside the
+        // transaction so it shares the same consistent snapshot as the writes.
         await using var transaction =
             await _dbContext.Database.BeginTransactionAsync(cancellationToken);
 
@@ -121,51 +166,113 @@ public class DeviceService : IDeviceService
         if (device is null)
         {
             // Nothing has been written; the disposing transaction rolls back cleanly. Null maps to
-            // 404 at the API layer (FS-02 §10.2).
+            // 404 at the API layer (FS-02 §10.2). This reveals nothing about whether credential
+            // material existed.
             return null;
         }
 
-        // The branch's current key is the single non-Invalidated record for this Device (a Device
-        // accumulates a history of keys, of which the older ones are already Invalidated — FS-02
-        // §5.3). It is invalidated regardless of whether it is Unconsumed or already Consumed
-        // (FS-02 §5.3 step 3, AC-5): an already-consumed key cannot be reused anyway, but marking it
-        // Invalidated keeps exactly one non-Invalidated key per Device as an invariant. Loaded
-        // tracked (no AsNoTracking) so the status transition is persisted. The Device row itself is
-        // never modified here — regeneration does not change activation status.
-        var currentKeys = await _dbContext.ActivationKeys
+        // Invalidate every currently Unconsumed key so at most one Unconsumed key survives per Device
+        // (the filtered unique index of T-49). Historical Consumed/Invalidated keys are left exactly
+        // as they are — a Consumed key is already unusable, and preserving it keeps an accurate record
+        // of what was actually used. Loaded tracked (no AsNoTracking) so the transition is persisted.
+        var unconsumedKeys = await _dbContext.ActivationKeys
             .Where(k => k.DeviceRecordId == device.DeviceRecordId
-                && k.Status != ActivationKeyStatus.Invalidated)
+                && k.Status == ActivationKeyStatus.Unconsumed)
             .ToListAsync(cancellationToken);
-        foreach (var currentKey in currentKeys)
+        foreach (var unconsumedKey in unconsumedKeys)
         {
-            currentKey.Invalidate();
+            unconsumedKey.Invalidate();
         }
 
-        // The replacement stores only the new keyId and the salted secret hash; the complete
-        // plaintext key is carried back out for the single disclosure and never persisted or logged
-        // (FS-02 §1.4, §11). The new key points at the same internal DeviceRecordId, never the
-        // (still possibly NULL) external DeviceId (FS-02 §1.3).
+        // The security-first credential reset (FS-02 §5.3 amended, ADR-015). An Activated or
+        // already-ReactivationRequired device has its shared secret revoked and moves to
+        // ReactivationRequired, retaining its permanent DeviceId (RequireReactivation is idempotent
+        // from ReactivationRequired). An Unactivated device has no DeviceId and no secret to revoke,
+        // so it stays Unactivated and RequireReactivation is deliberately not called on it.
+        if (device.ActivationStatus != DeviceActivationStatus.Unactivated)
+        {
+            device.RequireReactivation();
+        }
+
+        // The replacement stores only the new keyId and the salted secret hash; the complete plaintext
+        // key exists here only as a local (FS-02 §1.4, §11) and is placed in a caller-visible result
+        // only after a successful commit, below. The new key points at the same internal
+        // DeviceRecordId, never the (possibly NULL) external DeviceId (FS-02 §1.3).
         var generated = _activationKeyGenerator.Generate();
         var replacement = new ActivationKey(
             generated.KeyId, device.DeviceRecordId, generated.SecretHash);
-        _dbContext.ActivationKeys.Add(replacement);
 
         try
         {
+            // A no-op in production; overridden only by a concurrency test to force two regenerations
+            // to interleave deterministically after both have read the pre-state and before either
+            // writes (so the loser genuinely hits the T-49 unique index). See
+            // OnBeforeRegenerationWriteAsync.
+            await OnBeforeRegenerationWriteAsync(cancellationToken);
+
+            // Flush the invalidations and the status/secret change BEFORE inserting the new Unconsumed
+            // key, so the filtered unique index (IX_ActivationKeys_DeviceRecordId_Unconsumed, T-49)
+            // never transiently sees two Unconsumed rows for this device within one statement.
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            _dbContext.ActivationKeys.Add(replacement);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
             await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex) when (IsUnconsumedKeyUniqueIndexViolation(ex))
+        {
+            // A concurrent regeneration already committed the single Unconsumed key for this device
+            // (T-49's filtered unique index is the final authority). Roll back — the winner's key is
+            // untouched — and clear the change tracker so this scoped context can never later persist
+            // the failed transaction's staged state. No plaintext key is returned to the loser; there
+            // is no automatic retry (IP-05 §3). T-52 maps this to 409/ACTIVATION_KEY_REGENERATION_CONFLICT.
+            await transaction.RollbackAsync(cancellationToken);
+            _dbContext.ChangeTracker.Clear();
+            throw new ActivationKeyRegenerationConflictException();
         }
         catch (DbUpdateException ex)
         {
+            // Any other persistence failure is unexpected — not a regeneration conflict. Roll back and
+            // clear the tracker; the plaintext key/secret is never interpolated into the message.
             await transaction.RollbackAsync(cancellationToken);
-
-            // The plaintext key/secret is never interpolated into the message — an exception is a
-            // log entry waiting to happen (FS-02 §11).
+            _dbContext.ChangeTracker.Clear();
             throw new InvalidOperationException(
                 "Activation key regeneration failed while persisting the new key.", ex);
         }
 
+        // Constructed only after the transaction has committed successfully, so a rollback or a losing
+        // concurrent request can never return a plaintext key (IP-05 T-50 plaintext-return safety).
         return new ActivationKeyRegenerationResult(generated.PlaintextKey);
+    }
+
+    // A deliberately empty extension point invoked inside RegenerateActivationKeyAsync's transaction,
+    // after the device/keys have been read and the in-memory changes staged but before any database
+    // write. It exists solely so a concurrency test can synchronize two regenerations at exactly this
+    // point (both having read the pre-state) and force a deterministic race on the T-49 unique index,
+    // rather than relying on a flaky timing window. Production never overrides it, and it is protected
+    // — invisible to the API surface and to IDeviceService.
+    protected virtual Task OnBeforeRegenerationWriteAsync(CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    // True only for the specific unique-index violation on IX_ActivationKeys_DeviceRecordId_Unconsumed
+    // (a concurrent regeneration conflict, T-49/T-50) — never for an unrelated DbUpdateException, which
+    // must remain an unexpected persistence failure. SQL Server raises error 2601 (duplicate key in a
+    // unique index) or 2627 (unique constraint); the index name pins it to this constraint.
+    private static bool IsUnconsumedKeyUniqueIndexViolation(Exception exception)
+    {
+        const string indexName = "IX_ActivationKeys_DeviceRecordId_Unconsumed";
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException
+                && sqlException.Number is 2601 or 2627
+                && sqlException.Message.Contains(indexName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task<DeviceActivationResult> ActivateAsync(

@@ -33,9 +33,12 @@ function placeholderBranch(overrides: Partial<Branch> = {}): Branch {
     cameras: [
       {
         cameraId: '22222222-2222-2222-2222-222222222222',
+        cameraKey: 'cam-key-14',
         name: 'Front Entrance',
         rtspUrl: REDACTED_RTSP_URL,
         enabled: true,
+        sourceOrder: 0,
+        outputPath: 'cameras/00000000-0000-0000-0000-000000000000',
       },
     ],
     device: { activationStatus: 'Unactivated' },
@@ -48,7 +51,10 @@ describe('BranchDetailComponent', () => {
   let httpTesting: HttpTestingController;
 
   /** Builds the component with `branchId` on the route, as the router would supply it. */
-  async function createWithRouteParam(branchId: string | null): Promise<void> {
+  async function createWithRouteParam(
+    branchId: string | null,
+    queryParams: Record<string, string> = {},
+  ): Promise<void> {
     TestBed.resetTestingModule();
 
     await TestBed.configureTestingModule({
@@ -62,6 +68,10 @@ describe('BranchDetailComponent', () => {
           useValue: {
             snapshot: {
               paramMap: convertToParamMap(branchId === null ? {} : { branchId }),
+              // FS-14 §5, IP-16 T-12: branch-detail.ts reads the `tab` query param to preselect
+              // the Live Monitoring tab on a deep link — empty by default, so every existing test
+              // keeps its default 'overview' tab behaviour.
+              queryParamMap: convertToParamMap(queryParams),
             },
           },
         },
@@ -116,6 +126,73 @@ describe('BranchDetailComponent', () => {
     expect(element().querySelector('.branch__contact')?.textContent).toContain(
       'placeholder@example.invalid',
     );
+  });
+
+  describe('camera stream URL (manual-review round 2, Correction 1)', () => {
+    it('labels the camera name and stream URL explicitly', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(text()).toContain('Camera name:');
+      // FS-11 §11 relabel: a camera now has two URLs, so the input one is named explicitly.
+      expect(text()).toContain('Input stream URL:');
+      expect(text()).toContain(REDACTED_RTSP_URL);
+    });
+
+    it('never renders the stream URL as a clickable/navigable link', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(element().querySelector('.branch__camera-url a')).toBeNull();
+    });
+
+    it('labels the camera status explicitly', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      expect(text()).toContain('Status:');
+      expect(text()).toContain('Enabled');
+    });
+
+    it('offers an independent copy action for each camera, never automatic clipboard writes', () => {
+      load({
+        success: true,
+        data: placeholderBranch({
+          cameras: [
+            {
+              cameraId: '22222222-2222-2222-2222-222222222222',
+              cameraKey: 'cam-key-15',
+              name: 'Camera One',
+              rtspUrl: 'rtsp://my-server-ip:8554/camera1',
+              enabled: true,
+              sourceOrder: 1,
+              outputPath: 'cameras/00000000-0000-0000-0000-000000000001',
+            },
+            {
+              cameraId: '55555555-5555-5555-5555-555555555555',
+              cameraKey: 'cam-key-16',
+              name: 'Camera Two',
+              rtspUrl: 'rtsp://my-server-ip:8554/camera2',
+              enabled: true,
+              sourceOrder: 2,
+              outputPath: 'cameras/00000000-0000-0000-0000-000000000002',
+            },
+          ],
+        }),
+      });
+
+      const copyButtons = element().querySelectorAll(
+        '.branch__camera-copy',
+      ) as NodeListOf<HTMLButtonElement>;
+      expect(copyButtons.length).toBe(2);
+      expect(copyButtons[0].tagName).toBe('BUTTON');
+      expect(copyButtons[1].tagName).toBe('BUTTON');
+    });
+
+    it('wraps long URLs safely rather than overflowing the card', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const urlElement = element().querySelector('.branch__camera-url') as HTMLElement | null;
+      const styles = urlElement ? getComputedStyle(urlElement) : null;
+      expect(styles?.overflowWrap).toBe('anywhere');
+    });
   });
 
   describe('edit action (T-45)', () => {
@@ -235,15 +312,21 @@ describe('BranchDetailComponent', () => {
         cameras: [
           {
             cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-17',
             name: 'Front Entrance',
             rtspUrl: REDACTED_RTSP_URL,
             enabled: true,
+            sourceOrder: 3,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000003',
           },
           {
             cameraId: '55555555-5555-5555-5555-555555555555',
+            cameraKey: 'cam-key-18',
             name: 'Rear Exit',
             rtspUrl: 'rtsp://camera.example.invalid:554/stream2',
             enabled: false,
+            sourceOrder: 4,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000004',
           },
         ],
       }),
@@ -262,9 +345,12 @@ describe('BranchDetailComponent', () => {
         cameras: [
           {
             cameraId: '55555555-5555-5555-5555-555555555555',
+            cameraKey: 'cam-key-19',
             name: 'Rear Exit',
             rtspUrl: 'rtsp://camera.example.invalid:554/stream2',
             enabled: false,
+            sourceOrder: 5,
+            outputPath: 'cameras/00000000-0000-0000-0000-000000000005',
           },
         ],
       }),
@@ -282,10 +368,12 @@ describe('BranchDetailComponent', () => {
   it('renders the Backend-provided RTSP value verbatim and redacts nothing itself', () => {
     load({ success: true, data: placeholderBranch() });
 
-    // The Backend already redacted the credential span; the view displays exactly what arrived.
-    expect(element().querySelector('.branch__camera-url')?.textContent?.trim()).toBe(
-      REDACTED_RTSP_URL,
-    );
+    // The Backend already redacted the credential span; the view displays exactly what arrived,
+    // alongside the "Camera stream URL:" label — never re-redacted or altered.
+    const normalized = (element().querySelector('.branch__camera-url')?.textContent ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    expect(normalized).toBe(`Input stream URL: ${REDACTED_RTSP_URL}`);
   });
 
   it('never renders a credential-bearing RTSP URL, because the Backend never sends one', () => {
@@ -473,8 +561,32 @@ describe('BranchDetailComponent', () => {
       fixture.detectChanges();
     }
 
-    function succeed(): void {
+    /**
+     * Answers a successful regeneration and the branch re-read the component issues on success (P1:
+     * the status badge must reflect the new state — `ReactivationRequired` for a Device that had been
+     * Activated). `branchAfter` is what that refresh returns; it defaults to the Unactivated
+     * placeholder, matching the default confirmation, whose Device stays Unactivated on regeneration.
+     */
+    function succeed(branchAfter: Branch = placeholderBranch()): void {
       flushRegeneration({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: branchAfter });
+      fixture.detectChanges();
+    }
+
+    /** The branch as it stands after regenerating an Activated Device: revoked, ReactivationRequired. */
+    function reactivationRequiredBranch(): Branch {
+      return placeholderBranch({
+        device: { activationStatus: 'ReactivationRequired', deviceId: PLACEHOLDER_DEVICE_ID },
+      });
+    }
+
+    /** The branch as loaded for an Activated Device (the destructive-regeneration starting point). */
+    function activatedBranch(): Branch {
+      return placeholderBranch({
+        device: { activationStatus: 'Activated', deviceId: PLACEHOLDER_DEVICE_ID },
+      });
     }
 
     it('renders the regeneration action on a loaded branch', () => {
@@ -517,15 +629,45 @@ describe('BranchDetailComponent', () => {
       // verify() asserts that selecting the action issued no request of its own.
     });
 
-    it('explains what regeneration does before the Admin confirms', () => {
+    it('shows a benign generation prompt for an unactivated Device, with no destructive warning', () => {
+      // Default branch is Unactivated: there is no live credential and no running Jetson, so this is
+      // the ordinary first-activation key-generation flow (IP-05 P1, FS-02 §5.3).
       openConfirmation();
 
       const rendered = text();
+      expect(rendered).toContain('has not been activated');
       expect(rendered).toContain('stops working immediately');
-      expect(rendered).toContain('A new Activation Key is generated');
-      expect(rendered).toContain('public Device ID does not change');
-      expect(rendered).toContain('is not deactivated');
-      expect(rendered).toContain('next activation or reactivation');
+      expect(rendered).toContain('Device ID is unaffected');
+      expect(rendered).toContain('shown to you once');
+      // None of the destructive credential-revocation language, and no Jetson-lock warning.
+      expect(rendered).not.toContain('revoked');
+      expect(rendered).not.toContain('lock');
+      expect(rendered).not.toContain('destructive');
+      expect(query('.branch__confirm--destructive')).toBeNull();
+    });
+
+    it('shows a destructive credential-revocation warning for an activated Device', () => {
+      openConfirmation(activatedBranch());
+
+      const rendered = text();
+      expect(rendered).toContain('destructive');
+      expect(rendered).toContain('revoked immediately');
+      expect(rendered).toContain('Jetson will lock');
+      expect(rendered).toContain('provisioned on the Jetson manually');
+      expect(rendered).toContain('Device ID is preserved');
+      expect(rendered).toContain('shown to you once');
+      expect(query('.branch__confirm--destructive')).not.toBeNull();
+    });
+
+    it('shows the destructive warning for a ReactivationRequired Device too', () => {
+      // Regenerating again while already ReactivationRequired is still a credential reset (§4.1), so
+      // the destructive warning applies exactly as for an Activated Device.
+      openConfirmation(reactivationRequiredBranch());
+
+      const rendered = text();
+      expect(rendered).toContain('revoked immediately');
+      expect(rendered).toContain('Jetson will lock');
+      expect(query('.branch__confirm--destructive')).not.toBeNull();
     });
 
     it('does not reveal whether the current key had been used', () => {
@@ -567,6 +709,13 @@ describe('BranchDetailComponent', () => {
       expect(request.request.method).toBe('POST');
       request.flush({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
       fixture.detectChanges();
+
+      // Exactly one regeneration POST; the success then triggers a single branch re-read (P1), which
+      // is a GET to a different URL — answered here so no request is left pending for verify().
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
+      fixture.detectChanges();
     });
 
     it('prevents a duplicate request while one is in flight', () => {
@@ -584,6 +733,12 @@ describe('BranchDetailComponent', () => {
       httpTesting
         .expectOne(REGENERATE_URL)
         .flush({ success: true, data: { activationKey: PLACEHOLDER_REGENERATED_KEY } });
+      fixture.detectChanges();
+
+      // The success re-reads the branch (P1); answer it so nothing is left pending.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
       fixture.detectChanges();
     });
 
@@ -631,16 +786,133 @@ describe('BranchDetailComponent', () => {
       expect(text()).toContain('shown once');
     });
 
-    it('does not navigate away or re-read the branch on success', () => {
-      openConfirmation();
+    it('re-reads the branch on success and keeps the disclosure on screen', () => {
+      // P1: a successful regeneration refreshes the branch/device state so the badge reflects the new
+      // status. The re-read happens behind the disclosure — the Admin stays on the branch with the key
+      // on screen, and there is no navigation. (The key itself is never re-fetched; the refresh is an
+      // ordinary branch read that returns no key.)
+      openConfirmation(activatedBranch());
       query('.branch__confirm-regenerate')?.click();
       fixture.detectChanges();
-      succeed();
+      succeed(reactivationRequiredBranch());
 
-      // The Admin stays on the branch, with the key on screen for as long as they need it. verify()
-      // asserts no further request — the key is never re-fetched, and nothing re-reads the branch
-      // out from under the disclosure.
+      expect(query('app-activation-key-display')).not.toBeNull();
+      expect(query('.activation-key__value')?.textContent?.trim()).toBe(PLACEHOLDER_REGENERATED_KEY);
       expect(text()).toContain('Alpha Branch');
+    });
+
+    it('shows "Reactivation required" after regenerating an activated Device', () => {
+      openConfirmation(activatedBranch());
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+      succeed(reactivationRequiredBranch());
+
+      // The badge, refreshed behind the disclosure, now reads the revocation state — never "Offline".
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Reactivation required',
+      );
+      expect(text()).not.toContain('Offline');
+
+      // Dismissing the disclosure leaves the refreshed status in place.
+      query('.activation-key__continue')?.click();
+      fixture.detectChanges();
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe(
+        'Reactivation required',
+      );
+    });
+
+    it('does not optimistically change the device status before the response', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      // In flight: the badge still reads the loaded status. The new state comes only from the
+      // Backend-confirmed re-read, never from a client guess.
+      expect(element().querySelector('.device-status__label')?.textContent?.trim()).toBe('Activated');
+      expect(query('app-activation-key-display')).toBeNull();
+
+      succeed(reactivationRequiredBranch());
+    });
+
+    it('shows safe retry guidance and no key on a 409 regeneration conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      // A lost concurrent-regeneration race (IP-05 §3): 409 with the conflict errorCode.
+      flushRegeneration(
+        {
+          success: false,
+          message: 'A concurrent regeneration won the race.',
+          errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT',
+        },
+        { status: 409, statusText: 'Conflict' },
+      );
+      // The component re-reads the branch to reflect whatever the winning request left.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: reactivationRequiredBranch() });
+      fixture.detectChanges();
+
+      expect(text()).toContain('no key was issued to you');
+      // No key is shown — the losing request received none.
+      expect(query('app-activation-key-display')).toBeNull();
+      expect(text()).not.toContain(PLACEHOLDER_REGENERATED_KEY);
+      // Not disguised as a generic failure or a not-found.
+      expect(text()).not.toContain('The Activation Key could not be regenerated.');
+      expect(text()).not.toContain("This branch's Device was not found.");
+    });
+
+    it('clears a previously shown key when a later attempt hits a 409 conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+      succeed(reactivationRequiredBranch());
+      expect(text()).toContain(PLACEHOLDER_REGENERATED_KEY);
+
+      // Complete, reopen, and try again — this time the Backend reports a conflict.
+      query('.activation-key__continue')?.click();
+      fixture.detectChanges();
+      query('.branch__regenerate')?.click();
+      fixture.detectChanges();
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      flushRegeneration(
+        { success: false, errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT' },
+        { status: 409, statusText: 'Conflict' },
+      );
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: reactivationRequiredBranch() });
+      fixture.detectChanges();
+
+      // The stale key from the earlier success is gone.
+      expect(query('app-activation-key-display')).toBeNull();
+      expect(text()).not.toContain(PLACEHOLDER_REGENERATED_KEY);
+      expect(text()).toContain('no key was issued to you');
+    });
+
+    it('does not automatically retry after a 409 conflict', () => {
+      openConfirmation(activatedBranch());
+      query('.branch__confirm-regenerate')?.click();
+      fixture.detectChanges();
+
+      flushRegeneration(
+        { success: false, errorCode: 'ACTIVATION_KEY_REGENERATION_CONFLICT' },
+        { status: 409, statusText: 'Conflict' },
+      );
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: activatedBranch() });
+      fixture.detectChanges();
+
+      // No second regeneration request is issued — recovery is the Admin's explicit action, never an
+      // automatic re-send. expectNone throws if one exists; the boolean records that it did not.
+      httpTesting.expectNone(REGENERATE_URL);
+      expect(text()).toContain('no key was issued to you');
     });
 
     it('requires an explicit copy action for the regenerated key', async () => {
@@ -870,6 +1142,11 @@ describe('BranchDetailComponent', () => {
           sharedSecret: 'PLACEHOLDER-SHARED-SECRET',
         },
       });
+      // The success re-reads the branch (P1); answer it so nothing is left pending.
+      httpTesting
+        .expectOne(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`)
+        .flush({ success: true, data: placeholderBranch() });
+      fixture.detectChanges();
 
       const rendered = text();
       expect(rendered).toContain(PLACEHOLDER_REGENERATED_KEY);
@@ -951,5 +1228,179 @@ describe('BranchDetailComponent', () => {
     ]) {
       expect(rendered).not.toContain(forbidden);
     }
+  });
+
+  // --- FS-11 §11: annotated per-camera output discovery -----------------------------------------
+
+  it('shows the annotated output URL separately from the input stream URL', () => {
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-20',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/22222222-2222-2222-2222-222222222222',
+            outputStreamUrl:
+              'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222',
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://100.98.226.80:8554',
+        },
+      }),
+    });
+
+    // Both URLs are present, each under its own explicit label — they must never be confused.
+    expect(text()).toContain('Input stream URL:');
+    expect(text()).toContain(REDACTED_RTSP_URL);
+    expect(text()).toContain('Annotated output URL:');
+    expect(text()).toContain(
+      'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222',
+    );
+    // The legacy shared mount must never be assumed.
+    expect(text()).not.toContain('ds-test');
+  });
+
+  it('renders one annotated output entry per camera', () => {
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+            cameraKey: 'cam-key-21',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+            outputStreamUrl: 'rtsp://host.example.invalid:8554/cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          },
+          {
+            cameraId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            cameraKey: 'cam-key-22',
+            name: 'Rear Entrance',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 1,
+            outputPath: 'cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            outputStreamUrl: 'rtsp://host.example.invalid:8554/cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://host.example.invalid:8554',
+        },
+      }),
+    });
+
+    const outputs = Array.from(element().querySelectorAll('.branch__camera-output'));
+    expect(outputs.length).toBe(2);
+    expect(text()).toContain('cameras/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(text()).toContain('cameras/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+  });
+
+  it('shows a configuration message instead of a URL when no output base is configured', () => {
+    load({ success: true, data: placeholderBranch() }); // fixture omits outputStreamUrl
+
+    expect(text()).toContain('Output base URL not configured');
+    // Nothing may be fabricated from the request host.
+    expect(text()).not.toContain('rtsp://localhost');
+    expect(element().querySelector('.branch__camera-copy-output')).toBeNull();
+  });
+
+  it('copies the annotated output URL, not the input URL', () => {
+    const outputUrl = 'rtsp://100.98.226.80:8554/cameras/22222222-2222-2222-2222-222222222222';
+    load({
+      success: true,
+      data: placeholderBranch({
+        cameras: [
+          {
+            cameraId: '22222222-2222-2222-2222-222222222222',
+            cameraKey: 'cam-key-23',
+            name: 'Front Camera',
+            rtspUrl: REDACTED_RTSP_URL,
+            enabled: true,
+            sourceOrder: 0,
+            outputPath: 'cameras/22222222-2222-2222-2222-222222222222',
+            outputStreamUrl: outputUrl,
+          },
+        ],
+        device: {
+          activationStatus: 'Activated',
+          annotatedOutputBaseUrl: 'rtsp://100.98.226.80:8554',
+        },
+      }),
+    });
+
+    const written: string[] = [];
+    spyOn(navigator.clipboard, 'writeText').and.callFake((value: string) => {
+      written.push(value);
+      return Promise.resolve();
+    });
+
+    const copyOutput = element().querySelector<HTMLButtonElement>('.branch__camera-copy-output');
+    copyOutput?.click();
+
+    expect(written).toEqual([outputUrl]);
+  });
+
+  // --- FS-14 §5, IP-16 T-12: Overview | Live Monitoring tabs ---
+  describe('Live Monitoring tab', () => {
+    const CAMERAS_URL = `${environment.apiBaseUrl}/branches/${PLACEHOLDER_BRANCH_ID}/live-monitoring/cameras`;
+
+    it('defaults to the Overview tab, showing no live-monitoring request', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      httpTesting.expectNone(CAMERAS_URL);
+      expect(element().querySelector('.branch__camera-list')).not.toBeNull();
+      expect(element().querySelector('app-live-monitoring')).toBeNull();
+    });
+
+    it('switches to Live Monitoring on click, hosting the live-monitoring component', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const monitoringTab = Array.from(element().querySelectorAll('button[role="tab"]')).find((b) =>
+        b.textContent?.includes('Live Monitoring'),
+      ) as HTMLButtonElement;
+      monitoringTab.click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-live-monitoring')).not.toBeNull();
+      expect(element().querySelector('.branch__camera-list')).toBeNull();
+
+      // The hosted component issues its own request; flush it so httpTesting.verify() is satisfied.
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+    });
+
+    it('returns to Overview on click, without re-requesting the branch', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const tabs = () => Array.from(element().querySelectorAll('button[role="tab"]'));
+      (tabs().find((b) => b.textContent?.includes('Live Monitoring')) as HTMLButtonElement).click();
+      fixture.detectChanges();
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+
+      (tabs().find((b) => b.textContent?.includes('Overview')) as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('.branch__camera-list')).not.toBeNull();
+      expect(element().querySelector('app-live-monitoring')).toBeNull();
+      httpTesting.expectNone(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`);
+    });
+
+    it('preselects the Live Monitoring tab when the route already carries tab=monitoring', async () => {
+      await createWithRouteParam(PLACEHOLDER_BRANCH_ID, { tab: 'monitoring' });
+      load({ success: true, data: placeholderBranch() });
+
+      expect(element().querySelector('app-live-monitoring')).not.toBeNull();
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+    });
   });
 });

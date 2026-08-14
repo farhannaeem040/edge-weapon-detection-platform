@@ -46,6 +46,34 @@ describe('DeviceStatusBadgeComponent', () => {
     expect(label()).toBe('Activated');
   });
 
+  it('renders the ReactivationRequired state as "Reactivation required"', () => {
+    render('ReactivationRequired');
+
+    expect(label()).toBe('Reactivation required');
+  });
+
+  it('never renders ReactivationRequired as Offline or Unknown', () => {
+    // ReactivationRequired is a known credential-revocation state, not a connectivity state and not an
+    // unrecognised value: it must read as itself, never "Offline" (which this platform does not model,
+    // IP-05 §13) and never "Unknown" (reserved for values outside the contract).
+    render('ReactivationRequired');
+
+    expect(label()).toBe('Reactivation required');
+    expect(element().textContent).not.toContain('Offline');
+    expect(label()).not.toBe('Unknown');
+  });
+
+  it('gives ReactivationRequired accessible context explaining the revocation', () => {
+    render('ReactivationRequired');
+
+    const text = element().textContent ?? '';
+    expect(element().querySelector('.device-status__context')?.textContent).toContain(
+      'Device status:',
+    );
+    expect(text).toContain('credential has been revoked');
+    expect(text).toContain('reactivated');
+  });
+
   it('renders the state named by the explicit status input', () => {
     render('Activated');
     expect(label()).toBe('Activated');

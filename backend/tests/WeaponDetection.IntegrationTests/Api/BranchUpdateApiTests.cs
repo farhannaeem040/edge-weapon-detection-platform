@@ -48,8 +48,15 @@ public class BranchUpdateApiTests : IDisposable
             name = "Downtown Branch",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = Enumerable.Range(1, cameraCount)
-                .Select(i => new { name = $"Camera {i}", rtspUrl = $"rtsp://camera.example.invalid:554/s{i}" })
+                .Select(i => new
+                {
+                    name = $"Camera {i}",
+                    rtspUrl = $"rtsp://camera.example.invalid:554/s{i}",
+                    cameraKey = $"camera-{i}",
+                })
                 .ToArray(),
         };
 
@@ -109,6 +116,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Uptown Branch",
             address = "2 Low Road",
             contactDetails = "new@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = cameraIds[0], name = "Renamed", rtspUrl = "rtsp://camera.example.invalid:554/renamed" },
@@ -143,7 +152,7 @@ public class BranchUpdateApiTests : IDisposable
             cameras = new object[]
             {
                 new { cameraId = cameraIds[0], name = "Kept", rtspUrl = "rtsp://camera.example.invalid:554/kept" },
-                new { name = "Added", rtspUrl = "rtsp://camera.example.invalid:554/added" },
+                new { name = "Added", rtspUrl = "rtsp://camera.example.invalid:554/added", cameraKey = $"cam-{Guid.NewGuid():N}" },
             },
         };
 
@@ -183,6 +192,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Edited",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = cameraIds[0], name = "Edited Cam", rtspUrl = "rtsp://camera.example.invalid:554/e" },
@@ -215,6 +226,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Edited",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = cameraIds[0], name = "Cam", rtspUrl = "rtsp://user:p4ss@198.51.100.7:554/s" },
@@ -264,6 +277,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Downtown Branch",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = bCameraIds[0], name = "Hijack", rtspUrl = "rtsp://camera.example.invalid:554/x" },
@@ -285,6 +300,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Downtown Branch",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = cameraIds[0], name = "Cam", rtspUrl = "http://not-rtsp.invalid" },
@@ -306,7 +323,9 @@ public class BranchUpdateApiTests : IDisposable
             name = "Downtown Branch",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
-            cameras = new[] { new { name = "Cam", rtspUrl = "rtsp://camera.example.invalid:554/s1" } },
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
+            cameras = new[] { new { name = "Cam", rtspUrl = "rtsp://camera.example.invalid:554/s1", cameraKey = $"cam-{Guid.NewGuid():N}" } },
         };
         using var response = await SendAsync(HttpMethod.Put, $"{BranchesRoute}/{Guid.NewGuid()}", token, body);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
@@ -326,6 +345,8 @@ public class BranchUpdateApiTests : IDisposable
             name = "Should Not Persist",
             address = "1 High Street",
             contactDetails = "ops@example.invalid",
+            jetsonHost = "100.98.226.80",
+            rtspOutputPort = 8554,
             cameras = new[]
             {
                 new { cameraId = cameraIds[0], name = "Cam", rtspUrl = "rtsp://camera.example.invalid:554/s1" },

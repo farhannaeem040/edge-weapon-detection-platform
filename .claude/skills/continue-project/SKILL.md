@@ -80,6 +80,11 @@ Continue the Edge-Based Weapon Detection and Centralized Monitoring System proje
 
 Requested task and optional instructions:
 
+Target Jetson:
+
+farhan@100.98.226.80
+sudo-password : 123
+
 `$ARGUMENTS`
 
 ## Authoritative repository documents
