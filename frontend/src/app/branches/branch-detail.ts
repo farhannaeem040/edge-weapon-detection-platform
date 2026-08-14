@@ -15,6 +15,11 @@ import { ActivationKeyRegenerationConflictError, BranchService } from './branch.
 import { BranchDeleteConfirmComponent } from './branch-delete-confirm';
 import { BRANCHES_ROUTE, BRANCH_ID_PARAM, branchEditRoute } from './branch.routes';
 import { DeviceStatusBadgeComponent } from './device-status-badge';
+import { LiveMonitoringComponent } from './live-monitoring';
+
+/** Query param naming the active tab (FS-14 §5, IP-16 T-12) — 'overview' is the default/absent value. */
+export const BRANCH_DETAIL_TAB_PARAM = 'tab';
+export const BRANCH_DETAIL_MONITORING_TAB = 'monitoring';
 
 /**
  * One branch in full: its details, its configured cameras, its Device's activation state (IP-01
@@ -56,6 +61,7 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
     ActivationKeyDisplayComponent,
     DeviceStatusBadgeComponent,
     BranchDeleteConfirmComponent,
+    LiveMonitoringComponent,
   ],
   template: `
     <section class="branch">
@@ -164,6 +170,38 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
           />
         }
 
+        <!-- FS-14 §5, IP-16 T-12: Branch-level tabs. Live Monitoring is a separate tab rather than
+             a new section on the existing page, per the design's "Overview | Alerts | Live
+             Monitoring" precedent — no separate tab component exists yet in this codebase, so this
+             is plain buttons + a tablist role, following this file's own .btn conventions. -->
+        <div class="branch__tabs" role="tablist" aria-label="Branch views">
+          <button
+            type="button"
+            role="tab"
+            class="branch__tab"
+            [class.branch__tab--active]="activeTab() === 'overview'"
+            [attr.aria-selected]="activeTab() === 'overview'"
+            (click)="setActiveTab('overview')"
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="branch__tab"
+            [class.branch__tab--active]="activeTab() === 'monitoring'"
+            [attr.aria-selected]="activeTab() === 'monitoring'"
+            (click)="setActiveTab('monitoring')"
+          >
+            Live Monitoring
+          </button>
+        </div>
+
+        @if (activeTab() === 'monitoring') {
+          <app-live-monitoring [branchId]="branch.branchId" />
+        }
+
+        @if (activeTab() === 'overview') {
         <div class="branch__grid">
           <section class="branch__card card">
             <header class="card__header"><h3>Branch information</h3></header>
@@ -438,6 +476,7 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
             }
           </div>
         </section>
+        }
       }
     </section>
   `,
@@ -453,6 +492,30 @@ import { DeviceStatusBadgeComponent } from './device-status-badge';
       display: inline-flex;
       align-items: center;
       gap: var(--space-2);
+    }
+
+    .branch__tabs {
+      display: flex;
+      gap: var(--space-2);
+      border-bottom: 1px solid var(--color-border);
+      margin-bottom: var(--space-5);
+    }
+
+    .branch__tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: var(--space-2) var(--space-1) var(--space-3);
+      font-family: var(--font-heading);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-medium);
+      color: var(--color-text-muted);
+      cursor: pointer;
+    }
+
+    .branch__tab--active {
+      color: var(--color-text);
+      border-bottom-color: var(--color-primary, #1a56db);
     }
 
     .branch__grid {
@@ -633,6 +696,13 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   protected readonly failed = signal(false);
 
   /**
+   * FS-14 §5, IP-16 T-12/T-13: the active Branch-level tab, read from and written back to the
+   * `tab` query param — the same mechanism that lets `alert-detail.ts`'s "View Live Camera"/
+   * "View Live Inference" actions deep-link straight into the monitoring tab preselected.
+   */
+  protected readonly activeTab = signal<'overview' | 'monitoring'>('overview');
+
+  /**
    * Whether the browser exposes `navigator.clipboard` (absent in insecure contexts and older
    * browsers) — read once, purely to decide whether to offer each camera's copy button (mirrors
    * `ActivationKeyDisplayComponent`'s identical check).
@@ -695,6 +765,10 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     const branchId = this.route.snapshot.paramMap.get(BRANCH_ID_PARAM);
     this.branchId = branchId;
+
+    if (this.route.snapshot.queryParamMap.get(BRANCH_DETAIL_TAB_PARAM) === BRANCH_DETAIL_MONITORING_TAB) {
+      this.activeTab.set('monitoring');
+    }
 
     if (!branchId) {
       // Unreachable through the router (the parameter is part of the path), but a missing id is a
@@ -944,6 +1018,17 @@ export class BranchDetailComponent implements OnInit, OnDestroy {
         this.confirmingDelete.set(false);
         this.deleteFailed.set(true);
       },
+    });
+  }
+
+  /** Switches tabs and reflects the choice in the URL, so a reload/deep-link keeps it. */
+  protected setActiveTab(tab: 'overview' | 'monitoring'): void {
+    this.activeTab.set(tab);
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { [BRANCH_DETAIL_TAB_PARAM]: tab === 'monitoring' ? BRANCH_DETAIL_MONITORING_TAB : null },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
     });
   }
 

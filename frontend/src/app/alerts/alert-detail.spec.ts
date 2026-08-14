@@ -155,6 +155,28 @@ describe('AlertDetailComponent', () => {
     expect(revokeSpy).toHaveBeenCalledTimes(1);
   });
 
+  // --- FS-14 §5, IP-16 T-15/T-16/T-17: "View Live Camera"/"View Live Inference" deep links ---
+
+  it('links "View Live Camera" to the branch\'s Live Monitoring tab preselected in monitoring mode', () => {
+    load({ success: true, data: placeholderDetail() });
+
+    const link = element().querySelector<HTMLAnchorElement>('.alert-detail__view-live-camera');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toContain('/branches/22222222-2222-2222-2222-222222222222');
+    expect(link!.getAttribute('href')).toContain('tab=monitoring');
+    expect(link!.getAttribute('href')).toContain('cameraId=33333333-3333-3333-3333-333333333333');
+    expect(link!.getAttribute('href')).toContain('mode=monitoring');
+  });
+
+  it('links "View Live Inference" to the same tab preselected in inference mode', () => {
+    load({ success: true, data: placeholderDetail() });
+
+    const link = element().querySelector<HTMLAnchorElement>('.alert-detail__view-live-inference');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toContain('cameraId=33333333-3333-3333-3333-333333333333');
+    expect(link!.getAttribute('href')).toContain('mode=inference');
+  });
+
   it('shows a not-found state on a 404, distinct from a generic failure', () => {
     load({ success: false, errorCode: 'NOT_FOUND' }, { status: 404, statusText: 'Not Found' });
 

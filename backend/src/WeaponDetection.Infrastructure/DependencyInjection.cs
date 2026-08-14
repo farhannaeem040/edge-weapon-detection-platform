@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using WeaponDetection.Application.Interfaces;
+using WeaponDetection.Infrastructure.Media;
 using WeaponDetection.Infrastructure.Persistence;
 using WeaponDetection.Infrastructure.Security;
 using WeaponDetection.Infrastructure.Services;
@@ -139,6 +140,30 @@ public static class DependencyInjection
         // Same scoping rationale as IAlertSnapshotUploadService above (scoped DbContext + singleton
         // IAlertSnapshotStorage).
         services.AddScoped<IAlertSnapshotRetrievalService, AlertSnapshotRetrievalService>();
+
+        // FS-14 §5, IP-16 T-8: MediaGateway:BaseUrl validated for shape (ValidateOnStart) — no
+        // network reachability check at startup, mirroring how DataProtection/AlertSnapshots
+        // separate shape validation from a usability check (this feature has no analogous
+        // usability check since the gateway is a remote service, not local disk).
+        services.AddSingleton<IValidateOptions<MediaGatewayOptions>, MediaGatewayOptionsValidator>();
+        services.AddOptions<MediaGatewayOptions>()
+            .Bind(configuration.GetSection(MediaGatewayOptions.SectionName))
+            .ValidateOnStart();
+
+        // A typed HttpClient's base address is fixed at registration; MediaGateway:BaseUrl is read
+        // once here rather than per-request, since it never changes without a restart (identical
+        // posture to every other startup-bound configuration value in this method).
+        services.AddHttpClient<IMediaGatewayClient, MediaMtxGatewayClient>((provider, client) =>
+        {
+            var options = provider.GetRequiredService<IOptions<MediaGatewayOptions>>().Value;
+            client.BaseAddress = new Uri(options.BaseUrl!);
+        });
+
+        // The live-monitoring source-resolution/gateway-orchestration pipeline for
+        // GET /api/v1/branches/{branchId}/live-monitoring/cameras and POST /api/v1/live-streams
+        // (FS-14 §5, IP-16 T-6). Depends on the (scoped) DbContext and the (singleton, via
+        // AddHttpClient) IMediaGatewayClient/TimeProvider, so it is scoped.
+        services.AddScoped<ILiveStreamService, LiveStreamService>();
 
         return services;
     }

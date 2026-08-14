@@ -2,6 +2,12 @@ import { DatePipe, DecimalPipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 
+import { BRANCH_DETAIL_MONITORING_TAB, BRANCH_DETAIL_TAB_PARAM } from '../branches/branch-detail';
+import { branchDetailRoute } from '../branches/branch.routes';
+import {
+  LIVE_MONITORING_CAMERA_PARAM,
+  LIVE_MONITORING_MODE_PARAM,
+} from '../branches/live-monitoring';
 import { AlertStatusBadgeComponent } from '../shared/alert-status-badge';
 import { WeaponClassBadgeComponent } from '../shared/weapon-class-badge';
 import { AlertSnapshotPlaceholderComponent } from './alert-snapshot-placeholder';
@@ -121,6 +127,28 @@ import { AlertService } from './alert.service';
             }
           </div>
         </section>
+
+        <!-- FS-14 §5, IP-16 T-13: deep-links into the Branch Live Monitoring tab, preselected —
+             this view never embeds its own player, it only navigates (see live-monitoring.ts). -->
+        <section class="alert-detail__live-actions alert-detail__card card">
+          <header class="card__header"><h3>Live View</h3></header>
+          <div class="card__body alert-detail__live-buttons">
+            <a
+              class="alert-detail__view-live-camera btn btn--secondary"
+              [routerLink]="branchDetailRoute(alert.branchId)"
+              [queryParams]="liveViewQueryParams(alert.cameraId, 'monitoring')"
+            >
+              View Live Camera
+            </a>
+            <a
+              class="alert-detail__view-live-inference btn btn--secondary"
+              [routerLink]="branchDetailRoute(alert.branchId)"
+              [queryParams]="liveViewQueryParams(alert.cameraId, 'inference')"
+            >
+              View Live Inference
+            </a>
+          </div>
+        </section>
       }
     </section>
   `,
@@ -163,6 +191,12 @@ import { AlertService } from './alert.service';
       object-fit: contain;
       border-radius: var(--radius);
     }
+
+    .alert-detail__live-buttons {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+    }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -180,6 +214,17 @@ export class AlertDetailComponent implements OnInit, OnDestroy {
   protected readonly snapshotUrl = signal<string | null>(null);
   protected readonly snapshotLoading = signal(false);
   protected readonly snapshotFailed = signal(false);
+
+  /** FS-14 §5, IP-16 T-13. Exposed so the template can build each "View Live …" link's target. */
+  protected readonly branchDetailRoute = branchDetailRoute;
+
+  protected liveViewQueryParams(cameraId: string, mode: 'monitoring' | 'inference') {
+    return {
+      [BRANCH_DETAIL_TAB_PARAM]: BRANCH_DETAIL_MONITORING_TAB,
+      [LIVE_MONITORING_CAMERA_PARAM]: cameraId,
+      [LIVE_MONITORING_MODE_PARAM]: mode,
+    };
+  }
 
   ngOnInit(): void {
     const alertId = this.route.snapshot.paramMap.get(ALERT_ID_PARAM);

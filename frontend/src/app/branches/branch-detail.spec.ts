@@ -51,7 +51,10 @@ describe('BranchDetailComponent', () => {
   let httpTesting: HttpTestingController;
 
   /** Builds the component with `branchId` on the route, as the router would supply it. */
-  async function createWithRouteParam(branchId: string | null): Promise<void> {
+  async function createWithRouteParam(
+    branchId: string | null,
+    queryParams: Record<string, string> = {},
+  ): Promise<void> {
     TestBed.resetTestingModule();
 
     await TestBed.configureTestingModule({
@@ -65,6 +68,10 @@ describe('BranchDetailComponent', () => {
           useValue: {
             snapshot: {
               paramMap: convertToParamMap(branchId === null ? {} : { branchId }),
+              // FS-14 §5, IP-16 T-12: branch-detail.ts reads the `tab` query param to preselect
+              // the Live Monitoring tab on a deep link — empty by default, so every existing test
+              // keeps its default 'overview' tab behaviour.
+              queryParamMap: convertToParamMap(queryParams),
             },
           },
         },
@@ -1342,5 +1349,58 @@ describe('BranchDetailComponent', () => {
     copyOutput?.click();
 
     expect(written).toEqual([outputUrl]);
+  });
+
+  // --- FS-14 §5, IP-16 T-12: Overview | Live Monitoring tabs ---
+  describe('Live Monitoring tab', () => {
+    const CAMERAS_URL = `${environment.apiBaseUrl}/branches/${PLACEHOLDER_BRANCH_ID}/live-monitoring/cameras`;
+
+    it('defaults to the Overview tab, showing no live-monitoring request', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      httpTesting.expectNone(CAMERAS_URL);
+      expect(element().querySelector('.branch__camera-list')).not.toBeNull();
+      expect(element().querySelector('app-live-monitoring')).toBeNull();
+    });
+
+    it('switches to Live Monitoring on click, hosting the live-monitoring component', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const monitoringTab = Array.from(element().querySelectorAll('button[role="tab"]')).find((b) =>
+        b.textContent?.includes('Live Monitoring'),
+      ) as HTMLButtonElement;
+      monitoringTab.click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('app-live-monitoring')).not.toBeNull();
+      expect(element().querySelector('.branch__camera-list')).toBeNull();
+
+      // The hosted component issues its own request; flush it so httpTesting.verify() is satisfied.
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+    });
+
+    it('returns to Overview on click, without re-requesting the branch', () => {
+      load({ success: true, data: placeholderBranch() });
+
+      const tabs = () => Array.from(element().querySelectorAll('button[role="tab"]'));
+      (tabs().find((b) => b.textContent?.includes('Live Monitoring')) as HTMLButtonElement).click();
+      fixture.detectChanges();
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+
+      (tabs().find((b) => b.textContent?.includes('Overview')) as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(element().querySelector('.branch__camera-list')).not.toBeNull();
+      expect(element().querySelector('app-live-monitoring')).toBeNull();
+      httpTesting.expectNone(`${BRANCHES_URL}/${PLACEHOLDER_BRANCH_ID}`);
+    });
+
+    it('preselects the Live Monitoring tab when the route already carries tab=monitoring', async () => {
+      await createWithRouteParam(PLACEHOLDER_BRANCH_ID, { tab: 'monitoring' });
+      load({ success: true, data: placeholderBranch() });
+
+      expect(element().querySelector('app-live-monitoring')).not.toBeNull();
+      httpTesting.expectOne(CAMERAS_URL).flush({ success: true, data: [] });
+    });
   });
 });

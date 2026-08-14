@@ -8,6 +8,7 @@ import { BranchEditComponent } from './branches/branch-edit';
 import { BranchListComponent } from './branches/branch-list';
 import { LoginComponent } from './auth/login';
 import { DashboardSummaryComponent } from './dashboard/dashboard-summary';
+import { GlobalMonitoringComponent } from './monitoring/global-monitoring';
 import { ShellComponent } from './shared/shell';
 import { authGuard } from './core/auth.guard';
 
@@ -36,6 +37,9 @@ export const routes: Routes = [
     children: [
       { path: 'dashboard', component: DashboardSummaryComponent },
       { path: 'alerts', component: AlertListComponent },
+      // FS-14 §5, IP-16 UI enhancement: a global entry point into the same live-monitoring
+      // feature already reachable per-Branch (see BranchDetailComponent's own tab below).
+      { path: 'monitoring', component: GlobalMonitoringComponent },
       // Declared before `alerts/:alertId`: an Alert id is a GUID and would never literally be "new"
       // or another Alert route segment, but the ordering convention is kept consistent with `branches`
       // regardless, since this feature adds no other literal segment under `alerts/`.

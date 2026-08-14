@@ -14,11 +14,10 @@ const LOGOUT_URL = `${environment.apiBaseUrl}/auth/logout`;
 
 /**
  * Features with no implemented route: they must never appear as navigation (SCREEN-INVENTORY.md).
- * Dashboard and Alerts graduated to real navigation items with FS-10/IP-12 and are asserted
- * separately below, not here.
+ * Dashboard, Alerts, and Monitoring graduated to real navigation items with FS-10/IP-12 and
+ * FS-14/IP-16 respectively, and are asserted separately below, not here.
  */
 const DEFERRED_NAV_LABELS = [
-  'Live monitoring',
   'Incidents',
   'Cameras',
   'Edge devices',
@@ -66,16 +65,17 @@ describe('ShellComponent', () => {
     expect(element().textContent).toContain('LJMU AI');
   });
 
-  it('links to the dashboard, alerts, and branch list from the sidebar', () => {
+  it('links to the dashboard, alerts, monitoring, and branch list from the sidebar', () => {
     const links = Array.from(
       element().querySelectorAll('.shell__nav-link'),
     ) as HTMLAnchorElement[];
     const hrefs = links.map((link) => link.getAttribute('href'));
     const texts = links.map((link) => link.textContent ?? '');
 
-    expect(hrefs).toEqual(['/dashboard', '/alerts', '/branches']);
+    expect(hrefs).toEqual(['/dashboard', '/alerts', '/monitoring', '/branches']);
     expect(texts.some((text) => text.includes('Dashboard'))).toBeTrue();
     expect(texts.some((text) => text.includes('Alerts'))).toBeTrue();
+    expect(texts.some((text) => text.includes('Monitoring'))).toBeTrue();
     expect(texts.some((text) => text.includes('Branches'))).toBeTrue();
   });
 
@@ -86,8 +86,15 @@ describe('ShellComponent', () => {
     }
   });
 
-  it('exposes exactly three primary navigation links', () => {
-    expect(element().querySelectorAll('.shell__nav-link').length).toBe(3);
+  it('exposes exactly four primary navigation links', () => {
+    expect(element().querySelectorAll('.shell__nav-link').length).toBe(4);
+  });
+
+  it('marks the Monitoring link active on the monitoring route, mirroring the other links', () => {
+    const link = Array.from(element().querySelectorAll('.shell__nav-link')).find((el) =>
+      el.textContent?.includes('Monitoring'),
+    ) as HTMLAnchorElement;
+    expect(link.classList.contains('shell__nav-link--active')).toBeFalse();
   });
 
   it('provides a router-outlet for the wrapped views', () => {

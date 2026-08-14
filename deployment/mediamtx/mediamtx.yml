@@ -1,0 +1,77 @@
+# MediaMTX configuration for the central platform's media gateway (FS-14 §5, IP-16 T-1).
+#
+# This formalizes the instance that already ran in production as an ad hoc `docker run` container
+# (used for the Windows RTSP test-stream ingestion workflow documented in CLAUDE.md) into the
+# project's normal container-managed deployment. RTSP behavior for that existing workflow is
+# unchanged by this file — camera1/camera2 publishing still works exactly as before.
+#
+# Surface exposed by this config:
+#   - RTSP (8554)   — published to the host, exactly as today. Used by the Windows FFmpeg
+#                      test-stream publishers and by the Jetson pulling/publishing over Tailscale.
+#   - API (9997)    — bound to all interfaces inside the container, but never published to the
+#                      host in compose.yaml; reachable only over the compose `internal` network,
+#                      by the Backend, to idempotently ensure a live-monitoring path exists.
+#   - WebRTC (8889) — the WHEP HTTP/SDP signaling port. Not published to the host directly either;
+#                      reverse-proxied by the frontend's Nginx under /media/ (see nginx.conf),
+#                      preserving the single-origin architecture. Only the ICE/UDP media port
+#                      below needs a direct host port, since actual RTP media can't flow through
+#                      an HTTP reverse proxy.
+
+logLevel: info
+
+# --- RTSP (unchanged behavior) ---------------------------------------------------------------
+rtsp: yes
+protocols: [tcp]
+rtspAddress: :8554
+
+# --- HLS: left enabled (MediaMTX default) but not used by this feature; WebRTC is the chosen
+# browser transport (FS-14 §5) for its materially lower latency. Kept only because disabling it
+# has no benefit and a future feature may still want it. ---------------------------------------
+hls: yes
+hlsAddress: :8888
+
+# --- Control API: internal-only. The Backend calls this to add/patch a path per Camera+mode
+# (FS-14 §5) — never exposed to the host, never reachable by the browser. ----------------------
+api: yes
+apiAddress: :9997
+
+# MediaMTX's own default already restricts the "api" action to 127.0.0.1/::1 (i.e. only from
+# inside this container) — too strict, since the Backend calling it lives in a different
+# container. Restricted here to the compose `internal` network's pinned subnet (compose.yaml)
+# instead of opening it to "any" — the smallest change that lets the Backend reach it while
+# keeping it unreachable from anywhere else, including the published RTSP/WHEP ports' callers.
+# publish/read/playback stay on the "any" defaults MediaMTX ships with (this file does not
+# re-declare them) — required for the existing Windows FFmpeg test-stream publish workflow and
+# for WHEP playback proxied through frontend's Nginx.
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+  - user: any
+    ips: ["172.28.0.0/24"]
+    permissions:
+      - action: api
+      - action: metrics
+      - action: pprof
+
+# --- WebRTC / WHEP: HTTP signaling on 8889 (proxied by Nginx, not published to the host); the
+# ICE/UDP mux carries the actual RTP media and must be reachable directly by the browser. -------
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcICEUDPMuxAddress: :8189
+webrtcEncryption: no
+
+# --- Paths ---------------------------------------------------------------------------------
+# Only the pre-existing camera1/camera2 paths are statically defined (unchanged from before this
+# feature — the Windows test-stream workflow publishes into these). Live-monitoring paths
+# (`live-<cameraId>-<mode>`) are added dynamically by the Backend via the API above, each with its
+# own on-demand source — there is no static entry for them here, and none is needed.
+paths:
+  camera1:
+  camera2:
+  all_others:

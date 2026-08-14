@@ -61,6 +61,13 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
             "Jwt__AccessTokenLifetimeMinutes", AccessTokenLifetimeMinutes.ToString());
         Environment.SetEnvironmentVariable("AlertSnapshots__StoragePath", _alertSnapshotStoragePath);
 
+        // FS-14 §5: MediaGateway:BaseUrl is required (ValidateOnStart), same posture as
+        // AlertSnapshots:StoragePath above. A syntactically valid but unreachable placeholder is
+        // fine for every test that doesn't itself exercise IMediaGatewayClient — those tests
+        // (LiveMonitoringApiTests) replace the registration with a stub via ConfigureTestServices
+        // rather than relying on this URL being reachable.
+        Environment.SetEnvironmentVariable("MediaGateway__BaseUrl", "http://mediamtx.invalid:9997");
+
         var options = new DbContextOptionsBuilder<WeaponDetectionDbContext>()
             .UseSqlServer(_connectionString)
             .Options;
@@ -103,6 +110,7 @@ public abstract class SqlServerApiHostFactory : WebApplicationFactory<Program>
             Environment.SetEnvironmentVariable("Jwt__SigningKey", null);
             Environment.SetEnvironmentVariable("Jwt__AccessTokenLifetimeMinutes", null);
             Environment.SetEnvironmentVariable("AlertSnapshots__StoragePath", null);
+            Environment.SetEnvironmentVariable("MediaGateway__BaseUrl", null);
 
             if (Directory.Exists(_alertSnapshotStoragePath))
             {
