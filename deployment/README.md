@@ -1,4 +1,14 @@
-# Running the central platform
+# Deployment
+
+Scripts and config for running the platform.
+
+- **The central platform** (dashboard + backend + database) runs on your PC/server via Docker —
+  see below.
+- **The Jetson device** runs the [`agent`](../agent/README.md) natively, installed by the scripts
+  in [`jetson/`](jetson/README.md) — it is *not* part of the Docker stack, because it needs direct
+  access to the GPU, cameras, and NVIDIA DeepStream.
+
+## Running the central platform
 
 The central platform — the Angular dashboard, the ASP.NET Core Backend, SQL Server, and the EF Core
 migrations — runs as a single Docker Compose stack.

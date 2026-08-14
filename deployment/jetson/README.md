@@ -1,5 +1,9 @@
 # Jetson Agent — native systemd deployment (IP-02 T-41)
 
+> In plain terms: these are the scripts used to install and run the [Agent](../../agent/README.md)
+> on the physical Jetson device, so it starts automatically and keeps running as a background
+> service.
+
 This directory installs the **already-delivered** Weapon Detection Jetson Agent natively on the
 Jetson under **systemd**. The Agent is **not** containerized (it needs NVIDIA/DeepStream/camera/
 subprocess access in later milestones), and systemd manages **only** the Agent — never DeepStream

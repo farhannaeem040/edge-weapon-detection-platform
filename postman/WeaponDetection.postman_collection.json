@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "5524b81e-9fd7-4891-8c29-weapon-detection",
     "name": "Weapon Detection Backend API",
-    "description": "Postman collection for the local Weapon Detection backend. Import the matching `Weapon Detection Local` environment first, then run Login before protected requests.",
+    "description": "Postman collection for the Weapon Detection backend (ASP.NET Core). Covers every controller: Health, Auth, Branches, Devices, Device Activation, Detection Sync, Alerts, Dashboard, and Live Monitoring.\n\n## How to use\n\n1. Import the matching `Weapon Detection Local` environment and select it.\n2. Make sure the backend is running (`deployment/start.ps1`, default `http://localhost:8080`).\n3. Run folders **top to bottom** — later requests reuse values (`branchId`, `activationKey`, `deviceId`, `eventId`, `alertId`, ...) saved automatically by earlier ones via each request's Tests script.\n4. Easiest: select the collection and click **Run** (Collection Runner) to execute the whole flow end to end. The `Cleanup` folder at the bottom deletes the test branch and logs out.\n\n## Two kinds of authentication\n\n- **Admin JWT** (`Authorization: Bearer {{token}}`) — used by every Branches/Devices/Alerts/Dashboard/Live Monitoring endpoint. Obtained from `Auth > POST Login`. This is the collection's default auth.\n- **Device credentials** (`X-Device-Id` + `X-Device-Secret` headers) — used by the endpoints a Jetson Agent calls: Activate, Validate Device Credentials, Get Device Configuration, Sync Events, Upload Alert Snapshot. These requests set `auth: noauth` and add the headers explicitly, using `{{deviceId}}` / `{{sharedSecret}}` saved after Activation.\n\nEvery response is wrapped in the standard envelope: `{ \"success\": bool, \"message\": string|null, \"data\": object|null, \"errorCode\": string|null }`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -108,7 +108,7 @@
                 "login"
               ]
             },
-            "description": "Logs in as the admin user and saves the JWT into the `token` environment variable."
+            "description": "Logs in as the admin user and saves the JWT into the `token` environment variable. Run this first — every Admin-JWT request below depends on it."
           },
           "event": [
             {
@@ -122,42 +122,12 @@
                   "",
                   "const body = pm.response.json();",
                   "const token = body.data && body.data.token;",
+                  "pm.test('Response contains a token', function () {",
+                  "  pm.expect(token).to.be.a('string').and.not.empty;",
+                  "});",
                   "if (token) {",
                   "  pm.environment.set('token', token);",
                   "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST Logout",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/auth/logout",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "auth",
-                "logout"
-              ]
-            },
-            "description": "Revokes the current admin session token. Run Login again after this."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Logout returns 200', function () {",
-                  "  pm.response.to.have.status(200);",
-                  "});"
                 ]
               }
             }
@@ -180,7 +150,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Postman Test Branch\",\n  \"address\": \"123 Test Street\",\n  \"contactDetails\": \"manager@example.com\",\n  \"cameras\": [\n    {\n      \"name\": \"Front Door\",\n      \"rtspUrl\": \"rtsp://camera.local/front\"\n    }\n  ]\n}"
+              "raw": "{\n  \"name\": \"Postman Test Branch\",\n  \"address\": \"123 Test Street\",\n  \"contactDetails\": \"manager@example.com\",\n  \"jetsonHost\": \"{{jetsonHost}}\",\n  \"rtspOutputPort\": {{rtspOutputPort}},\n  \"cameras\": [\n    {\n      \"name\": \"Front Camera\",\n      \"rtspUrl\": \"rtsp://camera.local/front\",\n      \"cameraKey\": \"{{cameraKey}}\"\n    }\n  ]\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/branches",
@@ -193,7 +163,7 @@
                 "branches"
               ]
             },
-            "description": "Creates a branch, its first camera, reserved device, and activation key. Saves branchId, cameraId, and activationKey."
+            "description": "Creates a branch, its first camera, a reserved (unactivated) device, and the first Activation Key, all in one transaction. `jetsonHost`/`rtspOutputPort` are the Jetson's reachable address for annotated stream output (FS-12). `cameraKey` is the human-readable public mount identifier (lowercase letters/digits/hyphens, 3-64 chars, e.g. `front-camera`). Saves branchId, cameraId, and activationKey."
           },
           "event": [
             {
@@ -210,8 +180,15 @@
                   "if (data) {",
                   "  if (data.branchId) pm.environment.set('branchId', data.branchId);",
                   "  if (data.activationKey) pm.environment.set('activationKey', data.activationKey);",
-                  "  if (data.cameras && data.cameras.length > 0) pm.environment.set('cameraId', data.cameras[0].cameraId);",
-                  "}"
+                  "  if (data.cameras && data.cameras.length > 0) {",
+                  "    pm.environment.set('cameraId', data.cameras[0].cameraId);",
+                  "    pm.environment.set('cameraKey', data.cameras[0].cameraKey);",
+                  "  }",
+                  "}",
+                  "",
+                  "pm.test('Response carries an activation key', function () {",
+                  "  pm.expect(data.activationKey).to.be.a('string').and.not.empty;",
+                  "});"
                 ]
               }
             }
@@ -233,7 +210,7 @@
                 "branches"
               ]
             },
-            "description": "Returns all branches. Does not return plaintext activation keys."
+            "description": "Returns all branches with their cameras and device summary. Never returns plaintext activation keys."
           },
           "event": [
             {
@@ -266,7 +243,7 @@
                 "{{branchId}}"
               ]
             },
-            "description": "Returns one branch by branchId."
+            "description": "Returns one branch by branchId, including its cameras and device summary (JetsonHost, RtspOutputPort, AnnotatedOutputBaseUrl, activation status)."
           },
           "event": [
             {
@@ -294,7 +271,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Postman Updated Branch\",\n  \"address\": \"456 Updated Street\",\n  \"contactDetails\": \"updated-manager@example.com\",\n  \"cameras\": [\n    {\n      \"cameraId\": \"{{cameraId}}\",\n      \"name\": \"Front Door Updated\",\n      \"rtspUrl\": \"rtsp://camera.local/front-updated\"\n    },\n    {\n      \"cameraId\": null,\n      \"name\": \"Back Door\",\n      \"rtspUrl\": \"rtsp://camera.local/back\"\n    }\n  ]\n}"
+              "raw": "{\n  \"name\": \"Postman Updated Branch\",\n  \"address\": \"456 Updated Street\",\n  \"contactDetails\": \"updated-manager@example.com\",\n  \"cameras\": [\n    {\n      \"cameraId\": \"{{cameraId}}\",\n      \"name\": \"Front Camera Updated\",\n      \"rtspUrl\": \"rtsp://camera.local/front-updated\",\n      \"cameraKey\": \"{{cameraKey}}\"\n    },\n    {\n      \"cameraId\": null,\n      \"name\": \"Rear Camera\",\n      \"rtspUrl\": \"rtsp://camera.local/rear\",\n      \"cameraKey\": \"rear-entrance\"\n    }\n  ]\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/branches/{{branchId}}",
@@ -308,7 +285,7 @@
                 "{{branchId}}"
               ]
             },
-            "description": "Updates branch details. Existing cameraId updates a camera; null cameraId creates a new camera."
+            "description": "Updates branch details and reconciles its cameras. An existing `cameraId` updates that camera in place (its `cameraKey` must match what's stored — keys are immutable); a null `cameraId` adds a new camera and requires a fresh `cameraKey`. At least one camera must remain."
           },
           "event": [
             {
@@ -323,25 +300,40 @@
               }
             }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "name": "Devices (Admin)",
+      "item": [
         {
-          "name": "DELETE Branch",
+          "name": "PUT Set Device Network Configuration",
           "request": {
-            "method": "DELETE",
-            "header": [],
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jetsonHost\": \"{{jetsonHost}}\",\n  \"rtspOutputPort\": {{rtspOutputPort}}\n}"
+            },
             "url": {
-              "raw": "{{baseUrl}}/api/v1/branches/{{branchId}}",
+              "raw": "{{baseUrl}}/api/v1/devices/{{branchId}}/network",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "branches",
-                "{{branchId}}"
+                "devices",
+                "{{branchId}}",
+                "network"
               ]
             },
-            "description": "Deletes a branch and its dependent records. Run this last if you want to clean up the test branch."
+            "description": "Sets (or clears, by sending `jetsonHost: null`) the branch's device's reachable network address — the host + RTSP output port its annotated camera streams are published on. Keyed by branchId, so it works even before the device has activated. Does not touch DeviceId, credentials, or activation status."
           },
           "event": [
             {
@@ -349,19 +341,14 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Delete branch returns 200 or 404', function () {",
-                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "pm.test('Set network configuration returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
                   "});"
                 ]
               }
             }
           ]
-        }
-      ]
-    },
-    {
-      "name": "Devices",
-      "item": [
+        },
         {
           "name": "POST Regenerate Activation Key",
           "request": {
@@ -381,7 +368,7 @@
                 "regenerate"
               ]
             },
-            "description": "Regenerates the activation key for a branch's device. The route variable is the branchId."
+            "description": "Invalidates the branch's current activation key and issues a new one. The route variable is the branchId, not a device id (a device may not have activated yet). Saves the new activationKey — the Activate Device request below uses this fresh key."
           },
           "event": [
             {
@@ -395,42 +382,12 @@
                   "",
                   "const body = pm.response.json();",
                   "const key = body.data && body.data.activationKey;",
+                  "pm.test('Response carries a new activation key', function () {",
+                  "  pm.expect(key).to.be.a('string').and.not.empty;",
+                  "});",
                   "if (key) {",
                   "  pm.environment.set('activationKey', key);",
                   "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "GET Device By DeviceId",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/devices/{{deviceId}}",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "devices",
-                "{{deviceId}}"
-              ]
-            },
-            "description": "Returns an activated device by its external DeviceId. Run Activate first so deviceId is known."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Get device returns 200', function () {",
-                  "  pm.response.to.have.status(200);",
-                  "});"
                 ]
               }
             }
@@ -439,7 +396,7 @@
       ]
     },
     {
-      "name": "Activation",
+      "name": "Device Activation (Device credentials)",
       "item": [
         {
           "name": "POST Activate Device",
@@ -469,7 +426,7 @@
                 "activate"
               ]
             },
-            "description": "Device/agent activation endpoint. Uses activationKey instead of admin JWT. Saves deviceId and sharedSecret."
+            "description": "The endpoint a Jetson Agent calls to exchange an Activation Key for its permanent DeviceId and shared secret. Exempt from Admin JWT auth — the key itself is the credential. Saves deviceId, sharedSecret, and branchId. sharedSecret is disclosed here only, exactly once."
           },
           "event": [
             {
@@ -488,6 +445,586 @@
                   "  if (data.sharedSecret) pm.environment.set('sharedSecret', data.sharedSecret);",
                   "  if (data.branchId) pm.environment.set('branchId', data.branchId);",
                   "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Validate Device Credentials",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "X-Device-Secret",
+                "value": "{{sharedSecret}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/device/credentials/validate",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "device",
+                "credentials",
+                "validate"
+              ]
+            },
+            "description": "The endpoint a running Agent calls to confirm its stored credentials are still valid (e.g. have not been revoked by an activation-key regeneration). Detect-only: no body, no request payload, and the success response carries no data — just `{success: true}`. A revoked/wrong credential returns a uniform 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Validate credentials returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Device Configuration",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "X-Device-Secret",
+                "value": "{{sharedSecret}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/device/configuration",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "device",
+                "configuration"
+              ]
+            },
+            "description": "The Agent's authoritative source of its DeepStream pipeline input: the cameras assigned to the authenticated device's branch, each with its stream URL, camera key, and output path. Device-authenticated with the same headers as every other Agent-facing endpoint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get device configuration returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Device By DeviceId (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/devices/{{deviceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "devices",
+                "{{deviceId}}"
+              ]
+            },
+            "description": "Admin-JWT read of an already-activated device by its external DeviceId. Run Activate Device above first so deviceId is known."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get device returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Detection Sync (Device credentials)",
+      "item": [
+        {
+          "name": "POST Sync Events",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "X-Device-Secret",
+                "value": "{{sharedSecret}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"events\": [\n    {\n      \"eventId\": \"{{$guid}}\",\n      \"cameraId\": \"{{cameraId}}\",\n      \"detectedAtUtc\": \"{{$isoTimestamp}}\",\n      \"createdAtUtc\": \"{{$isoTimestamp}}\",\n      \"classId\": 0,\n      \"className\": \"gun\",\n      \"confidence\": 0.87,\n      \"sourceId\": 0,\n      \"frameNumber\": 1234,\n      \"frameWidth\": 1280,\n      \"frameHeight\": 720,\n      \"boundingBox\": {\n        \"left\": 100,\n        \"top\": 80,\n        \"width\": 220,\n        \"height\": 260\n      }\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sync/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "sync",
+                "events"
+              ]
+            },
+            "description": "The endpoint the Agent's sync worker calls to hand off its local SQLite outbox of detection events. `cameraId` is the Backend's real Camera GUID (from Branches > Create Branch). One result per submitted event: `accepted`, `duplicate`, `rejected`, or `quota_exceeded` — an `accepted`/`duplicate` result carries the created/existing `alertId`. Up to 100 events per batch. Saves eventId and, if accepted, alertId."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Sync events returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const results = body.data && body.data.results;",
+                  "pm.test('Response contains one result per submitted event', function () {",
+                  "  pm.expect(results).to.be.an('array').with.lengthOf(1);",
+                  "});",
+                  "",
+                  "if (results && results.length > 0) {",
+                  "  const result = results[0];",
+                  "  pm.environment.set('eventId', result.eventId);",
+                  "  if (result.alertId) {",
+                  "    pm.environment.set('alertId', result.alertId);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Upload Alert Snapshot",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-Id",
+                "value": "{{deviceId}}"
+              },
+              {
+                "key": "X-Device-Secret",
+                "value": "{{sharedSecret}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a real JPEG file here in Postman before sending — the server rejects a non-image payload as MALFORMED_IMAGE."
+                },
+                {
+                  "key": "eventId",
+                  "value": "{{eventId}}",
+                  "type": "text"
+                },
+                {
+                  "key": "sha256",
+                  "value": "",
+                  "type": "text",
+                  "description": "Optional early-reject sanity check only; the server recomputes the SHA-256 itself, so this can be left blank."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}/snapshot",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}",
+                "snapshot"
+              ]
+            },
+            "description": "The endpoint the Agent's snapshot worker calls to hand off one evidence JPEG per accepted detection event, matched to the Alert created by Sync Events. Needs alertId (from a prior 'accepted' or 'duplicate' Sync Events result) and eventId. Requires a real image file attached in the `file` form field."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Upload snapshot returns 200 or 201', function () {",
+                  "  pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Alerts (Admin)",
+      "item": [
+        {
+          "name": "GET List Alerts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?page=1&pageSize=20&sortBy=detectedAtUtc&sortDescending=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "20" },
+                { "key": "sortBy", "value": "detectedAtUtc" },
+                { "key": "sortDescending", "value": "true" },
+                { "key": "branchId", "value": "{{branchId}}", "disabled": true },
+                { "key": "cameraId", "value": "{{cameraId}}", "disabled": true },
+                { "key": "className", "value": "gun", "disabled": true },
+                { "key": "status", "value": "New", "disabled": true },
+                { "key": "snapshotAvailable", "value": "true", "disabled": true },
+                { "key": "fromUtc", "value": "2026-01-01T00:00:00Z", "disabled": true },
+                { "key": "toUtc", "value": "2026-12-31T23:59:59Z", "disabled": true }
+              ]
+            },
+            "description": "Paginated Alert list. All the optional filters (branchId, cameraId, className: gun|knife, status, snapshotAvailable, fromUtc/toUtc) are included but disabled — enable the ones you want to test. sortBy accepts detectedAtUtc or receivedAtUtc."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('List alerts returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const items = body.data && body.data.items;",
+                  "if (items && items.length > 0 && !pm.environment.get('alertId')) {",
+                  "  pm.environment.set('alertId', items[0].alertId);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Alert By Id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Full detail for one Alert, including delivery latency (receivedAtUtc - detectedAtUtc) and whether a snapshot is available."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get alert returns 200 or 404', function () {",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Alert Snapshot",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}/snapshot",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}",
+                "snapshot"
+              ]
+            },
+            "description": "Returns the raw JPEG bytes for the alert's evidence snapshot (Postman's Preview tab renders the image). 404 if no snapshot was ever uploaded for this alert — run Detection Sync > Upload Alert Snapshot first to have one available."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get snapshot returns 200 or 404', function () {",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Dashboard (Admin)",
+      "item": [
+        {
+          "name": "GET Dashboard Summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/dashboard/summary?branchId={{branchId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "dashboard",
+                "summary"
+              ],
+              "query": [
+                { "key": "branchId", "value": "{{branchId}}" }
+              ]
+            },
+            "description": "The bounded Admin Dashboard summary for one branch: today's alert count vs configured daily quota, suppressed-detection counts, and device/camera counts. branchId is required — this endpoint never picks an implicit branch."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Dashboard summary returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Live Monitoring (Admin)",
+      "item": [
+        {
+          "name": "GET List Cameras For Live Monitoring",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/branches/{{branchId}}/live-monitoring/cameras",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "branches",
+                "{{branchId}}",
+                "live-monitoring",
+                "cameras"
+              ]
+            },
+            "description": "Lists the branch's cameras with whether each currently supports Live Monitoring (raw stream) and/or Live Inference (annotated stream with detections drawn on)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('List cameras returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create Live Stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"branchId\": \"{{branchId}}\",\n  \"cameraId\": \"{{cameraId}}\",\n  \"mode\": \"monitoring\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/live-streams",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "live-streams"
+              ]
+            },
+            "description": "Requests a playback session for one camera. `mode` is `monitoring` (raw feed) or `inference` (annotated/detections feed). Requires the branch's device to have a configured JetsonHost (Devices > Set Device Network Configuration) and MediaMTX/the media gateway to be reachable — without a real Jetson+MediaMTX running, this legitimately returns 502 GATEWAY_UNAVAILABLE or 422 DEVICE_UNAVAILABLE rather than a playback URL."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create live stream returns a recognised status', function () {",
+                  "  pm.expect([200, 404, 422, 502]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Cleanup",
+      "item": [
+        {
+          "name": "DELETE Branch",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/branches/{{branchId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "branches",
+                "{{branchId}}"
+              ]
+            },
+            "description": "Deletes the test branch and all its dependent records (cameras, device, activation keys, alerts). Run this after you're done exercising the collection."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Delete branch returns 200 or 404', function () {",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Revokes the current admin session token. Run Auth > POST Login again before reusing any Admin-JWT request after this."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Logout returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
                 ]
               }
             }
