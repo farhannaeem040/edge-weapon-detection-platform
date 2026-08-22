@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from deepstream_bridge.probe import (
     RawDetection,
+    apply_display_text,
     extract_detections,
+    format_confidence_display_text,
     frame_number_from_buffer,
     handle_buffer,
 )
@@ -357,3 +359,51 @@ def test_frame_number_from_buffer_empty_frame_list_returns_none() -> None:
     pyds_module = FakePydsModule(batch_meta_by_buffer={hash("buf"): batch})
 
     assert frame_number_from_buffer(pyds_module, "buf") is None
+
+
+def test_format_confidence_display_text_renders_label_and_rounded_percentage() -> None:
+    assert format_confidence_display_text("Gun", 0.914) == "Gun 91%"
+    assert format_confidence_display_text("Knife", 0.5) == "Knife 50%"
+
+
+def test_apply_display_text_overwrites_default_label_and_tracking_id() -> None:
+    obj = FakeObjectMeta(
+        class_id=0, confidence=0.914, rect_params=FakeRectParams(0, 0, 1, 1), obj_label="Gun"
+    )
+    obj.text_params.display_text = "Gun 5"  # nvinfer/nvtracker's default label+tracking-id text
+    frame = FakeFrameMeta(
+        source_id=0, frame_num=1, source_frame_width=640, source_frame_height=640, objects=[obj]
+    )
+    batch = FakeBatchMeta(frames=[frame])
+    pyds_module = FakePydsModule(batch_meta_by_buffer={hash("buf"): batch})
+
+    apply_display_text(pyds_module, "buf")
+
+    assert obj.text_params.display_text == "Gun 91%"
+
+
+def test_apply_display_text_multiple_objects() -> None:
+    gun = FakeObjectMeta(0, 0.8, FakeRectParams(0, 0, 1, 1), obj_label="Gun")
+    knife = FakeObjectMeta(1, 0.62, FakeRectParams(0, 0, 1, 1), obj_label="Knife")
+    frame = FakeFrameMeta(
+        source_id=0,
+        frame_num=1,
+        source_frame_width=640,
+        source_frame_height=640,
+        objects=[gun, knife],
+    )
+    batch = FakeBatchMeta(frames=[frame])
+    pyds_module = FakePydsModule(batch_meta_by_buffer={hash("buf"): batch})
+
+    apply_display_text(pyds_module, "buf")
+
+    assert gun.text_params.display_text == "Gun 80%"
+    assert knife.text_params.display_text == "Knife 62%"
+
+
+def test_apply_display_text_missing_batch_meta_is_a_noop() -> None:
+    apply_display_text(FakePydsModule(), "buf")  # must not raise
+
+
+def test_apply_display_text_none_buffer_is_a_noop() -> None:
+    apply_display_text(FakePydsModule(), None)  # must not raise

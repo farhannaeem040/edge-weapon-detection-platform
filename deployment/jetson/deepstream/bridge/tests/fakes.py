@@ -21,10 +21,17 @@ class FakeRectParams:
 
 
 @dataclass
+class FakeTextParams:
+    display_text: str = ""
+
+
+@dataclass
 class FakeObjectMeta:
     class_id: int
     confidence: float
     rect_params: FakeRectParams
+    obj_label: str = ""
+    text_params: FakeTextParams = field(default_factory=FakeTextParams)
 
 
 @dataclass

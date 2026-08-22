@@ -80,7 +80,10 @@ ll-lib-file=/opt/nvidia/deepstream/deepstream-6.2/lib/libnvds_nvmultiobjecttrack
 ll-config-file=/opt/nvidia/deepstream/deepstream-6.2/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
 gpu-id=0
 enable-batch-process=1
-display-tracking-id=1
+# Overlay text now shows detection confidence instead (probe.py:apply_confidence_display_text,
+# pipeline.py's nvdsosd sink-pad probe) — the numeric tracking ID has no operational meaning to a
+# viewer, so it is no longer rendered.
+display-tracking-id=0
 
 [bridge-snapshot]
 # FS-08/IP-10: controls whether the Bridge builds its per-Camera post-OSD JPEG capture branch at
