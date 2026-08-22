@@ -554,6 +554,33 @@ textarea::placeholder {
   background: var(--color-danger-strong);
 }
 
+/* ---------------------------------------------------------------- Print (FS-15 "Generate report")
+ * The shell chrome is navigation, not content: it means nothing on paper and would otherwise consume
+ * a 260px column on every printed page. Scoped to @media print, so nothing here affects the screen
+ * rendering of any existing view. */
+@media print {
+  .shell__sidebar,
+  .shell__header,
+  .shell__scrim {
+    display: none !important;
+  }
+
+  .shell {
+    display: block;
+    min-height: 0;
+    background: #fff;
+  }
+
+  .shell__content {
+    max-width: none;
+    padding: 0;
+  }
+
+  .card {
+    box-shadow: none;
+  }
+}
+
 /* Visually hidden but available to assistive technology. */
 .visually-hidden {
   position: absolute;

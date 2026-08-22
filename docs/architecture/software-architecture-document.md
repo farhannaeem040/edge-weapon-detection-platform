@@ -521,6 +521,8 @@ Uploaded snapshot images are stored on the Server Host filesystem under an appli
 | `PATCH /api/v1/alerts/{id}/status` | Dashboard | JWT |
 | `GET /api/v1/alerts/{id}/snapshot` | Dashboard | JWT — binary response |
 | `GET /api/v1/devices/{id}/health`, `/history` | Dashboard | JWT |
+| `GET /api/v1/analytics/operational` | Dashboard | JWT — read-only Operational Analytics aggregation (FS-15/IP-17). Query: `range` (`last24h`\|`last7d`\|`last30d`\|`last90d`, default `last30d`) **or** `fromUtc`+`toUtc`; `branchId` (GUID, never a Branch name); `detectionType` (`gun`\|`knife`). Returns `filters` + `summary` + `detectionsOverTime` + `detectionsByBranch` + `latencyOverTime`. Never writes; adds no schema |
+| `GET /api/v1/analytics/operational/export` | Dashboard | JWT — CSV of the same filtered Alerts (FS-15 §6.2). `text/csv`, `Content-Disposition: attachment`. Carries no RTSP URL, CameraKey, snapshot reference, filesystem path, or secret; bounded at 50,000 rows (over-limit is a `400`, never a truncated file) |
 | `GET /api/v1/reports` (filterable) | Dashboard | JWT |
 | `PUT /api/v1/devices/{id}/config` | Dashboard | JWT |
 | `POST /api/v1/stream/authorize` | Dashboard | JWT — issues stream token |

@@ -2,6 +2,7 @@ import { Routes } from '@angular/router';
 
 import { AlertDetailComponent } from './alerts/alert-detail';
 import { AlertListComponent } from './alerts/alert-list';
+import { OperationalAnalyticsComponent } from './analytics/operational-analytics';
 import { BranchCreateComponent } from './branches/branch-create';
 import { BranchDetailComponent } from './branches/branch-detail';
 import { BranchEditComponent } from './branches/branch-edit';
@@ -40,6 +41,9 @@ export const routes: Routes = [
       // FS-14 §5, IP-16 UI enhancement: a global entry point into the same live-monitoring
       // feature already reachable per-Branch (see BranchDetailComponent's own tab below).
       { path: 'monitoring', component: GlobalMonitoringComponent },
+      // FS-15 §7, IP-17 T-16: the Admin-only Operational Analytics view. A shell child like every
+      // other protected area, so it inherits the same `authGuard` and the same chrome.
+      { path: 'analytics', component: OperationalAnalyticsComponent },
       // Declared before `alerts/:alertId`: an Alert id is a GUID and would never literally be "new"
       // or another Alert route segment, but the ordering convention is kept consistent with `branches`
       // regardless, since this feature adds no other literal segment under `alerts/`.

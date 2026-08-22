@@ -15,13 +15,13 @@ const LOGOUT_URL = `${environment.apiBaseUrl}/auth/logout`;
 /**
  * Features with no implemented route: they must never appear as navigation (SCREEN-INVENTORY.md).
  * Dashboard, Alerts, and Monitoring graduated to real navigation items with FS-10/IP-12 and
- * FS-14/IP-16 respectively, and are asserted separately below, not here.
+ * FS-14/IP-16 respectively, and Analytics with FS-15/IP-17; all are asserted separately below, not
+ * here.
  */
 const DEFERRED_NAV_LABELS = [
   'Incidents',
   'Cameras',
   'Edge devices',
-  'Analytics',
   'System health',
   'Users and access',
   'Settings',
@@ -65,18 +65,33 @@ describe('ShellComponent', () => {
     expect(element().textContent).toContain('LJMU AI');
   });
 
-  it('links to the dashboard, alerts, monitoring, and branch list from the sidebar', () => {
+  it('links to the dashboard, alerts, monitoring, analytics, and branch list from the sidebar', () => {
     const links = Array.from(
       element().querySelectorAll('.shell__nav-link'),
     ) as HTMLAnchorElement[];
     const hrefs = links.map((link) => link.getAttribute('href'));
     const texts = links.map((link) => link.textContent ?? '');
 
-    expect(hrefs).toEqual(['/dashboard', '/alerts', '/monitoring', '/branches']);
+    // FS-15 §7: Analytics sits between Monitoring and Branches, keeping the operational views
+    // (Dashboard → Alerts → Monitoring → Analytics) ahead of the configuration view (Branches).
+    expect(hrefs).toEqual(['/dashboard', '/alerts', '/monitoring', '/analytics', '/branches']);
     expect(texts.some((text) => text.includes('Dashboard'))).toBeTrue();
     expect(texts.some((text) => text.includes('Alerts'))).toBeTrue();
     expect(texts.some((text) => text.includes('Monitoring'))).toBeTrue();
+    expect(texts.some((text) => text.includes('Analytics'))).toBeTrue();
     expect(texts.some((text) => text.includes('Branches'))).toBeTrue();
+  });
+
+  it('gives the Analytics link the same icon, active-state and hover conventions as its siblings', () => {
+    const link = Array.from(element().querySelectorAll('.shell__nav-link')).find((el) =>
+      el.textContent?.includes('Analytics'),
+    ) as HTMLAnchorElement;
+
+    expect(link).toBeTruthy();
+    // Same inline-SVG icon system as every other nav item — no icon font is introduced (FS-15 §7).
+    expect(link.querySelector('svg.shell__nav-icon')).not.toBeNull();
+    expect(link.getAttribute('href')).toBe('/analytics');
+    expect(link.classList.contains('shell__nav-link--active')).toBeFalse();
   });
 
   it('renders no navigation for deferred, unimplemented features', () => {
@@ -86,8 +101,8 @@ describe('ShellComponent', () => {
     }
   });
 
-  it('exposes exactly four primary navigation links', () => {
-    expect(element().querySelectorAll('.shell__nav-link').length).toBe(4);
+  it('exposes exactly five primary navigation links', () => {
+    expect(element().querySelectorAll('.shell__nav-link').length).toBe(5);
   });
 
   it('marks the Monitoring link active on the monitoring route, mirroring the other links', () => {
