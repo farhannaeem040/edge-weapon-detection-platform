@@ -105,6 +105,12 @@ public static class DependencyInjection
         // Depends on the (scoped) DbContext for its AsNoTracking reads, so it is scoped.
         services.AddScoped<IAlertQueryService, AlertQueryService>();
 
+        // Read-only Operational Analytics aggregations for GET /api/v1/analytics/operational and its
+        // CSV export (FS-15 §5, IP-17 T-7). Depends on the (scoped) DbContext for its AsNoTracking
+        // aggregations and the (already-registered) TimeProvider for GeneratedAtUtc, so it is scoped —
+        // the same rationale as IDashboardSummaryService immediately below.
+        services.AddScoped<IOperationalAnalyticsService, OperationalAnalyticsService>();
+
         // The bounded Admin Dashboard summary (FS-10 §6, IP-12 T-197). Depends on the (scoped)
         // DbContext, the (already-registered) TimeProvider, and the (already-registered)
         // AlertQuotaOptions, so it is scoped.

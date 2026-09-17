@@ -735,17 +735,57 @@
                 "alerts"
               ],
               "query": [
-                { "key": "page", "value": "1" },
-                { "key": "pageSize", "value": "20" },
-                { "key": "sortBy", "value": "detectedAtUtc" },
-                { "key": "sortDescending", "value": "true" },
-                { "key": "branchId", "value": "{{branchId}}", "disabled": true },
-                { "key": "cameraId", "value": "{{cameraId}}", "disabled": true },
-                { "key": "className", "value": "gun", "disabled": true },
-                { "key": "status", "value": "New", "disabled": true },
-                { "key": "snapshotAvailable", "value": "true", "disabled": true },
-                { "key": "fromUtc", "value": "2026-01-01T00:00:00Z", "disabled": true },
-                { "key": "toUtc", "value": "2026-12-31T23:59:59Z", "disabled": true }
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "detectedAtUtc"
+                },
+                {
+                  "key": "sortDescending",
+                  "value": "true"
+                },
+                {
+                  "key": "branchId",
+                  "value": "{{branchId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "cameraId",
+                  "value": "{{cameraId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "className",
+                  "value": "gun",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "New",
+                  "disabled": true
+                },
+                {
+                  "key": "snapshotAvailable",
+                  "value": "true",
+                  "disabled": true
+                },
+                {
+                  "key": "fromUtc",
+                  "value": "2026-01-01T00:00:00Z",
+                  "disabled": true
+                },
+                {
+                  "key": "toUtc",
+                  "value": "2026-12-31T23:59:59Z",
+                  "disabled": true
+                }
               ]
             },
             "description": "Paginated Alert list. All the optional filters (branchId, cameraId, className: gun|knife, status, snapshotAvailable, fromUtc/toUtc) are included but disabled — enable the ones you want to test. sortBy accepts detectedAtUtc or receivedAtUtc."
@@ -859,7 +899,10 @@
                 "summary"
               ],
               "query": [
-                { "key": "branchId", "value": "{{branchId}}" }
+                {
+                  "key": "branchId",
+                  "value": "{{branchId}}"
+                }
               ]
             },
             "description": "The bounded Admin Dashboard summary for one branch: today's alert count vs configured daily quota, suppressed-detection counts, and device/camera counts. branchId is required — this endpoint never picks an implicit branch."
@@ -872,6 +915,202 @@
                 "exec": [
                   "pm.test('Dashboard summary returns 200', function () {",
                   "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Analytics (Admin)",
+      "item": [
+        {
+          "name": "GET Operational Analytics (defaults)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analytics/operational",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analytics",
+                "operational"
+              ],
+              "query": []
+            },
+            "description": "FS-15/IP-17. The read-only Operational Analytics aggregation. With no query parameters it defaults to the last 30 days, all Branches, all detection types, bucketed daily in UTC. Every value is derived from the Alerts already persisted by FS-06 sync; nothing is seeded. Note there is deliberately no accuracy/precision/false-positive field: AlertStatus has a single member, so the database holds no human-validated ground truth (summary.validationDataAvailable is always false)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Operational analytics returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Defaults to a 30-day daily-bucketed window', function () {",
+                  "  const data = pm.response.json().data;",
+                  "  pm.expect(data.filters.range).to.eql('last30d');",
+                  "  pm.expect(data.filters.bucket).to.eql('day');",
+                  "});",
+                  "pm.test('Never claims validation ground truth exists', function () {",
+                  "  const summary = pm.response.json().data.summary;",
+                  "  pm.expect(summary.validationDataAvailable).to.eql(false);",
+                  "  pm.expect(JSON.stringify(summary)).to.not.match(/accuracy|precision|falsePositive/i);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Operational Analytics (Branch + detection type)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analytics/operational?range=last7d&branchId={{branchId}}&detectionType=gun",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analytics",
+                "operational"
+              ],
+              "query": [
+                {
+                  "key": "range",
+                  "value": "last7d"
+                },
+                {
+                  "key": "branchId",
+                  "value": "{{branchId}}"
+                },
+                {
+                  "key": "detectionType",
+                  "value": "gun"
+                }
+              ]
+            },
+            "description": "The same endpoint with all three filters applied. A Branch is always identified by its BranchId GUID, never by its display name. detectionType accepts only the platform's real taxonomy (gun, knife) — anything else is a 400."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Filtered analytics returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Echoes the filters that were applied', function () {",
+                  "  const filters = pm.response.json().data.filters;",
+                  "  pm.expect(filters.range).to.eql('last7d');",
+                  "  pm.expect(filters.detectionType).to.eql('gun');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Operational Analytics (invalid detection type -> 400)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analytics/operational?detectionType=intrusion",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analytics",
+                "operational"
+              ],
+              "query": [
+                {
+                  "key": "detectionType",
+                  "value": "intrusion"
+                }
+              ]
+            },
+            "description": "A class outside the platform's taxonomy is rejected rather than silently ignored."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Unknown detection type is rejected', function () {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().errorCode).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Operational Analytics CSV Export",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analytics/operational/export?range=last7d&branchId={{branchId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analytics",
+                "operational",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "range",
+                  "value": "last7d"
+                },
+                {
+                  "key": "branchId",
+                  "value": "{{branchId}}"
+                }
+              ]
+            },
+            "description": "FS-15 §6.2. Row-level CSV for exactly the filters supplied, generated entirely by the Backend. Columns: Detected At (UTC), Received At (UTC), Delivery Latency (ms), Branch, Camera, Detection Type, Confidence, Status, Snapshot Available. It carries no RTSP URL, CameraKey, snapshot reference, filesystem path, or secret of any kind."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('CSV export returns 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Is a CSV attachment with the documented filename', function () {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv');",
+                  "  pm.expect(pm.response.headers.get('Content-Disposition'))",
+                  "    .to.include('operational-analytics-');",
+                  "});",
+                  "pm.test('Leaks no RTSP URL, credential, or internal path', function () {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.not.match(/rtsp:\\/\\//i);",
+                  "  pm.expect(body).to.not.match(/\\/var\\/lib/i);",
+                  "  pm.expect(body).to.not.match(/secret|activationKey/i);",
                   "});"
                 ]
               }

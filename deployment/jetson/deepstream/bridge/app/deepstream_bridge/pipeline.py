@@ -43,7 +43,7 @@ from deepstream_bridge.errors import (
     PipelineElementCreationError,
     PipelineLinkError,
 )
-from deepstream_bridge.probe import frame_number_from_buffer, handle_buffer
+from deepstream_bridge.probe import apply_display_text, frame_number_from_buffer, handle_buffer
 from deepstream_bridge.snapshot import SendSnapshot, SnapshotRendezvous
 
 _LOGGER = logging.getLogger("deepstream_bridge.pipeline")
@@ -627,6 +627,12 @@ class BridgePipeline:
             if self._snapshot_rendezvous is not None
             else None
         )
+        # Overwrite nvinfer/nvtracker's default on-screen text (label + numeric tracking ID, e.g.
+        # "Gun 5") with a score-based label (see probe.py) before nvdsosd renders this same buffer —
+        # this probe sits on nvdsosd's own sink pad, so the mutation always lands in time. The
+        # formatting itself lives in probe.py, never here — this module stays free of any
+        # detection-scoring logic by design.
+        apply_display_text(self._pyds, info.get_buffer())
         handle_buffer(self._pyds, info.get_buffer(), self._enqueue, on_candidate)
         return self._Gst.PadProbeReturn.OK
 

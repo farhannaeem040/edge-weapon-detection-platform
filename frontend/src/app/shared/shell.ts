@@ -7,6 +7,7 @@ import { AuthService } from '../auth/auth.service';
 import { LOGIN_ROUTE } from '../auth/auth.routes';
 import { BRANCHES_ROUTE } from '../branches/branch.routes';
 import { ALERTS_ROUTE } from '../alerts/alert.routes';
+import { ANALYTICS_ROUTE } from '../analytics/analytics.routes';
 import { DASHBOARD_ROUTE } from '../dashboard/dashboard.routes';
 import { MONITORING_ROUTE } from '../monitoring/monitoring.routes';
 
@@ -18,12 +19,13 @@ import { MONITORING_ROUTE } from '../monitoring/monitoring.routes';
  * via a parent route in `app.routes.ts`, so every authenticated view shares one frame without each
  * view re-declaring it.
  *
- * **Navigation shows only implemented features.** Dashboard, Alerts, Monitoring, and Branches are the
- * four protected areas that exist (FS-10 graduates Dashboard and Alerts from placeholders to real,
- * Backend-backed features; FS-14/IP-16 adds Monitoring as a global entry point into the live-viewing
- * feature already reachable per-Branch). The Stitch sidebar's other entries (Incidents, Cameras, Edge
- * devices, Analytics, System health, Users and access, Settings) back no implemented feature and are
- * deliberately absent; no dead links, no "coming soon" stubs (SCREEN-INVENTORY.md). A separate Devices
+ * **Navigation shows only implemented features.** Dashboard, Alerts, Monitoring, Analytics, and
+ * Branches are the five protected areas that exist (FS-10 graduates Dashboard and Alerts from
+ * placeholders to real, Backend-backed features; FS-14/IP-16 adds Monitoring as a global entry point
+ * into the live-viewing feature already reachable per-Branch; FS-15/IP-17 adds Analytics, backed by a
+ * real aggregation endpoint over the Alerts already persisted). The Stitch sidebar's other entries
+ * (Incidents, Cameras, Edge devices, System health, Users and access, Settings) back no implemented
+ * feature and are deliberately absent; no dead links, no "coming soon" stubs. A separate Devices
  * nav item is also deliberately absent: device/camera counts already surface on the dashboard summary,
  * and full device detail already lives under each Branch's own detail page — a redundant fleet-list
  * page would be exactly the kind of decorative nav item this platform avoids (FS-10 §3).
@@ -151,6 +153,32 @@ import { MONITORING_ROUTE } from '../monitoring/monitoring.routes';
               />
             </svg>
             <span>Monitoring</span>
+          </a>
+
+          <a
+            class="shell__nav-link"
+            [routerLink]="analyticsRoute"
+            routerLinkActive="shell__nav-link--active"
+            (click)="closeNav()"
+          >
+            <svg
+              class="shell__nav-icon"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 4v15a1 1 0 0 0 1 1h15 M8 16v-4 M12 16V8 M16 16v-6 M20 16v-9"
+              />
+            </svg>
+            <span>Analytics</span>
           </a>
 
           <a
@@ -434,6 +462,7 @@ export class ShellComponent {
   protected readonly dashboardRoute = DASHBOARD_ROUTE;
   protected readonly alertsRoute = ALERTS_ROUTE;
   protected readonly monitoringRoute = MONITORING_ROUTE;
+  protected readonly analyticsRoute = ANALYTICS_ROUTE;
   protected readonly branchesRoute = BRANCHES_ROUTE;
   protected readonly loggingOut = signal(false);
 
@@ -454,6 +483,9 @@ export class ShellComponent {
     }
     if (url.startsWith(this.monitoringRoute)) {
       return 'Monitoring';
+    }
+    if (url.startsWith(this.analyticsRoute)) {
+      return 'Operational analytics';
     }
     if (url.startsWith(this.branchesRoute)) {
       return 'Branch management';

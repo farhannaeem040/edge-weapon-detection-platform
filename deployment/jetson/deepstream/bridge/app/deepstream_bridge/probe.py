@@ -205,6 +205,63 @@ def handle_buffer(
         enqueue(detection.to_wire_message())
 
 
+def format_confidence_display_text(label: str, confidence: float) -> str:
+    """``"<label> <confidence%>"`` (e.g. ``"Gun 91%"``) — the on-screen text this Bridge writes onto
+    ``NvDsObjectMeta.text_params.display_text``, replacing DeepStream's own default text (the class
+    label followed by nvtracker's numeric tracking ID, e.g. ``"Gun 5"``, whenever
+    ``[tracker] display-tracking-id=1``). The tracking ID is an internal per-track counter with no
+    operational meaning to a viewer; the detection confidence is the number an operator actually
+    wants to see overlaid on a weapon detection.
+    """
+    return f"{label} {confidence * 100:.0f}%"
+
+
+def apply_display_text(pyds_module: Any, gst_buffer: Any) -> None:
+    """Overwrite every detected object's on-screen label with
+    :func:`format_confidence_display_text`, mutating ``NvDsObjectMeta.text_params.display_text`` in
+    place so ``nvdsosd`` (downstream on the same buffer) renders the confidence score instead of
+    whatever text ``nvinfer``/``nvtracker`` attached by default.
+
+    A no-op if ``gst_buffer`` is falsy/``None`` or no batch meta is attached — same contract as
+    :func:`handle_buffer`, and deliberately separate from it: this function only mutates render
+    metadata, it never touches ``enqueue``/``on_candidate`` or the wire message.
+    """
+    if not gst_buffer:
+        return
+
+    batch_meta = pyds_module.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    if batch_meta is None:
+        return
+
+    frame_node = batch_meta.frame_meta_list
+    while frame_node is not None:
+        try:
+            frame_meta = pyds_module.NvDsFrameMeta.cast(frame_node.data)
+        except StopIteration:
+            break
+
+        obj_node = frame_meta.obj_meta_list
+        while obj_node is not None:
+            try:
+                obj_meta = pyds_module.NvDsObjectMeta.cast(obj_node.data)
+            except StopIteration:
+                break
+
+            obj_meta.text_params.display_text = format_confidence_display_text(
+                obj_meta.obj_label, float(obj_meta.confidence)
+            )
+
+            try:
+                obj_node = obj_node.next
+            except StopIteration:
+                break
+
+        try:
+            frame_node = frame_node.next
+        except StopIteration:
+            break
+
+
 def frame_number_from_buffer(pyds_module: Any, gst_buffer: Any) -> Optional[int]:
     """Read only the first frame's ``frame_number`` from ``gst_buffer``'s batch meta, if present.
 
